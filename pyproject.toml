@@ -1,7 +1,7 @@
 [project]
 name = "doc-checker"
 version = "0.1.0"
-description = "Check documentation format"
+description = "Compare and audit PDF and HTML documentation"
 authors = [
     { name = "Christophe Le Douarec", email = "ledouarec@gmail.com" },
 ]
@@ -13,7 +13,9 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Operating System :: OS Independent",
 ]
-dependencies = []
+dependencies = [
+    "click>=8.5",
+]
 
 [project.scripts]
 doc-checker = "doc_checker.cli:main"
@@ -72,4 +74,4 @@ ignore = []
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["INP001", "S101"]
+"tests/*" = ["INP001", "S101", "PLR2004"]
