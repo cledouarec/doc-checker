@@ -2,6 +2,7 @@
 """Tests for the document, finding and rule models."""
 
 from collections import Counter
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -58,6 +59,40 @@ def test_source_href() -> None:
     assert SourceRef("a.html").href == "a.html"
 
 
+def test_source_fragment_and_pdf_href() -> None:
+    """A page gives the fragment of a PDF link, an anchor takes its place."""
+    assert SourceRef("doc.pdf", page=3).fragment == "page=3"
+    assert SourceRef("doc.pdf", page=3).href == "doc.pdf#page=3"
+    assert SourceRef("a.html", page=3, anchor="x").href == "a.html#x"
+    assert SourceRef("a.html").fragment is None
+
+
+def test_source_fragment_prefers_the_anchor() -> None:
+    """The fragment is the anchor when there is both an anchor and a page."""
+    assert SourceRef("a.html", page=3, anchor="x").fragment == "x"
+
+
+def test_source_empty_anchor_falls_back_to_the_page() -> None:
+    """An empty anchor is no anchor: the page tells where the block is."""
+    assert SourceRef("doc.pdf", page=3, anchor="").href == "doc.pdf#page=3"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        SourceRef("a.html"),
+        SourceRef("a.html", line=12),
+        SourceRef("a.html", anchor=""),
+    ],
+)
+def test_source_without_anchor_or_page_has_no_fragment(
+    source: SourceRef,
+) -> None:
+    """A line number or an empty anchor does not make a fragment."""
+    assert source.fragment is None
+    assert source.href == "a.html"
+
+
 def test_side_text_joins_segments() -> None:
     """The text of a side is the concatenation of its segments."""
     side = Side(
@@ -74,6 +109,28 @@ def test_finding_id_is_stable_and_short() -> None:
     assert first == finding_id("block.missing", side, None)
     assert len(first) == 12
     assert first != finding_id("block.added", side, None)
+
+
+def test_finding_id_ignores_the_page() -> None:
+    """Finding identifiers do not change when the pagination changes."""
+    segments = (DiffSegment("delete", "x"),)
+    early = Side(SourceRef("doc.pdf", page=3), segments)
+    late = Side(SourceRef("doc.pdf", page=30), segments)
+    early_id = finding_id("block.missing", early, None)
+    late_id = finding_id("block.missing", late, None)
+    assert early_id == late_id
+
+
+def test_document_tagged_defaults_to_none(tmp_path: Path) -> None:
+    """A document does not say whether it is tagged unless it is told so."""
+    assert _document(tmp_path).tagged is None
+
+
+def test_document_tagged_keeps_its_value(tmp_path: Path) -> None:
+    """A PDF that is tagged, or is not, keeps the answer of its catalog."""
+    pdf = replace(_document(tmp_path), format="pdf")
+    assert replace(pdf, tagged=True).tagged is True
+    assert replace(pdf, tagged=False).tagged is False
 
 
 def test_document_resolve(tmp_path: Path) -> None:
