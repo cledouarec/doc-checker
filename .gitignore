@@ -1,0 +1,22 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Distribution
+build/
+dist/
+*.egg-info/
+
+# Test
+.pytest_cache/
+
+# Tooling caches
+.ruff_cache/
+.mise.local.toml
+
+# Editors
+.idea/
+.vscode/

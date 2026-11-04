@@ -1,0 +1,75 @@
+[project]
+name = "doc-checker"
+version = "0.1.0"
+description = "Check documentation format"
+authors = [
+    { name = "Christophe Le Douarec", email = "ledouarec@gmail.com" },
+]
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.scripts]
+doc-checker = "doc_checker.cli:main"
+
+[project.urls]
+Repository = "https://github.com/cledouarec/doc-checker"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5",
+    "pytest>=9.0",
+    "ruff>=0.16",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "doc_checker"
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+version_files = [
+    "src/doc_checker/__init__.py:__version__",
+    "pyproject.toml:^version",
+]
+style = [
+    ["qmark", "fg:#ff9d00 bold"],
+    ["question", "bold"],
+    ["answer", "fg:#ff9d00 bold"],
+    ["pointer", "fg:#ff9d00 bold"],
+    ["highlighted", "fg:#ff9d00 bold"],
+    ["selected", "fg:#cc5454"],
+    ["separator", "fg:#cc5454"],
+    ["instruction", ""],
+    ["text", ""],
+    ["disabled", "fg:#858585 italic"]
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 79
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 79
+
+[tool.ruff.lint]
+preview = true
+select = ["ALL"]
+ignore = []
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["INP001", "S101"]
