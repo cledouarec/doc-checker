@@ -45,9 +45,19 @@ class SourceRef:
     anchor: str | None = None
 
     @property
+    def fragment(self) -> str | None:
+        """Anchor, else ``page=N`` for a paginated format, else ``None``."""
+        if self.anchor:
+            return self.anchor
+        if self.page is not None:
+            return f"page={self.page}"
+        return None
+
+    @property
     def href(self) -> str:
-        """File followed by its anchor, if there is one."""
-        return f"{self.file}#{self.anchor}" if self.anchor else self.file
+        """File followed by its fragment, if there is one."""
+        fragment = self.fragment
+        return f"{self.file}#{fragment}" if fragment else self.file
 
 
 @dataclass(slots=True)
@@ -94,6 +104,8 @@ class Document:
         chrome: Texts removed as repeated page chrome.
         chrome_keys: Strict keys of the blocks removed as page chrome.
         warnings: Non fatal extraction warnings.
+        tagged: Whether a PDF declares a tag structure, from its
+            ``/MarkInfo``; ``None`` for HTML.
     """
 
     path: Path
@@ -107,6 +119,7 @@ class Document:
     chrome: list[str]
     chrome_keys: frozenset[str]
     warnings: list[str]
+    tagged: bool | None = None
 
     def resolve(self, source: SourceRef) -> Path:
         """Return the filesystem path of a source reference.
