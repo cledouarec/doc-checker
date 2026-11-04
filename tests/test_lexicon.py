@@ -1,0 +1,44 @@
+# Copyright 2026 Christophe Le Douarec
+"""Tests for lexicons and language detection."""
+
+from doc_checker.text.lang import detect_language, resolve_language
+from doc_checker.text.lexicon import is_modal, negation_count
+
+FR_SAMPLE = (
+    "Le fichier est dans le dossier de la configuration "
+    "et les options sont pour vous"
+)
+EN_SAMPLE = (
+    "The file is in the folder and the options are for you with this tool"
+)
+
+
+def test_negation_count_fr_en() -> None:
+    """French and English negation markers are counted."""
+    assert negation_count(["Ne", "supprimez", "pas"]) == 2
+    assert negation_count(["do", "not", "delete"]) == 1
+    assert negation_count(["don't"]) == 1
+    assert negation_count(["can\U00002019t"]) == 1
+    assert negation_count(["delete"]) == 0
+
+
+def test_modals() -> None:
+    """Modal verbs are recognized regardless of case."""
+    assert is_modal("Must")
+    assert is_modal("doit")
+    assert not is_modal("restart")
+
+
+def test_detect_language() -> None:
+    """French and English texts are told apart by their stopwords."""
+    assert detect_language(FR_SAMPLE) == "fr"
+    assert detect_language(EN_SAMPLE) == "en"
+    assert detect_language("Hello") is None
+
+
+def test_resolve_language() -> None:
+    """An explicit language wins, then the declared one, then detection."""
+    assert resolve_language("fr", "en-US", "") == "fr"
+    assert resolve_language("auto", "en-US", "") == "en"
+    assert resolve_language("auto", "DE", "") == "de"
+    assert resolve_language("auto", None, FR_SAMPLE) == "fr"
