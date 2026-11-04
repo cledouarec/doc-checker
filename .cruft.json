@@ -1,0 +1,21 @@
+{
+  "template": "https://github.com/cledouarec/template-python",
+  "commit": "6ac9cb58ac71a3e3a10faebaf0b78caf8dc89448",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "Doc Checker",
+      "project_slug": "doc-checker",
+      "package_name": "doc_checker",
+      "project_description": "Check documentation format",
+      "author_name": "Christophe Le Douarec",
+      "author_email": "ledouarec@gmail.com",
+      "github_username": "cledouarec",
+      "python_version": "3.14",
+      "cli": "yes",
+      "_template": "https://github.com/cledouarec/template-python",
+      "_commit": "6ac9cb58ac71a3e3a10faebaf0b78caf8dc89448"
+    }
+  },
+  "directory": null
+}
