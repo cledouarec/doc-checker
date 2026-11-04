@@ -5,13 +5,11 @@ import html
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import Literal
 
-from doc_checker.model.document import Block, BlockKind, SourceRef
+from doc_checker.model.document import Block, BlockKind, Document, SourceRef
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def make_block(
@@ -553,3 +551,38 @@ def add_paragraph(spec: DocSpec, slug: str, text: str) -> DocSpec:
     added = replace(section, paragraphs=(*section.paragraphs, text))
     sections = (*spec.sections[:index], added, *spec.sections[index + 1 :])
     return replace(spec, sections=sections)
+
+
+SPLIT_WHOLE = (
+    "First half of a long paragraph about the installer. "
+    "Second half of the same paragraph about settings."
+)
+SPLIT_PARTS = (
+    "First half of a long paragraph about the installer.",
+    "Second half of the same paragraph about settings.",
+)
+
+PARAGRAPHS = [
+    f"Paragraph number {w} talks about topic {w}."
+    for w in ("one", "two", "three", "four")
+]
+
+
+def make_document(
+    *blocks: Block,
+    chrome_keys: frozenset[str] = frozenset(),
+) -> Document:
+    """Return an English HTML document made of the given blocks."""
+    return Document(
+        path=Path("doc"),
+        format="html",
+        blocks=list(blocks),
+        parts=["index.html"],
+        lang="en",
+        declared_lang="en",
+        generator="generic",
+        normalization=Counter(),
+        chrome=[],
+        chrome_keys=chrome_keys,
+        warnings=[],
+    )
