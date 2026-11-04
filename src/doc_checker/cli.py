@@ -1,28 +1,18 @@
 # Copyright 2026 Christophe Le Douarec
 """Command line interface for Doc Checker."""
 
-import argparse
+import click
 
 from doc_checker import __version__
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the doc-checker command line interface.
-
-    Args:
-        argv: Command line arguments, or ``None`` to use ``sys.argv``.
-
-    Returns:
-        The process exit code.
-    """
-    parser = argparse.ArgumentParser(
-        prog="doc-checker",
-        description="Check documentation format",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=__version__,
-    )
-    parser.parse_args(argv)
-    return 0
+@click.group(
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.version_option(__version__, prog_name="doc-checker")
+@click.pass_context
+def main(ctx: click.Context) -> None:
+    """Compare two documentation builds or audit one."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
