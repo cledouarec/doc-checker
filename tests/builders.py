@@ -223,7 +223,7 @@ _FR_HIGH_PUNCT = re.compile(r" ([;!?])")
 _DIGIT_GROUP = re.compile(r"(\d) (\d{3})")
 
 
-def _smart(text: str, lang: str) -> str:
+def smart_typography(text: str, lang: str) -> str:
     """Apply the typography a Sphinx build would produce."""
     text = text.replace("'", "\U00002019")
     if lang == "fr":
@@ -247,7 +247,7 @@ def _chapters(spec: DocSpec) -> list[list[Section]]:
 
 def _sphinx_section(section: Section, lang: str) -> str:
     tag = f"h{section.level}"
-    title = _esc(_smart(section.title, lang))
+    title = _esc(smart_typography(section.title, lang))
     parts = [
         f'<section id="{section.slug}">',
         (
@@ -255,10 +255,13 @@ def _sphinx_section(section: Section, lang: str) -> str:
             f'title="Link to this heading">\xb6</a></{tag}>'
         ),
     ]
-    parts += [f"<p>{_esc(_smart(p, lang))}</p>" for p in section.paragraphs]
+    parts += [
+        f"<p>{_esc(smart_typography(p, lang))}</p>" for p in section.paragraphs
+    ]
     if section.bullets:
         items = "".join(
-            f"<li><p>{_esc(_smart(b, lang))}</p></li>" for b in section.bullets
+            f"<li><p>{_esc(smart_typography(b, lang))}</p></li>"
+            for b in section.bullets
         )
         parts.append(f'<ul class="simple">{items}</ul>')
     if section.code:
@@ -290,7 +293,7 @@ def _sphinx_section(section: Section, lang: str) -> str:
     if section.note:
         parts.append(
             '<div class="admonition note"><p class="admonition-title">Note</p>'
-            f"<p>{_esc(_smart(section.note, lang))}</p></div>",
+            f"<p>{_esc(smart_typography(section.note, lang))}</p></div>",
         )
     parts.append("</section>")
     return "\n".join(parts)
