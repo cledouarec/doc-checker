@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 from doc_checker import __version__
 from doc_checker.cli import main
-from tests.builders import SAMPLE_EN, build_mkdocs_like
+from tests.builders import SAMPLE_EN, build_mkdocs_like, build_sphinx_like
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,3 +64,42 @@ def test_extract_bad_config_exits_2(tmp_path: Path) -> None:
     site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
     result = CliRunner().invoke(main, ["extract", str(site), "-c", str(conf)])
     assert result.exit_code == 2
+
+
+def test_compare_writes_markdown_report(tmp_path: Path) -> None:
+    """The compare command writes the report and prints a summary."""
+    ref = build_sphinx_like(SAMPLE_EN, tmp_path / "ref")
+    new = build_mkdocs_like(SAMPLE_EN, tmp_path / "new")
+    out = tmp_path / "out"
+    args = ["compare", str(ref), str(new), "-o", str(out)]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 0, result.output
+    assert (out / "report.md").is_file()
+    assert "findings:" in result.output
+
+
+def test_compare_mixed_formats_exits_3(tmp_path: Path) -> None:
+    """Comparing builds of different formats exits with code 3."""
+    ref = build_mkdocs_like(SAMPLE_EN, tmp_path / "ref")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    result = CliRunner().invoke(main, ["compare", str(ref), str(pdf)])
+    assert result.exit_code == 3
+    assert "same format" in result.output
+
+
+def test_compare_unknown_format_exits_2(tmp_path: Path) -> None:
+    """An unknown report format is a usage error."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "s")
+    args = ["compare", str(site), str(site), "--format", "pdf"]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 2
+    assert "unknown format" in result.output
+
+
+def test_compare_missing_path_exits_2(tmp_path: Path) -> None:
+    """A missing input path is a usage error."""
+    args = ["compare", str(tmp_path / "a"), str(tmp_path / "b")]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 2
+    assert "does not exist" in result.output
