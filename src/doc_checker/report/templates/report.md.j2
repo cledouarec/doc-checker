@@ -1,0 +1,61 @@
+# doc-checker report: compare
+
+## Inputs
+
+| | Reference | New |
+|---|---|---|
+{% for label, ref_value, new_value in inputs %}
+| {{ label }} | {{ ref_value }} | {{ new_value }} |
+{% endfor %}
+
+**Matched:** {{ matched }}% of reference blocks · **Moved:** {{ moved }}
+
+## Summary
+
+{% if not summary %}
+No findings.
+{% else %}
+| Severity |{% for category in categories %} {{ category }} |{% endfor %} Total |
+|---|{% for category in categories %}---|{% endfor %}---|
+{% for label, counts, total in summary %}
+| {{ label }} |{% for count in counts %} {{ count }} |{% endfor %} {{ total }} |
+{% endfor %}
+{% endif %}
+{% if normalization %}
+
+## Normalized differences
+
+| Normalization | Reference | New |
+|---|---|---|
+{% for key, ref_count, new_count in normalization %}
+| {{ key }} | {{ ref_count }} | {{ new_count }} |
+{% endfor %}
+{% endif %}
+{% if chrome %}
+
+## Removed page chrome
+
+{% for text in chrome %}
+- {{ text }}
+{% endfor %}
+{% endif %}
+{% for title, findings in sections %}
+
+## {{ title }} ({{ findings | length }})
+{% for finding in findings %}
+
+### {{ finding.title }} (`{{ finding.rule }}`)
+
+- Reference: {{ link(finding.ref, "ref") }}
+- New: {{ link(finding.new, "new") }}
+- ID: `{{ finding.id }}`
+{% if finding.detail %}
+
+{{ finding.detail }}
+{% endif %}
+
+| Reference | New |
+|---|---|
+| {{ cell(finding.ref) }} | {{ cell(finding.new) }} |
+{% endfor %}
+{% endfor %}
