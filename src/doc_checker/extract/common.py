@@ -1,7 +1,12 @@
 # Copyright 2026 Christophe Le Douarec
-"""Build normalized blocks and their section paths, whatever the format."""
+"""Build normalized blocks and their section paths, whatever the format.
 
-from typing import TYPE_CHECKING
+The default titles of admonitions are kept here too, as the HTML reader and
+the PDF reader both need them: the first leaves them out of its blocks, and
+the second does not take them for headings.
+"""
+
+from typing import TYPE_CHECKING, Final
 
 from doc_checker.model.document import Block, BlockKind
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
@@ -11,6 +16,42 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from doc_checker.model.document import SourceRef
+
+# The default titles of admonitions, as a text is compared with them: case
+# folded, and without a colon at the end.
+DEFAULT_ADMONITION_TITLES: Final[frozenset[str]] = frozenset(
+    {
+        "note",
+        "notes",
+        "warning",
+        "tip",
+        "hint",
+        "important",
+        "caution",
+        "danger",
+        "attention",
+        "error",
+        "info",
+        "example",
+        "see also",
+        "todo",
+        "abstract",
+        "summary",
+        "success",
+        "question",
+        "failure",
+        "bug",
+        "quote",
+        "remarque",
+        "avertissement",
+        "astuce",
+        "erreur",
+        "conseil",
+        "exemple",
+        "voir aussi",
+        "à faire",
+    },
+)
 
 
 def normalized_block(  # ruff: ignore[too-many-arguments] - one argument per field of a block
