@@ -10,7 +10,7 @@ from doc_checker.compare.engine import (
     CompareStats,
     compare_documents,
 )
-from doc_checker.config import Config, IgnoreConfig
+from doc_checker.config import Config, IgnoreConfig, PdfConfig
 from doc_checker.errors import InputError
 from doc_checker.model.document import Block, BlockKind
 from doc_checker.model.findings import DiffSegment, Severity
@@ -163,6 +163,52 @@ def test_ignore_patterns_and_finding_ids() -> None:
     (finding,) = compare_documents(ref, new, Config()).findings
     ignored = Config(ignore=IgnoreConfig(findings=(finding.id,)))
     assert compare_documents(ref, new, ignored).findings == []
+
+
+def test_toc_blocks_are_skipped_unless_configured() -> None:
+    """Contents blocks are compared only with the compare_toc setting."""
+    toc = make_block("Getting started . . . . 2", BlockKind.TOC)
+    ref = make_document(toc, *_b(*P))
+    new = make_document(*_b(*P))
+    result = compare_documents(ref, new, Config())
+    assert (result.findings, result.stats.ref_blocks) == ([], 4)
+    with_toc = Config(pdf=PdfConfig(compare_toc=True))
+    assert _rules(compare_documents(ref, new, with_toc)) == [
+        ("block.missing", Severity.CRITICAL),
+    ]
+
+
+@pytest.mark.parametrize("kind", [BlockKind.TOC, BlockKind.INDEX])
+def test_contents_and_index_of_the_new_document_are_skipped(
+    kind: BlockKind,
+) -> None:
+    """Contents and index blocks of the new document are skipped as well."""
+    contents = make_block("Getting started . . . . 2", kind)
+    ref = make_document(*_b(*P))
+    new = make_document(contents, *_b(*P))
+    result = compare_documents(ref, new, Config())
+    assert (result.findings, result.stats.new_blocks) == ([], 4)
+    with_toc = Config(pdf=PdfConfig(compare_toc=True))
+    assert _rules(compare_documents(ref, new, with_toc)) == [
+        ("block.added", Severity.MINOR),
+    ]
+
+
+def test_renumbered_contents_are_not_a_difference() -> None:
+    """Contents whose page numbers changed are compared only on request."""
+    ref = make_document(
+        make_block("Getting started . . . . 2", BlockKind.TOC),
+        *_b(*P),
+    )
+    new = make_document(
+        make_block("Getting started . . . . 3", BlockKind.TOC),
+        *_b(*P),
+    )
+    assert compare_documents(ref, new, Config()).findings == []
+    with_toc = Config(pdf=PdfConfig(compare_toc=True))
+    assert _rules(compare_documents(ref, new, with_toc)) == [
+        ("text.number_changed", Severity.CRITICAL),
+    ]
 
 
 def test_stats() -> None:

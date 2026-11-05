@@ -74,6 +74,8 @@ EN_STOPWORDS: Final[frozenset[str]] = frozenset(
 MIN_EVIDENCE: Final = 5
 AUTO: Final = "auto"
 
+# A language of letters, then subtags of letters and digits after hyphens.
+_LANGUAGE_TAG: Final = re.compile(r"[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*")
 _SUBTAG_SEPARATOR: Final = re.compile(r"[-_]")
 
 
@@ -97,6 +99,26 @@ def detect_language(text: str) -> str | None:
     if max(french, english) < MIN_EVIDENCE or french == english:
         return None
     return "fr" if french > english else "en"
+
+
+def declared_language(declared: str | None) -> str | None:
+    """Return the language that a document declares, if it is a language tag.
+
+    A document can declare any text as its language, such as markup or control
+    characters, and the reports show it, so only a language tag is kept.
+
+    Args:
+        declared: The language as the document declares it, such as
+            ``"en-US"``, if it declares one.
+
+    Returns:
+        The language as declared, or ``None`` if the document declares none or
+        if it is not a language tag: 1 to 8 letters, then subtags of 1 to 8
+        letters or digits, each set off by a hyphen.
+    """
+    if declared is not None and _LANGUAGE_TAG.fullmatch(declared):
+        return declared
+    return None
 
 
 def resolve_language(

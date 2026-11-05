@@ -94,6 +94,22 @@ def test_heading_level_and_anchor() -> None:
     assert blocks[1].anchor == "setup"
 
 
+def test_anchors_are_printable() -> None:
+    """Bidi overrides of an identifier never reach the anchors."""
+    root = _root('<h2 id="a&#x202e;b">Title</h2>')
+    (block,) = blocks_from_root(root.body)
+    assert block.anchor == "a b"
+
+
+def test_an_identifier_without_printable_characters_is_no_anchor() -> None:
+    """An identifier of controls only leaves the current anchor in place."""
+    root = _root(
+        '<section id="setup"><h3 id="&#x202e;&#x7;">Setup</h3></section>',
+    )
+    (block,) = blocks_from_root(root.body)
+    assert block.anchor == "setup"
+
+
 def test_admonition_titles() -> None:
     """Default admonition titles are skipped, custom ones are kept."""
     assert _blocks(

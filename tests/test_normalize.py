@@ -3,10 +3,13 @@
 
 from collections import Counter
 
+import pytest
+
 from doc_checker.text.normalize import (
     count_marks,
     loose_key,
     normalize_display,
+    printable,
     strict_key,
     strip_accents,
 )
@@ -79,3 +82,50 @@ def test_strip_accents_and_count_marks() -> None:
     assert strip_accents("été") == "ete"
     assert count_marks("été") == 2
     assert count_marks("ete") == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Page\x1b[2J 3", "Page [2J 3"),
+        ("a\U0000202eb\U00002066c", "a b c"),
+        ("  x\n\ty  ", "x y"),
+        ("\x85x\x9b", "x"),
+        ("caf\xe9 \U0001f600", "caf\xe9 \U0001f600"),
+    ],
+)
+def test_printable(raw: str, expected: str) -> None:
+    """Controls and bidi overrides become blanks, and blanks collapse."""
+    assert printable(raw) == expected
+
+
+def test_printable_cuts_long_texts() -> None:
+    """A text longer than the limit is cut and ends with an ellipsis."""
+    assert printable("abcdef", limit=4) == "abcd\U00002026"
+    assert printable("abcd", limit=4) == "abcd"
+
+
+@pytest.mark.parametrize(
+    "char",
+    [
+        "\x00",
+        "\x08",
+        "\x0b",
+        "\x1f",
+        "\x7f",
+        "\x9f",
+        "\U0000202a",
+        "\U0000202e",
+        "\U00002066",
+        "\U00002069",
+    ],
+)
+def test_printable_blanks_out_controls_and_bidi_characters(char: str) -> None:
+    """Each control and bidi character becomes a blank, ends of ranges too."""
+    assert printable(f"a{char}b") == "a b"
+
+
+@pytest.mark.parametrize("char", ["~", "\xa1", "\U00002065", "\U0000206a"])
+def test_printable_keeps_what_lies_next_to_the_ranges(char: str) -> None:
+    """The characters just outside the ranges are kept."""
+    assert printable(f"a{char}b") == f"a{char}b"

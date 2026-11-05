@@ -1,0 +1,412 @@
+# Copyright 2026 Christophe Le Douarec
+"""Tests for loading PDF documents."""
+
+import re
+import threading
+from typing import TYPE_CHECKING
+
+import pytest
+from pypdf import PdfWriter
+from pypdf.generic import NameObject, TextStringObject
+
+from doc_checker.config import Config, PdfConfig
+from doc_checker.errors import InputError
+from doc_checker.extract import detect_format, load_document
+from doc_checker.extract.pdf import load_pdf
+from doc_checker.model.document import BlockKind
+from tests.builders import SAMPLE_EN, SAMPLE_FR
+from tests.pdf_builders import (
+    build_fpdf2_pdf,
+    build_listing_pdf,
+    build_raw_pdf,
+    build_reportlab_pdf,
+    build_scanned_pdf,
+    build_turned_pdf,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from doc_checker.model.document import Document
+
+SECTION_HEADINGS = [(s.title, s.level) for s in SAMPLE_EN.sections]
+
+
+@pytest.fixture(scope="module")
+def pdfs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """Build the samples with both generators, and the special cases."""
+    root = tmp_path_factory.mktemp("pdfs")
+    return {
+        "rl_en": build_reportlab_pdf(SAMPLE_EN, root / "en.pdf"),
+        "rl_fr": build_reportlab_pdf(SAMPLE_FR, root / "fr.pdf"),
+        "fp_en": build_fpdf2_pdf(SAMPLE_EN, root / "fp_en.pdf"),
+        "fp_fr": build_fpdf2_pdf(SAMPLE_FR, root / "fp_fr.pdf"),
+        "toc": build_reportlab_pdf(SAMPLE_EN, root / "toc.pdf", toc=True),
+        "scan": build_reportlab_pdf(
+            SAMPLE_EN,
+            root / "scan.pdf",
+            scanned_page=True,
+            artifacts=True,
+        ),
+    }
+
+
+def _load(path: Path) -> Document:
+    """Load a PDF with the default settings."""
+    return load_pdf(path, PdfConfig(), lang="auto")
+
+
+def _dehyphen(key: str) -> str:
+    """Return a key without the hyphens inside its words."""
+    return re.sub(r"(?<=\w)-(?=\w)", "", key)
+
+
+def _headings(doc: Document) -> list[tuple[str, int | None]]:
+    """Return the text and the level of each heading of a document."""
+    return [
+        (b.text, b.level) for b in doc.blocks if b.kind is BlockKind.HEADING
+    ]
+
+
+def _with_outline(source: Path, out: Path, *titles: str) -> Path:
+    """Copy a PDF, with top level bookmarks that point to its first page."""
+    writer = PdfWriter(clone_from=source)
+    for title in titles:
+        writer.add_outline_item(title, 0)
+    writer.write(out)
+    return out
+
+
+def test_reportlab_document(pdfs: dict[str, Path]) -> None:
+    """A reportlab PDF gives its pages, metadata, blocks and chrome."""
+    doc = _load(pdfs["rl_en"])
+    assert (
+        doc.format,
+        doc.parts,
+        doc.lang,
+        doc.declared_lang,
+        doc.tagged,
+    ) == (
+        "pdf",
+        [str(n) for n in range(1, 10)],
+        "en",
+        "en",
+        False,
+    )
+    assert doc.generator is not None
+    assert doc.generator.startswith("ReportLab")
+    assert [(b.kind.value, b.text, b.level) for b in doc.blocks[:3]] == [
+        ("heading", "Getting started", 1),
+        ("heading", "Installation", 2),
+        (
+            "paragraph",
+            (
+                "Install the package with the default configuration "
+                "before you start."
+            ),
+            None,
+        ),
+    ]
+    kinds = {b.text: b.kind.value for b in doc.blocks}
+    assert kinds["Python 3.14 or newer is required."] == "list_item"
+    assert kinds["pip install example\nexample --version"] == "code"
+    assert (
+        doc.normalization["code_line_number"],
+        doc.normalization["bullet"],
+    ) == (2, 2)
+    assert {"Draft", "Page #"} <= set(doc.chrome)
+    assert doc.chrome_keys == frozenset()
+    block = next(
+        b for b in doc.blocks if b.text.startswith("Install the package")
+    )
+    assert (block.source.href, block.section_path) == (
+        "en.pdf#page=2",
+        ("Getting started", "Installation"),
+    )
+
+
+def test_fpdf2_document(pdfs: dict[str, Path]) -> None:
+    """An fpdf2 PDF is tagged, has no generator and joins its breaks."""
+    doc = _load(pdfs["fp_en"])
+    assert (doc.parts, doc.tagged, doc.generator) == (["1", "2"], True, None)
+    assert doc.normalization["hyphenation"] > 0
+    assert doc.normalization["page_break"] == 1
+
+
+@pytest.mark.parametrize("lang", ["en", "fr"])
+def test_both_builders_yield_same_blocks(
+    pdfs: dict[str, Path],
+    lang: str,
+) -> None:
+    """The reportlab and the fpdf2 builds of a text give the same blocks."""
+    ref, new = _load(pdfs[f"rl_{lang}"]), _load(pdfs[f"fp_{lang}"])
+    assert [_dehyphen(b.key_strict) for b in ref.blocks] == [
+        _dehyphen(b.key_strict) for b in new.blocks
+    ]
+    assert [b.kind for b in ref.blocks] == [b.kind for b in new.blocks]
+
+
+def test_toc_page(pdfs: dict[str, Path]) -> None:
+    """The blocks of a contents page are typed and counted."""
+    doc = _load(pdfs["toc"])
+    toc = [b for b in doc.blocks if b.kind is BlockKind.TOC]
+    assert toc
+    assert {b.source.page for b in toc} == {1}
+    assert (doc.parts[:2], doc.normalization["toc"]) == (["i", "1"], len(toc))
+
+
+def test_values_beyond_the_page_count_are_no_contents(tmp_path: Path) -> None:
+    """A table of values with dot leaders is no contents in a short PDF."""
+    values = [
+        "Max load . . . . . . 500",
+        "Timeout . . . . . . 30",
+        "Retries . . . . . . 3",
+    ]
+    doc = _load(build_turned_pdf([values], tmp_path / "values.pdf"))
+    assert doc.blocks
+    assert BlockKind.TOC not in {block.kind for block in doc.blocks}
+
+
+def test_scanned_page_and_artifacts(pdfs: dict[str, Path]) -> None:
+    """A page of images is reported, and artifacts are no chrome."""
+    doc = _load(pdfs["scan"])
+    assert doc.warnings == ["1 page(s) without text, probably scanned: 10"]
+    assert all(b.source.page != 10 for b in doc.blocks)
+    assert (doc.chrome, doc.normalization["artifact"] > 0) == ([], True)
+    assert "Draft" not in {b.text for b in doc.blocks}
+
+
+def test_fully_scanned_pdf(tmp_path: Path) -> None:
+    """A PDF without text has no block and lists its first pages."""
+    doc = _load(build_scanned_pdf(tmp_path / "scan.pdf", pages=12))
+    assert (doc.blocks, doc.lang) == ([], None)
+    assert doc.warnings == [
+        (
+            "12 page(s) without text, probably scanned: "
+            "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, \U00002026"
+        ),
+    ]
+
+
+def test_language_comes_from_the_text_without_lang(tmp_path: Path) -> None:
+    """Without /Lang, the language is found in the text."""
+    sentence = (
+        "Le service accepte les demandes de tous les clients et il les "
+        "traite dans le bon ordre."
+    )
+    path = build_raw_pdf(
+        tmp_path / "fr.pdf",
+        [f"BT /F1 10 Tf 72 700 Td ({sentence}) Tj ET"],
+    )
+    doc = _load(path)
+    assert (doc.declared_lang, doc.lang) == (None, "fr")
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("fr-CA", "fr-CA"),
+        ("en<script>alert(1)</script>", None),
+        ("fr\x07\U0000202e", None),
+        ("", None),
+    ],
+)
+def test_pdf_language_must_be_a_language_tag(
+    tmp_path: Path,
+    declared: str,
+    expected: str | None,
+) -> None:
+    """A /Lang that is not a language tag is ignored, as in HTML."""
+    sentence = (
+        "Le service accepte les demandes de tous les clients et il les "
+        "traite dans le bon ordre."
+    )
+    source = build_raw_pdf(
+        tmp_path / "fr.pdf",
+        [f"BT /F1 10 Tf 72 700 Td ({sentence}) Tj ET"],
+    )
+    writer = PdfWriter(clone_from=source)
+    writer.root_object[NameObject("/Lang")] = TextStringObject(declared)
+    path = tmp_path / "lang.pdf"
+    writer.write(path)
+    doc = _load(path)
+    assert (doc.declared_lang, doc.lang) == (expected, "fr")
+
+
+def test_load_document_reads_pdf(pdfs: dict[str, Path]) -> None:
+    """A PDF input is loaded as a PDF document."""
+    assert load_document(pdfs["rl_fr"], Config()).format == "pdf"
+
+
+def test_pdf_header_may_follow_a_few_bytes(tmp_path: Path) -> None:
+    """A PDF whose header comes after a few bytes is still a PDF."""
+    data = build_raw_pdf(
+        tmp_path / "raw.pdf",
+        ["BT /F1 10 Tf 72 700 Td (Hello there.) Tj ET"],
+    ).read_bytes()
+    shifted = tmp_path / "shifted.pdf"
+    shifted.write_bytes(b"\xef\xbb\xbf\n" + data)
+    far = tmp_path / "far.bin"
+    far.write_bytes(b"x" * 1024 + data)
+    assert detect_format(shifted) == "pdf"
+    assert load_document(shifted, Config()).format == "pdf"
+    with pytest.raises(InputError, match="unsupported input"):
+        detect_format(far)
+
+
+def test_html_page_that_quotes_the_pdf_header_stays_html(
+    tmp_path: Path,
+) -> None:
+    """An HTML file that quotes the PDF header near its top is still HTML."""
+    page = tmp_path / "header.html"
+    page.write_text(
+        "<html><body><p>Every PDF starts with %PDF-1.7</p></body></html>",
+        encoding="utf-8",
+    )
+    assert detect_format(page) == "html"
+
+
+def test_pdf_header_at_the_start_wins_over_an_html_suffix(
+    tmp_path: Path,
+) -> None:
+    """The PDF header at the start of a file wins over an HTML suffix."""
+    named = build_raw_pdf(tmp_path / "named.html", [])
+    assert detect_format(named) == "pdf"
+
+
+def test_chrome_texts_follow_the_pages(pdfs: dict[str, Path]) -> None:
+    """The chrome texts come once each, in page order, digits neutralized."""
+    doc = _load(pdfs["rl_en"])
+    assert doc.chrome == [
+        "Example",
+        "Draft",
+        "Page #",
+        "Getting started",
+        "User guide",
+        "Reference",
+    ]
+    # Four segments a page, but the first page has no running chapter title.
+    assert doc.normalization["header_footer"] == 9 * 4 - 1
+
+
+def test_damaged_page_names_the_file(tmp_path: Path) -> None:
+    """A page that cannot be read is an input error naming the file."""
+    good = build_raw_pdf(tmp_path / "good.pdf", [])
+    # PDFium opens the file, but it has lost the page tree.
+    damaged = tmp_path / "kids.pdf"
+    damaged.write_bytes(good.read_bytes().replace(b"/Kids", b"/Kidz", 1))
+    message = f"cannot read {damaged}: page 1: invalid or damaged PDF"
+    with pytest.raises(InputError, match=re.escape(message)):
+        _load(damaged)
+
+
+def test_negative_font_size_does_not_stop_the_loading(tmp_path: Path) -> None:
+    """A text set with a negative font size is loaded in a bounded time."""
+    path = build_raw_pdf(
+        tmp_path / "neg.pdf",
+        [
+            (
+                "BT /F1 10 Tf 72 645 Td "
+                "(Normal text above the flipped one.) Tj ET"
+            ),
+            "BT /F1 -60 Tf 72 630 Td (FLIPPED) Tj ET",
+        ],
+    )
+    loaded: list[Document] = []
+    worker = threading.Thread(
+        target=lambda: loaded.append(_load(path)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=10.0)
+    assert len(loaded) == 1
+    assert any(
+        "Normal text above the flipped one." in block.text
+        for block in loaded[0].blocks
+    )
+
+
+def test_text_at_an_angle_is_reported(tmp_path: Path) -> None:
+    """Text left out for its angle is counted and reported."""
+    path = build_raw_pdf(
+        tmp_path / "draft.pdf",
+        [
+            "BT /F1 10 Tf 72 700 Td (The service accepts requests.) Tj ET",
+            (
+                "q 0.7071 0.7071 -0.7071 0.7071 300 400 cm "
+                "BT /F1 60 Tf 0 0 Td (DRAFT) Tj ET Q"
+            ),
+        ],
+    )
+    doc = _load(path)
+    assert doc.warnings == ["1 page(s) with text at an angle, left out: 1"]
+    assert doc.normalization["angled_text"] == 5
+
+
+def test_scanned_pages_are_reported_before_angled_text(tmp_path: Path) -> None:
+    """The warning about scanned pages comes before the one about angles."""
+    # The page with text at an angle comes before the scanned page.
+    draft = build_raw_pdf(
+        tmp_path / "draft.pdf",
+        [
+            "BT /F1 10 Tf 72 700 Td (The service accepts requests.) Tj ET",
+            (
+                "q 0.7071 0.7071 -0.7071 0.7071 300 400 cm "
+                "BT /F1 60 Tf 0 0 Td (DRAFT) Tj ET Q"
+            ),
+        ],
+    )
+    writer = PdfWriter()
+    writer.append(draft)
+    writer.append(build_scanned_pdf(tmp_path / "scan.pdf", pages=1))
+    path = tmp_path / "both.pdf"
+    writer.write(path)
+    assert _load(path).warnings == [
+        "1 page(s) without text, probably scanned: 2",
+        "1 page(s) with text at an angle, left out: 1",
+    ]
+
+
+def test_unmatched_bookmarks_leave_headings_to_styles(tmp_path: Path) -> None:
+    """Bookmarks that match no block let the styles tell the headings."""
+    plain = build_reportlab_pdf(SAMPLE_EN, tmp_path / "p.pdf", outline=False)
+    doc = _load(_with_outline(plain, tmp_path / "o.pdf", "Release notes"))
+    assert _headings(doc) == SECTION_HEADINGS
+
+
+def test_matched_bookmarks_alone_tell_headings(tmp_path: Path) -> None:
+    """Once a bookmark matches a block, the styles make no heading."""
+    plain = build_reportlab_pdf(SAMPLE_EN, tmp_path / "p.pdf", outline=False)
+    doc = _load(_with_outline(plain, tmp_path / "o.pdf", "Getting started"))
+    assert _headings(doc) == [("Getting started", 1)]
+
+
+def test_styles_tell_headings_without_bookmarks(tmp_path: Path) -> None:
+    """Without bookmarks, the styles of the blocks tell the headings."""
+    plain = build_reportlab_pdf(SAMPLE_EN, tmp_path / "p.pdf", outline=False)
+    assert _headings(_load(plain)) == SECTION_HEADINGS
+
+
+def test_numbered_listing_in_tiny_type(tmp_path: Path) -> None:
+    """A listing numbered in tiny proportional type is one code block."""
+    code = [
+        "import os",
+        "",
+        "def main():",
+        "    print(os.getcwd())",
+        "",
+        "main()",
+    ]
+    pdf = build_listing_pdf(code, tmp_path / "listing.pdf", numbers=True)
+    doc = _load(pdf)
+    assert [b.kind.value for b in doc.blocks] == [
+        "paragraph",
+        "code",
+        "paragraph",
+    ]
+    lines = doc.blocks[1].text.splitlines()
+    assert (len(lines), lines[0], doc.normalization["code_line_number"]) == (
+        4,
+        "import os",
+        6,
+    )
