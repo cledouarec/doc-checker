@@ -8,6 +8,7 @@ import pytest
 
 from doc_checker.config import (
     CliOverrides,
+    PdfConfig,
     apply_overrides,
     load_config,
     rule_disabled,
@@ -71,6 +72,73 @@ def test_output_is_relative_to_config_file(tmp_path: Path) -> None:
     assert load_config(conf, cwd=tmp_path).output == tmp_path / "sub" / "out"
 
 
+def test_pdf_defaults(tmp_path: Path) -> None:
+    """Without a [pdf] section, the PDF defaults apply."""
+    assert load_config(None, cwd=tmp_path).pdf == PdfConfig(
+        header_band=0.08,
+        footer_band=0.08,
+        repeat_share=0.3,
+        compare_toc=False,
+    )
+
+
+def test_pdf_defaults_when_section_is_absent(tmp_path: Path) -> None:
+    """A configuration file without a [pdf] section keeps the defaults."""
+    (tmp_path / "doc-checker.toml").write_text(
+        '[general]\nlang = "fr"\n',
+        encoding="utf-8",
+    )
+    assert load_config(None, cwd=tmp_path).pdf == PdfConfig()
+
+
+def test_pdf_section_is_loaded(tmp_path: Path) -> None:
+    """The keys of the [pdf] section replace the PDF defaults."""
+    (tmp_path / "doc-checker.toml").write_text(
+        "[pdf]\nheader_band = 0.1\nfooter_band = 0.05\nrepeat_share = 0.5\n"
+        "compare_toc = true\n",
+        encoding="utf-8",
+    )
+    assert load_config(None, cwd=tmp_path).pdf == PdfConfig(
+        header_band=0.1,
+        footer_band=0.05,
+        repeat_share=0.5,
+        compare_toc=True,
+    )
+
+
+def test_pdf_ranges_include_their_upper_bound(tmp_path: Path) -> None:
+    """A band can cover half of the page and a share all of the pages."""
+    (tmp_path / "doc-checker.toml").write_text(
+        "[pdf]\nheader_band = 0.5\nfooter_band = 0.5\nrepeat_share = 1\n",
+        encoding="utf-8",
+    )
+    assert load_config(None, cwd=tmp_path).pdf == PdfConfig(
+        header_band=0.5,
+        footer_band=0.5,
+        repeat_share=1.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("[pdf]\nheader_band = 0.7\n", "pdf.header_band: must be in ]0, 0.5]"),
+        ("[pdf]\nfooter_band = 0\n", "pdf.footer_band: must be in ]0, 0.5]"),
+        ("[pdf]\nrepeat_share = 1.5\n", "pdf.repeat_share: must be in ]0, 1]"),
+    ],
+)
+def test_pdf_range_errors_name_the_valid_range(
+    tmp_path: Path,
+    content: str,
+    message: str,
+) -> None:
+    """An out-of-range PDF number is rejected with the range it must be in."""
+    conf = tmp_path / "c.toml"
+    conf.write_text(content, encoding="utf-8")
+    with pytest.raises(ConfigError, match=re.escape(message)):
+        load_config(conf, cwd=tmp_path)
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [
@@ -81,6 +149,10 @@ def test_output_is_relative_to_config_file(tmp_path: Path) -> None:
         ("[ignore]\npatterns = ['(']\n", "ignore.patterns"),
         ("[thresholds.compare]\nmatch = 1.5\n", "thresholds.compare.match"),
         ("[html]\npage_order = 'random'\n", "html.page_order"),
+        ("[pdf]\nheader_band = 0.7\n", "pdf.header_band"),
+        ("[pdf]\nrepeat_share = 0\n", "pdf.repeat_share"),
+        ("[pdf]\ncompare_toc = 'yes'\n", "pdf.compare_toc"),
+        ("[pdf]\nmargin = 1\n", "pdf.margin"),
         ("not toml = = \n", "invalid TOML"),
     ],
 )

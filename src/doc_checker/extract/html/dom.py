@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from doc_checker.extract.common import DEFAULT_ADMONITION_TITLES
 from doc_checker.model.document import BlockKind
 
 if TYPE_CHECKING:
@@ -33,40 +34,6 @@ class RawBlock:
     level: int | None = None
     role: str | None = None
 
-
-DEFAULT_ADMONITION_TITLES: Final[frozenset[str]] = frozenset(
-    {
-        "note",
-        "notes",
-        "warning",
-        "tip",
-        "hint",
-        "important",
-        "caution",
-        "danger",
-        "attention",
-        "error",
-        "info",
-        "example",
-        "see also",
-        "todo",
-        "abstract",
-        "summary",
-        "success",
-        "question",
-        "failure",
-        "bug",
-        "quote",
-        "remarque",
-        "avertissement",
-        "astuce",
-        "erreur",
-        "conseil",
-        "exemple",
-        "voir aussi",
-        "à faire",
-    },
-)
 
 INLINE_TAGS: Final[frozenset[str]] = frozenset(
     {

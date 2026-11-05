@@ -4,7 +4,11 @@
 from collections import Counter
 from types import MappingProxyType
 
-from doc_checker.extract.common import assign_section_paths, normalized_block
+from doc_checker.extract.common import (
+    DEFAULT_ADMONITION_TITLES,
+    assign_section_paths,
+    normalized_block,
+)
 from doc_checker.model.document import BlockKind, SourceRef
 
 SOURCE = SourceRef("doc.pdf", page=2)
@@ -165,3 +169,8 @@ def test_heading_without_level_does_not_open_a_section() -> None:
         (BlockKind.HEADING, "Loose", None),
         (BlockKind.PARAGRAPH, "Text.", None),
     ) == [("Guide",), ("Guide",), ("Guide",)]
+
+
+def test_default_admonition_titles() -> None:
+    """The default titles of admonitions are shared by HTML and PDF."""
+    assert {"note", "warning", "tip", "see also"} <= DEFAULT_ADMONITION_TITLES
