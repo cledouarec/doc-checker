@@ -21,6 +21,7 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
 from doc_checker.errors import InputError
+from doc_checker.text.normalize import printable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -41,6 +42,8 @@ BOLD_NAME: Final = re.compile(
     re.IGNORECASE,
 )
 TURN_TOLERANCE: Final = 2.0  # Largest gap to a right angle, in degrees.
+LABEL_LIMIT: Final = 40  # Most characters of a page label.
+METADATA_LIMIT: Final = 200  # Most characters of a metadata value.
 
 _SUBSET_PREFIX: Final = re.compile(r"^[A-Z]{6}\+")
 _LINE_BREAKS: Final = frozenset({0x0A, 0x0D})
@@ -122,7 +125,8 @@ class PdfPageText:
 
     Attributes:
         index: Position of the page in the document, from 0.
-        label: Page label, such as ``iv``, or the page number from 1.
+        label: Page label, such as ``iv``, or the page number from 1. It is
+            printable and has at most `LABEL_LIMIT` characters.
         width: Width of the turned crop box, in points.
         height: Height of the turned crop box, in points.
         chars: Kept characters, in the order of PDFium.
@@ -710,6 +714,12 @@ def _image_coverage(
     return min(1.0, covered / area)
 
 
+def _page_label(pdf: pdfium.PdfDocument, index: int) -> str:
+    """Return the printable label of a page, else its number from 1."""
+    label = printable(pdf.get_page_label(index), limit=LABEL_LIMIT)
+    return label or str(index + 1)
+
+
 def read_page(pdf: pdfium.PdfDocument, index: int) -> PdfPageText:
     """Read the characters of a page.
 
@@ -718,8 +728,8 @@ def read_page(pdf: pdfium.PdfDocument, index: int) -> PdfPageText:
         index: Position of the page, from 0.
 
     Returns:
-        The characters of the page turned upright, with its label, the size
-        of its turned crop box and the share of it that images cover.
+        The characters of the page turned upright, with its printable label,
+        the size of its turned crop box and the share of it that images cover.
 
     Raises:
         InputError: If PDFium cannot load the page or read its text.
@@ -735,7 +745,7 @@ def read_page(pdf: pdfium.PdfDocument, index: int) -> PdfPageText:
             upright = _upright_page(chars, (right - left, top - bottom))
             return PdfPageText(
                 index=index,
-                label=pdf.get_page_label(index) or str(index + 1),
+                label=_page_label(pdf, index),
                 width=upright.width,
                 height=upright.height,
                 chars=upright.chars,
@@ -767,8 +777,8 @@ def read_bookmarks(pdf: pdfium.PdfDocument) -> list[Bookmark]:
 
 
 def _metadata(pdf: pdfium.PdfDocument, key: str) -> str | None:
-    """Return a metadata value without surrounding blanks, if not empty."""
-    return pdf.get_metadata_value(key).strip() or None
+    """Return a printable metadata value, if not empty."""
+    return printable(pdf.get_metadata_value(key), limit=METADATA_LIMIT) or None
 
 
 def read_metadata(pdf: pdfium.PdfDocument) -> tuple[str | None, str | None]:
@@ -779,7 +789,8 @@ def read_metadata(pdf: pdfium.PdfDocument) -> tuple[str | None, str | None]:
 
     Returns:
         The title, and the generator, which is the producer or else the
-        creator. Each is ``None`` when the document has none.
+        creator. Each is printable and has at most `METADATA_LIMIT`
+        characters, and is ``None`` when the document has none.
     """
     generator = _metadata(pdf, "Producer") or _metadata(pdf, "Creator")
     return _metadata(pdf, "Title"), generator

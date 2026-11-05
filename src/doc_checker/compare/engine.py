@@ -33,6 +33,7 @@ _ELLIPSIS: Final = "\U00002026"
 _MATCHED: Final = frozenset(
     {PairKind.EQUAL, PairKind.MODIFIED, PairKind.SPLIT, PairKind.MERGE},
 )
+_CONTENTS: Final = frozenset({BlockKind.TOC, BlockKind.INDEX})
 
 type SegmentOp = Literal["equal", "delete", "insert"]
 
@@ -79,11 +80,18 @@ def _prepare(
     blocks: Iterable[Block],
     chrome: frozenset[str],
     patterns: Sequence[re.Pattern[str]],
+    *,
+    compare_toc: bool,
 ) -> list[Block]:
-    """Return the blocks to compare, with ignored patterns removed."""
+    """Return the blocks to compare, with ignored patterns removed.
+
+    Page chrome is dropped. So are the table of contents and index blocks,
+    unless ``compare_toc`` is set.
+    """
+    skipped = frozenset() if compare_toc else _CONTENTS
     prepared = []
     for block in blocks:
-        if block.key_strict in chrome:
+        if block.key_strict in chrome or block.kind in skipped:
             continue
         key = block.key_strict
         for pattern in patterns:
@@ -323,6 +331,9 @@ def compare_documents(
 ) -> CompareResult:
     """Compare a reference document with its new version.
 
+    The table of contents and index blocks of PDF documents are neither
+    compared nor counted, unless ``cfg.pdf.compare_toc`` is set.
+
     Args:
         ref: Reference document.
         new: New version of the document.
@@ -333,8 +344,9 @@ def compare_documents(
     """
     chrome = ref.chrome_keys | new.chrome_keys
     patterns = [re.compile(pattern) for pattern in cfg.ignore.patterns]
-    ref_blocks = _prepare(ref.blocks, chrome, patterns)
-    new_blocks = _prepare(new.blocks, chrome, patterns)
+    toc = cfg.pdf.compare_toc
+    ref_blocks = _prepare(ref.blocks, chrome, patterns, compare_toc=toc)
+    new_blocks = _prepare(new.blocks, chrome, patterns, compare_toc=toc)
     pairs = align(
         ref_blocks,
         new_blocks,

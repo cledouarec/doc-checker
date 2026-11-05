@@ -21,6 +21,8 @@ from reportlab.pdfgen.canvas import Canvas
 from doc_checker.errors import InputError
 from doc_checker.extract.pdf.catalog import PdfCatalog, read_catalog
 from doc_checker.extract.pdf.reader import (
+    LABEL_LIMIT,
+    METADATA_LIMIT,
     Bookmark,
     char_text,
     font_style,
@@ -33,9 +35,12 @@ from doc_checker.extract.pdf.segments import build_segments
 from tests.builders import SAMPLE_EN, SAMPLE_FR
 from tests.pdf_builders import (
     build_fpdf2_pdf,
+    build_lines_pdf,
     build_raw_pdf,
     build_reportlab_pdf,
+    build_single_page_pdf,
     scan_image,
+    to_unicode_cmap,
 )
 
 if TYPE_CHECKING:
@@ -57,66 +62,6 @@ def manual(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def _text(page: PdfPageText) -> str:
     """Return the text of the characters of a page."""
     return "".join(char.text for char in page.chars)
-
-
-def _stream(text: str) -> str:
-    """Return a PDF stream object that holds an ASCII text."""
-    return f"<< /Length {len(text)} >>\nstream\n{text}\nendstream"
-
-
-def _to_unicode(mapping: dict[str, str]) -> str:
-    """Return a ToUnicode CMap object, from byte codes to UTF-16 hex."""
-    pairs = "".join(f"<{code}> <{utf16}>\n" for code, utf16 in mapping.items())
-    return _stream(
-        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
-        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) "
-        "/Supplement 0 >> def\n"
-        "/CMapName /Adobe-Identity-UCS def /CMapType 2 def\n"
-        "1 begincodespacerange <00> <FF> endcodespacerange\n"
-        f"{len(mapping)} beginbfchar\n{pairs}endbfchar\n"
-        "endcmap CMapName currentdict /CMap defineresource pop end end",
-    )
-
-
-def _single_page_pdf(
-    out: Path,
-    content: str,
-    *,
-    font: str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    page: str = "/MediaBox [0 0 200 200]",
-    extra: tuple[str, ...] = (),
-) -> Path:
-    """Write a one page PDF that shows a content stream in the font F1.
-
-    The page entries are those of the page dictionary, such as its boxes and
-    its rotation. The extra objects are numbered from 6, and the font can
-    refer to them.
-    """
-    objects = [
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (
-            f"<< /Type /Page /Parent 2 0 R {page} /Contents 4 0 R "
-            "/Resources << /Font << /F1 5 0 R >> >> >>"
-        ),
-        _stream(content),
-        font,
-        *extra,
-    ]
-    data = b"%PDF-1.4\n"
-    offsets = []
-    for number, body in enumerate(objects, 1):
-        offsets.append(len(data))
-        data += f"{number} 0 obj\n{body}\nendobj\n".encode("ascii")
-    count = len(objects) + 1
-    entries = "".join(f"{offset:010d} 00000 n \n" for offset in offsets)
-    trailer = (
-        f"xref\n0 {count}\n0000000000 65535 f \n{entries}"
-        f"trailer\n<< /Size {count} /Root 1 0 R >>\n"
-        f"startxref\n{len(data)}\n%%EOF\n"
-    )
-    out.write_bytes(data + trailer.encode("ascii"))
-    return out
 
 
 def test_fonts_sizes_and_label(manual: Path) -> None:
@@ -186,6 +131,43 @@ def test_read_metadata_cleans_values(tmp_path: Path) -> None:
         assert read_metadata(pdf) == ("Spaced title", "Tool")
     with open_pdf(empty) as pdf:
         assert read_metadata(pdf) == (None, None)
+
+
+def test_labels_and_metadata_are_printable(tmp_path: Path) -> None:
+    """Controls in page labels and metadata never come through."""
+    source = build_lines_pdf([["Some text here."]], tmp_path / "s.pdf")
+    writer = PdfWriter(clone_from=source)
+    writer.add_metadata({"/Producer": "Evil\x07Tool\U0000202e"})
+    writer.set_page_label(0, 0, prefix="A\U0000202e\x07")
+    out = tmp_path / "hostile.pdf"
+    writer.write(out)
+    with open_pdf(out) as pdf:
+        assert read_metadata(pdf)[1] == "Evil Tool"
+        assert read_page(pdf, 0).label == "A"
+
+
+def test_long_labels_and_metadata_are_cut(tmp_path: Path) -> None:
+    """A page label and a metadata value stop at their limits."""
+    source = build_lines_pdf([["Some text here."]], tmp_path / "s.pdf")
+    writer = PdfWriter(clone_from=source)
+    writer.add_metadata({"/Producer": "P" * (METADATA_LIMIT + 50)})
+    writer.set_page_label(0, 0, prefix="L" * (LABEL_LIMIT + 50))
+    out = tmp_path / "long.pdf"
+    writer.write(out)
+    with open_pdf(out) as pdf:
+        assert read_metadata(pdf)[1] == "P" * METADATA_LIMIT + "\U00002026"
+        assert read_page(pdf, 0).label == "L" * LABEL_LIMIT + "\U00002026"
+
+
+def test_a_label_of_controls_is_the_page_number(tmp_path: Path) -> None:
+    """A page label with nothing printable left is the number of the page."""
+    source = build_lines_pdf([["Some text here."]], tmp_path / "s.pdf")
+    writer = PdfWriter(clone_from=source)
+    writer.set_page_label(0, 0, prefix="\x07\U0000202e")
+    out = tmp_path / "controls.pdf"
+    writer.write(out)
+    with open_pdf(out) as pdf:
+        assert read_page(pdf, 0).label == "1"
 
 
 def test_kerning_scaled_matrix_and_hyphen(tmp_path: Path) -> None:
@@ -264,7 +246,7 @@ def test_a_negative_font_size_turns_its_text(tmp_path: Path) -> None:
 
 def test_unmapped_characters_are_replaced(tmp_path: Path) -> None:
     """A character without Unicode mapping is replaced and counted."""
-    path = _single_page_pdf(
+    path = build_single_page_pdf(
         tmp_path / "unmapped.pdf",
         "BT /F1 12 Tf 20 100 Td (ABC) Tj ET",
         font=(
@@ -292,7 +274,7 @@ def test_surrogate_halves_are_joined(
     unmapped: int,
 ) -> None:
     """The halves of an astral character join, and lone halves are replaced."""
-    path = _single_page_pdf(
+    path = build_single_page_pdf(
         tmp_path / "astral.pdf",
         f"BT /F1 12 Tf 20 100 Td ({shown}) Tj ET",
         font=(
@@ -301,7 +283,7 @@ def test_surrogate_halves_are_joined(
         ),
         # A is U+1F600, B is U+1D434, C is a high half and D a low half.
         extra=(
-            _to_unicode(
+            to_unicode_cmap(
                 {
                     "41": "D83DDE00",
                     "42": "D835DC34",
@@ -322,12 +304,12 @@ def test_surrogate_halves_are_joined(
 def test_geometry_is_relative_to_the_crop_box(tmp_path: Path) -> None:
     """The size and the coordinates are those of the crop box."""
     shown = "BT /F1 12 Tf 60 240 Td (Header) Tj ET"
-    whole = _single_page_pdf(
+    whole = build_single_page_pdf(
         tmp_path / "whole.pdf",
         shown,
         page="/MediaBox [0 0 300 300]",
     )
-    cropped = _single_page_pdf(
+    cropped = build_single_page_pdf(
         tmp_path / "cropped.pdf",
         shown,
         page="/MediaBox [0 0 300 300] /CropBox [50 50 250 250]",
@@ -348,12 +330,12 @@ def test_geometry_is_relative_to_the_crop_box(tmp_path: Path) -> None:
 def test_geometry_ignores_the_rotation(tmp_path: Path) -> None:
     """A rotated page has the size and the coordinates of its unrotated box."""
     shown = "BT /F1 12 Tf 60 150 Td (Header) Tj ET"
-    upright = _single_page_pdf(
+    upright = build_single_page_pdf(
         tmp_path / "upright.pdf",
         shown,
         page="/MediaBox [0 0 300 200]",
     )
-    turned = _single_page_pdf(
+    turned = build_single_page_pdf(
         tmp_path / "turned.pdf",
         shown,
         page="/MediaBox [0 0 300 200] /Rotate 90",
@@ -388,7 +370,7 @@ def test_turned_pages_are_read_upright(
         f"q {matrix} cm BT /F1 10 Tf 40 250 Td (First line) Tj "
         "0 -12 Td (Second line) Tj ET Q"
     )
-    path = _single_page_pdf(
+    path = build_single_page_pdf(
         tmp_path / "turned.pdf",
         content,
         page=f"/MediaBox [0 0 300 400] /Rotate {rotation}",
@@ -423,7 +405,7 @@ def test_turned_pages_are_read_from_their_crop_box(
         "BT /F1 10 Tf 40 250 Td (First line) Tj "
         "0 -12 Td (Second line) Tj ET Q"
     )
-    path = _single_page_pdf(
+    path = build_single_page_pdf(
         tmp_path / "cropped.pdf",
         content,
         page=(
@@ -457,7 +439,7 @@ def test_a_space_between_objects_stays_on_its_line(
         "BT /F1 10 Tf 40 250 Td (Hello world and) Tj ET "
         "BT /F1 10 Tf 117 250 Td (more words here) Tj ET Q"
     )
-    path = _single_page_pdf(
+    path = build_single_page_pdf(
         tmp_path / "objects.pdf",
         content,
         page=f"/MediaBox [0 0 300 400] /Rotate {rotation}",
@@ -476,7 +458,7 @@ def test_a_tie_turns_the_page_the_least(tmp_path: Path) -> None:
         "q 0 1 -1 0 300 0 cm BT /F1 10 Tf 40 250 Td (Up the page) Tj ET Q "
         "q 0 -1 1 0 0 400 cm BT /F1 10 Tf 40 250 Td (Down a page) Tj ET Q"
     )
-    path = _single_page_pdf(
+    path = build_single_page_pdf(
         tmp_path / "tie.pdf",
         content,
         page="/MediaBox [0 0 300 400]",
@@ -497,7 +479,7 @@ def test_text_at_an_angle_is_left_out(tmp_path: Path) -> None:
         "q 0.7071 0.7071 -0.7071 0.7071 150 100 cm "
         "BT /F1 30 Tf 0 0 Td (DRAFT) Tj ET Q"
     )
-    path = _single_page_pdf(
+    path = build_single_page_pdf(
         tmp_path / "draft.pdf",
         content,
         page="/MediaBox [0 0 300 400]",

@@ -1,8 +1,9 @@
 # Copyright 2026 Christophe Le Douarec
-"""Text normalization: display text and comparison keys.
+"""Text normalization: display text, comparison keys and printable labels.
 
-Every replacement or removal increments a counter so that reports can show
-how much was normalized away instead of hiding it.
+Every replacement or removal of the display text and of the keys increments a
+counter so that reports can show how much was normalized away instead of
+hiding it.
 """
 
 import re
@@ -11,6 +12,15 @@ from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from collections import Counter
+
+# Ranges of a regular expression character class, which tell the characters of
+# a text of a document that must not reach a reader or a terminal. The layout
+# characters are the tab and the line feed, which a terminal keeps.
+LAYOUT_CLASS: Final = r"\t\n"
+# The other C0 controls, the delete and the C1 controls.
+CONTROL_CLASS: Final = r"\x00-\x08\x0b-\x1f\x7f-\x9f"
+# The bidirectional embeddings, overrides and isolates.
+BIDI_CLASS: Final = r"\U0000202a-\U0000202e\U00002066-\U00002069"
 
 _LIGATURES: Final = {
     "\U0000fb00": "ff",
@@ -41,6 +51,10 @@ _DASH_RE: Final = re.compile(r"[\U00002010-\U00002015\U00002212]")
 _ELLIPSIS_RE: Final = re.compile(r"\U00002026")
 _WHITESPACE_RE: Final = re.compile(r"[ \t\r\n\f\v]+")
 _NON_WORD_RE: Final = re.compile(r"[^\w\s]")
+_UNPRINTABLE_RE: Final = re.compile(
+    f"[{LAYOUT_CLASS}{CONTROL_CLASS}{BIDI_CLASS}]",
+)
+_CUT_MARK: Final = "\U00002026"
 
 _COMBINING_MARK: Final = "Mn"
 
@@ -161,3 +175,25 @@ def loose_key(strict: str) -> str:
     text = strip_accents(strict.casefold())
     text = _NON_WORD_RE.sub(" ", text)
     return " ".join(text.split())
+
+
+def printable(text: str, *, limit: int | None = None) -> str:
+    """Return a text of a document that is safe to show on one line.
+
+    Each control character and each bidirectional override or isolate becomes
+    a blank, so that the text can neither move a cursor nor reorder the text
+    around it. The runs of blanks, whatever their kind, become one space.
+
+    Args:
+        text: Any text, such as a page label, a metadata value or an
+            identifier.
+        limit: The most characters to keep, if any.
+
+    Returns:
+        The text on one line, without blanks at either end. If it is longer
+        than `limit`, it is cut there and ends with an ellipsis.
+    """
+    text = " ".join(_UNPRINTABLE_RE.sub(" ", text).split())
+    if limit is not None and len(text) > limit:
+        return text[:limit] + _CUT_MARK
+    return text

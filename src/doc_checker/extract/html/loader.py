@@ -22,7 +22,7 @@ from doc_checker.extract.html.profiles import (
 )
 from doc_checker.extract.html.site import discover_pages, parse_page
 from doc_checker.model.document import Document, SourceRef
-from doc_checker.text.lang import AUTO, resolve_language
+from doc_checker.text.lang import AUTO, declared_language, resolve_language
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,7 +121,7 @@ def load_html(path: Path, cfg: HtmlConfig, *, lang: str) -> Document:
         for block in drop_keys(blocks, chrome_keys)
     ]
     assign_section_paths(blocks)
-    declared = ordered[0].tree.get("lang")
+    declared = declared_language(ordered[0].tree.get("lang"))
     sample = " ".join(block.text for block in blocks[:_LANG_SAMPLE_BLOCKS])
     generator = Counter(
         profiles[page.rel_path].name for page in ordered

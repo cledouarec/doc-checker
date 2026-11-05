@@ -175,6 +175,52 @@ def test_identical_text_has_no_hunk() -> None:
     assert diff_tokens(tokens, tokens) == []
 
 
+def test_intra_word_hyphens_are_not_differences() -> None:
+    """A hyphen inside a word is no difference, other changes still are."""
+    assert (
+        _classify("Use the non-blocking mode.", "Use the nonblocking mode.")
+        == []
+    )
+    assert _classify(
+        "The scheduler processes 1,000 jobs.",
+        "The scheduler pro-cesses 1000 jobs.",
+    ) == [("text.number_format", IN)]
+
+
+@pytest.mark.parametrize(
+    ("ref", "new"),
+    [
+        ("Use the nonblocking mode.", "Use the non-blocking mode."),
+        ("Send an e-mail today.", "Send an email today."),
+        ("The pro-cesses run well.", "The proc-esses run well."),
+        ("A well-known check-in.", "A wellknown checkin."),
+    ],
+)
+def test_hyphens_may_be_gained_lost_or_moved(ref: str, new: str) -> None:
+    """Hyphens may appear, disappear or move inside words."""
+    assert _classify(ref, new) == []
+
+
+def test_hyphenated_words_are_still_compared_by_their_letters() -> None:
+    """Dropping the hyphens does not hide a change of letters."""
+    assert _classify(
+        "Use the non-blocking mode.",
+        "Use the non-blocing mode.",
+    ) == [("text.typo", MA)]
+
+
+@pytest.mark.parametrize(
+    ("ref", "new"),
+    [
+        ("Order part XJ-120-4 today.", "Order part XJ-1204 today."),
+        ("Build for x86-64 only.", "Build for x8664 only."),
+    ],
+)
+def test_hyphens_next_to_digits_are_compared(ref: str, new: str) -> None:
+    """A hyphen next to a digit belongs to a code: dropping it is a change."""
+    assert _classify(ref, new) == [("text.typo", MA)]
+
+
 @pytest.mark.parametrize(
     ("text", "damaged"),
     [
