@@ -38,7 +38,14 @@ CONFIG_FILE: Final = "doc-checker.toml"
 PYPROJECT_FILE: Final = "pyproject.toml"
 MOVED_RULE: Final = "block.moved"
 
-_SECTIONS: Final = ("general", "html", "thresholds", "ignore", "severity")
+_SECTIONS: Final = (
+    "general",
+    "html",
+    "pdf",
+    "thresholds",
+    "ignore",
+    "severity",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +67,33 @@ class HtmlConfig:
     include: tuple[str, ...] = DEFAULT_HTML_INCLUDE
     exclude: tuple[str, ...] = DEFAULT_HTML_EXCLUDE
     page_order: PageOrder = "auto"
+
+
+@dataclass(frozen=True, slots=True)
+class PdfConfig:
+    """PDF extraction and comparison settings.
+
+    Attributes:
+        header_band: Share of the page height, from the top, where each line
+            may be a running header. The first line of a page is looked at
+            beyond the band, down to 20 % of the height, if a gap of more
+            than two sizes separates it from the next line.
+        footer_band: Share of the page height, from the bottom, where each
+            line may be a running footer. The last line of a page is looked
+            at beyond the band, up to 20 % of the height, if a gap of more
+            than two sizes separates it from the line before. Page numbers
+            are looked for at the top as well as at the bottom of the page.
+        repeat_share: Minimum share of the pages on which a text must repeat
+            to be a running header or footer. Page numbers that differ from
+            the labels of their pages need the same share of the pages,
+            unlike running titles.
+        compare_toc: Whether tables of contents and indexes are compared.
+    """
+
+    header_band: float = 0.08
+    footer_band: float = 0.08
+    repeat_share: float = 0.3
+    compare_toc: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +134,7 @@ class Config:
         formats: Report formats to write.
         output: Directory where the reports are written.
         html: HTML extraction settings.
+        pdf: PDF extraction and comparison settings.
         compare: Comparison thresholds.
         ignore: What to leave out of the reports.
         severity: Severity overrides by rule identifier.
@@ -110,6 +145,7 @@ class Config:
     formats: tuple[str, ...] = ("md",)
     output: Path = DEFAULT_OUTPUT
     html: HtmlConfig = field(default_factory=HtmlConfig)
+    pdf: PdfConfig = field(default_factory=PdfConfig)
     compare: CompareThresholds = field(default_factory=CompareThresholds)
     ignore: IgnoreConfig = field(default_factory=IgnoreConfig)
     severity: Mapping[str, Severity] = field(default_factory=dict)
@@ -181,14 +217,21 @@ class _Section:
             raise self.error(key, "expected a list of strings")
         return tuple(cast("list[str]", items))
 
-    def ratio(self, key: str, default: float) -> float:
-        """Return a number in ``]0, 1]``."""
+    def ratio(self, key: str, default: float, *, upper: float = 1.0) -> float:
+        """Return a number in ``]0, upper]``."""
         value = self.data.get(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise self.error(key, "expected a number")
-        if not 0 < value <= 1:
-            raise self.error(key, "must be in ]0, 1]")
+        if not 0 < value <= upper:
+            raise self.error(key, f"must be in ]0, {upper:g}]")
         return float(value)
+
+    def flag(self, key: str, *, default: bool) -> bool:
+        """Return a boolean value."""
+        value = self.data.get(key, default)
+        if not isinstance(value, bool):
+            raise self.error(key, "expected a boolean")
+        return value
 
     def severity(self, key: str, default: Severity) -> Severity:
         """Return a severity name parsed as a severity."""
@@ -242,6 +285,18 @@ def _parse_html(section: _Section) -> HtmlConfig:
             "PageOrder",
             section.choice("page_order", "auto", PAGE_ORDERS),
         ),
+    )
+
+
+def _parse_pdf(section: _Section) -> PdfConfig:
+    section.check_keys(
+        ("header_band", "footer_band", "repeat_share", "compare_toc"),
+    )
+    return PdfConfig(
+        header_band=section.ratio("header_band", 0.08, upper=0.5),
+        footer_band=section.ratio("footer_band", 0.08, upper=0.5),
+        repeat_share=section.ratio("repeat_share", 0.3),
+        compare_toc=section.flag("compare_toc", default=False),
     )
 
 
@@ -334,6 +389,7 @@ def config_from_mapping(
     return replace(
         general,
         html=_parse_html(section("html")),
+        pdf=_parse_pdf(section("pdf")),
         compare=_parse_thresholds(section("thresholds")),
         ignore=_parse_ignore(section("ignore")),
         severity=_parse_severity(section("severity")),
