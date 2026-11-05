@@ -33,6 +33,105 @@ IN = Severity.INFO
 
 type Transform = Callable[[DocSpec], DocSpec]
 
+# Defects injected into a documentation, each with the rule and the severity
+# of the one finding it must give. The PDF comparison reuses them.
+DEFECTS: list[tuple[DocSpec, Transform, str, Severity]] = [
+    (
+        SAMPLE_EN,
+        lambda s: drop_paragraph(s, "Each project has an owner"),
+        "block.missing",
+        C,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: drop_section(s, "exports"),
+        "section.missing",
+        C,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(
+            s,
+            "installer downloads",
+            "installer donwloads",
+        ),
+        "text.typo",
+        MA,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(s, "100 requests", "10 requests"),
+        "text.number_changed",
+        C,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(s, "Do not delete", "Do delete"),
+        "text.negation_changed",
+        C,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(s, "You must restart", "You may restart"),
+        "text.modality_changed",
+        MA,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(
+            s,
+            "efficient scheduler",
+            "ecient scheduler",
+        ),
+        "text.ligature_lost",
+        MA,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(s, "1,000 jobs", "1000 jobs"),
+        "text.number_format",
+        IN,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: add_paragraph(
+            s,
+            "exports",
+            "Exports can also be scheduled every night.",
+        ),
+        "block.added",
+        MI,
+    ),
+    (
+        SAMPLE_FR,
+        lambda s: replace_text(s, "pendant l'été", "pendant l'ete"),
+        "text.accent_lost",
+        MA,
+    ),
+    (
+        SAMPLE_FR,
+        lambda s: replace_text(s, "Ne supprimez pas", "Supprimez"),
+        "text.negation_changed",
+        C,
+    ),
+    (
+        SAMPLE_FR,
+        lambda s: replace_text(
+            s,
+            "pendant l'été",
+            "pendant l'\xc3\xa9t\xc3\xa9",
+        ),
+        "text.encoding_issue",
+        C,
+    ),
+    (
+        SAMPLE_FR,
+        lambda s: replace_text(s, "1 000 fichiers", "100 fichiers"),
+        "text.number_changed",
+        C,
+    ),
+]
+
 
 def _compare(
     tmp_path: Path,
@@ -58,105 +157,7 @@ def test_generator_only_differences_produce_no_finding(
     assert [f.rule for f in findings if f.severity >= MI] == []
 
 
-@pytest.mark.parametrize(
-    ("spec", "transform", "rule", "severity"),
-    [
-        (
-            SAMPLE_EN,
-            lambda s: drop_paragraph(s, "Each project has an owner"),
-            "block.missing",
-            C,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: drop_section(s, "exports"),
-            "section.missing",
-            C,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: replace_text(
-                s,
-                "installer downloads",
-                "installer donwloads",
-            ),
-            "text.typo",
-            MA,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: replace_text(s, "100 requests", "10 requests"),
-            "text.number_changed",
-            C,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: replace_text(s, "Do not delete", "Do delete"),
-            "text.negation_changed",
-            C,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: replace_text(s, "You must restart", "You may restart"),
-            "text.modality_changed",
-            MA,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: replace_text(
-                s,
-                "efficient scheduler",
-                "ecient scheduler",
-            ),
-            "text.ligature_lost",
-            MA,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: replace_text(s, "1,000 jobs", "1000 jobs"),
-            "text.number_format",
-            IN,
-        ),
-        (
-            SAMPLE_EN,
-            lambda s: add_paragraph(
-                s,
-                "exports",
-                "Exports can also be scheduled every night.",
-            ),
-            "block.added",
-            MI,
-        ),
-        (
-            SAMPLE_FR,
-            lambda s: replace_text(s, "pendant l'été", "pendant l'ete"),
-            "text.accent_lost",
-            MA,
-        ),
-        (
-            SAMPLE_FR,
-            lambda s: replace_text(s, "Ne supprimez pas", "Supprimez"),
-            "text.negation_changed",
-            C,
-        ),
-        (
-            SAMPLE_FR,
-            lambda s: replace_text(
-                s,
-                "pendant l'été",
-                "pendant l'\xc3\xa9t\xc3\xa9",
-            ),
-            "text.encoding_issue",
-            C,
-        ),
-        (
-            SAMPLE_FR,
-            lambda s: replace_text(s, "1 000 fichiers", "100 fichiers"),
-            "text.number_changed",
-            C,
-        ),
-    ],
-)
+@pytest.mark.parametrize(("spec", "transform", "rule", "severity"), DEFECTS)
 def test_injected_defect_is_reported(
     tmp_path: Path,
     spec: DocSpec,

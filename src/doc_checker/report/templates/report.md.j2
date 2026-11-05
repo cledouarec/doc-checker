@@ -36,7 +36,15 @@ No findings.
 ## Removed page chrome
 
 {% for text in chrome %}
-- {{ text }}
+- {{ md_text(text) }}
+{% endfor %}
+{% endif %}
+{% if warnings %}
+
+## Warnings
+
+{% for label, text in warnings %}
+- {{ label }}: {{ md_text(text) }}
 {% endfor %}
 {% endif %}
 {% for title, findings in sections %}
@@ -51,7 +59,7 @@ No findings.
 - ID: `{{ finding.id }}`
 {% if finding.detail %}
 
-{{ finding.detail }}
+{{ md_text(finding.detail) }}
 {% endif %}
 
 | Reference | New |

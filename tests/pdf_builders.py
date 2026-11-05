@@ -13,14 +13,17 @@ without any PDF, for the tests of the steps that work on them.
 import html
 import io
 import re
+from dataclasses import dataclass
+from functools import partial
 from itertools import chain, pairwise
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Final, override
 
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 from fpdf.fonts import TextStyle
 from PIL import Image as PILImage
 from PIL import ImageDraw
+from pypdf import PdfReader, PdfWriter
 from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -39,7 +42,9 @@ from reportlab.platypus import (
     PageTemplate,
     Paragraph,
     Preformatted,
+    SimpleDocTemplate,
     Table,
+    TableStyle,
 )
 from reportlab.platypus.tableofcontents import TableOfContents
 
@@ -49,7 +54,7 @@ from doc_checker.extract.pdf.segments import Segment
 from tests.builders import DocSpec, Section, smart_typography
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from pathlib import Path
 
 _SHY = "\xad"
@@ -501,6 +506,193 @@ def build_raw_pdf(
     return out
 
 
+def pdf_stream(text: str) -> str:
+    """Return a PDF stream object that holds an ASCII text.
+
+    Args:
+        text: The data of the stream.
+
+    Returns:
+        The stream object: its dictionary, which gives the length, then the
+        data.
+    """
+    return f"<< /Length {len(text)} >>\nstream\n{text}\nendstream"
+
+
+def to_unicode_cmap(mapping: Mapping[str, str]) -> str:
+    """Return a ToUnicode CMap object, from byte codes to UTF-16 hex.
+
+    Args:
+        mapping: The text of each byte code, both in hexadecimal digits:
+            ``{"41": "0041"}`` maps A to itself, and ``{"41": "D83DDE00"}``
+            maps it to a character beyond U+FFFF, written as its two halves.
+            The CMap has a single block of codes, which allows 100 at most.
+
+    Returns:
+        The stream object of the CMap.
+    """
+    pairs = "".join(f"<{code}> <{utf16}>\n" for code, utf16 in mapping.items())
+    return pdf_stream(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) "
+        "/Supplement 0 >> def\n"
+        "/CMapName /Adobe-Identity-UCS def /CMapType 2 def\n"
+        "1 begincodespacerange <00> <FF> endcodespacerange\n"
+        f"{len(mapping)} beginbfchar\n{pairs}endbfchar\n"
+        "endcmap CMapName currentdict /CMap defineresource pop end end",
+    )
+
+
+def build_single_page_pdf(
+    out: Path,
+    content: str,
+    *,
+    font: str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    page: str = "/MediaBox [0 0 200 200]",
+    extra: tuple[str, ...] = (),
+) -> Path:
+    """Write a one page PDF that shows a content stream in the font F1.
+
+    Args:
+        out: The PDF file to write.
+        content: The content stream of the page, in ASCII.
+        font: The object of the font F1.
+        page: The entries of the page dictionary, such as its boxes and its
+            rotation.
+        extra: Objects to write after the font. They are numbered from 6, and
+            the font can refer to them.
+
+    Returns:
+        The PDF file.
+    """
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            f"<< /Type /Page /Parent 2 0 R {page} /Contents 4 0 R "
+            "/Resources << /Font << /F1 5 0 R >> >> >>"
+        ),
+        pdf_stream(content),
+        font,
+        *extra,
+    ]
+    data = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(data))
+        data += f"{number} 0 obj\n{body}\nendobj\n".encode("ascii")
+    count = len(objects) + 1
+    entries = "".join(f"{offset:010d} 00000 n \n" for offset in offsets)
+    trailer = (
+        f"xref\n0 {count}\n0000000000 65535 f \n{entries}"
+        f"trailer\n<< /Size {count} /Root 1 0 R >>\n"
+        f"startxref\n{len(data)}\n%%EOF\n"
+    )
+    out.write_bytes(data + trailer.encode("ascii"))
+    return out
+
+
+# Layout of the PDF of bullets, in points: the left edge of the sentences and
+# of the bullets, the left edge of the text of the items, the baseline of the
+# first sentence and the distance between two baselines.
+_BULLETS_LEFT = 72
+_BULLETS_TEXT = 90
+_BULLETS_TOP = 700
+_BULLETS_LEADING = 20
+# The font has the encoding of cp1252, in which the code 95 is a bullet: with
+# no encoding, PDFium drops a text object that holds that code alone. It gets
+# its Unicode values from the CMap that follows it in the file.
+_BULLETS_FONT = (
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+    "/Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>"
+)
+# In that CMap, the codes from the space to the tilde are their ASCII
+# characters. The code 95 is the bullet of cp1252, U+2022. The code B7, the
+# middle dot of cp1252, is the private use character U+F0B7, which PDFium
+# returns for the bullet of the Symbol font of Word.
+_BULLETS_UNICODE = {
+    **{f"{code:02X}": f"{code:04X}" for code in range(0x20, 0x7F)},
+    "95": "2022",
+    "B7": "F0B7",
+    "D8": "F0D8",
+    "FC": "F0FC",
+    "F6": "F076",
+}
+# The code of the cp1252 font for each private use bullet that Word sets.
+_BULLETS_CODES = {
+    "\U0000f0b7": r"\267",
+    "\U0000f0d8": r"\330",
+    "\U0000f0fc": r"\374",
+    "\U0000f076": r"\366",
+}
+
+
+def _show_text(text: str, x: float, y: float) -> str:
+    """Return the operators that draw a text in Helvetica 11."""
+    return f"BT /F1 11 Tf {x} {y} Td ({text}) Tj ET"
+
+
+def build_bullets_pdf(
+    items: Sequence[str],
+    out: Path,
+    *,
+    word: bool,
+    bullet: str = "\U0000f0b7",
+    gap: bool = True,
+) -> Path:
+    """Write an A4 PDF of a bulleted list between two sentences.
+
+    The text is Helvetica 11 in the cp1252 encoding, a line every 20 pt. Each
+    bullet is a text object of its own, 72 pt from the left edge, and the text
+    of its item is another one, 18 pt right of the bullet. The bullet of Word
+    is the code B7, which the ToUnicode CMap of the font maps to U+F0B7, the
+    private use character that PDFium returns for the Symbol font of Word. The
+    other bullet is the code 95, the bullet of cp1252, which the CMap maps to
+    U+2022. PDFium returns both kinds of bullet. The CMap also maps the codes
+    D8, FC and F6 to U+F0D8, U+F0FC and U+F076, the arrow, the check mark and
+    the diamond of Wingdings.
+
+    Args:
+        items: The text of each item, in ASCII and without parentheses or
+            backslashes.
+        out: The PDF file to write.
+        word: Whether the bullets are those of Word rather than the others.
+        bullet: With `word`, the character that PDFium reads for the bullet,
+            one of the private use characters of the CMap. The PDF holds the
+            code that the CMap maps to it.
+        gap: Whether the bullet and the text of an item are two text objects.
+            Otherwise they are one string in one text object, 72 pt from the
+            left edge.
+
+    Returns:
+        The PDF file.
+    """
+    code = _BULLETS_CODES[bullet] if word else r"\225"
+    shown = [
+        _show_text("The requirements follow.", _BULLETS_LEFT, _BULLETS_TOP),
+    ]
+    for number, item in enumerate(items, 1):
+        y = _BULLETS_TOP - _BULLETS_LEADING * number
+        if gap:
+            shown += [
+                _show_text(code, _BULLETS_LEFT, y),
+                _show_text(item, _BULLETS_TEXT, y),
+            ]
+        else:
+            shown.append(_show_text(code + item, _BULLETS_LEFT, y))
+    closing = _BULLETS_TOP - _BULLETS_LEADING * (len(items) + 1)
+    shown.append(
+        _show_text("Then install the package.", _BULLETS_LEFT, closing),
+    )
+    return build_single_page_pdf(
+        out,
+        "\n".join(shown),
+        font=_BULLETS_FONT,
+        page="/MediaBox [0 0 595 842]",
+        extra=(to_unicode_cmap(_BULLETS_UNICODE),),
+    )
+
+
 def build_scanned_pdf(out: Path, *, pages: int = 2) -> Path:
     """Write a PDF of full page images without any text, like a scan.
 
@@ -517,6 +709,675 @@ def build_scanned_pdf(out: Path, *, pages: int = 2) -> Path:
         canvas.drawImage(image, 0, 0, *A4)
         canvas.showPage()
     canvas.save()
+    return out
+
+
+# Layout of the PDF of lines, in points: the margin, the distance between two
+# lines and the extra distance between two paragraphs.
+_LINES_MARGIN = 72
+_LINES_LEADING = 12
+_LINES_PARAGRAPH_GAP = 6
+# The slant of synthetic italics, in degrees.
+_SYNTHETIC_SLANT = 12
+
+
+def _draw_line(
+    canvas: Canvas,
+    y: float,
+    line: str,
+    slanted: re.Pattern[str] | None,
+) -> None:
+    """Draw a line of `build_lines_pdf`, with its slanted words.
+
+    Args:
+        canvas: The canvas of the page.
+        y: The baseline of the line.
+        line: The text of the line.
+        slanted: The words to slant, as a pattern that captures them, if any.
+    """
+    # Splitting on a capturing pattern puts the slanted words at odd indexes,
+    # between the runs of upright text.
+    pieces = slanted.split(line) if slanted else [line]
+    x = _LINES_MARGIN
+    for index, piece in enumerate(pieces):
+        if index % 2:
+            canvas.saveState()
+            canvas.translate(x, y)
+            canvas.skew(0, _SYNTHETIC_SLANT)
+            canvas.drawString(0, 0, piece)
+            canvas.restoreState()
+        else:
+            canvas.drawString(x, y, piece)
+        x += canvas.stringWidth(piece)
+
+
+def build_lines_pdf(
+    paragraphs: Sequence[Sequence[str]],
+    out: Path,
+    *,
+    slanted: Collection[str] = (),
+) -> Path:
+    """Write an A4 PDF whose lines are broken exactly where they are given.
+
+    The text is Times-Roman 10, drawn from the top left corner, 72 pt from the
+    edges of the page. There are 12 pt between two lines and 6 pt more between
+    two paragraphs. A line that would start below the bottom margin goes to
+    the top of a new page.
+
+    The slanted words are set in synthetic italics, as LibreOffice, Chrome or
+    cairo set the italics of a font that has none: their upright glyphs are
+    sheared by 12 degrees, on the baseline of the line.
+
+    Args:
+        paragraphs: The paragraphs, each given line by line.
+        out: The PDF file to write.
+        slanted: The words to set in synthetic italics, wherever they stand
+            as whole words.
+
+    Returns:
+        The PDF file.
+    """
+    pattern = None
+    if slanted:
+        words = "|".join(re.escape(word) for word in sorted(slanted))
+        pattern = re.compile(rf"\b({words})\b")
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    y = _H - _LINES_MARGIN
+    for lines in paragraphs:
+        for line in lines:
+            if y < _LINES_MARGIN:
+                canvas.showPage()
+                canvas.setFont("Times-Roman", 10)
+                y = _H - _LINES_MARGIN
+            _draw_line(canvas, y, line, pattern)
+            y -= _LINES_LEADING
+        y -= _LINES_PARAGRAPH_GAP
+    canvas.save()
+    return out
+
+
+def build_turned_pdf(
+    pages: Sequence[Sequence[str]],
+    out: Path,
+    *,
+    turned: Collection[int] = (),
+    tab: float | None = None,
+) -> Path:
+    """Write an A4 PDF of lines, with some of its pages turned to landscape.
+
+    Each page holds its lines in Times-Roman 10, a line every 12 pt, 72 pt from
+    the left and top edges of the page as it is read. A turned page is set as
+    the LaTeX package pdflscape sets one: its text runs up the page, and the
+    page has a rotation of 90 degrees, which turns it upright in a viewer.
+
+    With a tab, the text that follows the tab character of a line is a text
+    object of its own, which starts `tab` points right of the start of the
+    line, with no space glyph between the two objects, as the next cell of a
+    table in LaTeX. PDFium generates the space between them.
+
+    Args:
+        pages: The lines of each page.
+        out: The PDF file to write.
+        turned: Positions of the turned pages, from 0.
+        tab: Where the text after the tab of a line starts, in points from
+            the start of the line. Without it, each line is drawn whole.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    for index, lines in enumerate(pages):
+        # reportlab keeps the rotation of a page for the next pages.
+        canvas.setPageRotation(90 if index in turned else 0)
+        canvas.saveState()
+        if index in turned:
+            canvas.translate(_W, 0)
+            canvas.rotate(90)
+            top = _W - _LINES_MARGIN
+        else:
+            top = _H - _LINES_MARGIN
+        canvas.setFont("Times-Roman", 10)
+        for number, line in enumerate(lines):
+            y = top - _LINES_LEADING * number
+            if tab is not None and "\t" in line:
+                cell, rest = line.split("\t", 1)
+                canvas.drawString(_LINES_MARGIN, y, cell)
+                canvas.drawString(_LINES_MARGIN + tab, y, rest)
+            else:
+                canvas.drawString(_LINES_MARGIN, y, line)
+        canvas.restoreState()
+        canvas.showPage()
+    canvas.save()
+    return out
+
+
+_GUIDE_BODY = ParagraphStyle(
+    "guide",
+    fontName="Times-Roman",
+    fontSize=11,
+    leading=14,
+    spaceAfter=7,
+)
+_GUIDE_TITLE = ParagraphStyle(
+    "guide-title",
+    fontName="Helvetica-Bold",
+    fontSize=18,
+    leading=22,
+    spaceAfter=10,
+)
+_GUIDE_ENTRIES = ("Preface", "Installation", "Usage", "Limits")
+
+
+def build_contents_pdf(out: Path, *, contents: bool) -> Path:
+    """Write a short A4 guide, with a contents page before it or without.
+
+    The guide opens with a plain paragraph, which is the first block after the
+    contents page. The last entry of the contents does not end like a
+    sentence, so it looks like the start of a sentence that goes on.
+
+    Args:
+        out: The PDF file to write.
+        contents: Whether to start with a contents page, titled ``Contents``,
+            whose entries run to their page numbers along dot leaders.
+
+    Returns:
+        The PDF file.
+    """
+    story: list[Flowable] = []
+    if contents:
+        story.append(Paragraph("Contents", _GUIDE_TITLE))
+        story += [
+            Paragraph(f"{entry} . . . . . . . . . . 2", _GUIDE_BODY)
+            for entry in _GUIDE_ENTRIES
+        ]
+        story.append(PageBreak())
+    story += [
+        Paragraph(
+            "This guide explains how to install, configure and run the "
+            "service on a cluster.",
+            _GUIDE_BODY,
+        ),
+        Paragraph("Installation", _GUIDE_TITLE),
+        Paragraph(
+            "Install the package with the default configuration before you "
+            "start.",
+            _GUIDE_BODY,
+        ),
+        Paragraph("Usage", _GUIDE_TITLE),
+        Paragraph("Run the service with its default options.", _GUIDE_BODY),
+    ]
+    SimpleDocTemplate(str(out), pagesize=A4, title="Example").build(story)
+    return out
+
+
+# The words of the pseudo English text of `filler_sections`.
+FILLER_WORDS: Final = (
+    "service",
+    "request",
+    "client",
+    "server",
+    "cache",
+    "option",
+    "value",
+    "table",
+    "project",
+    "export",
+    "install",
+    "configure",
+    "restart",
+    "directory",
+    "archive",
+    "module",
+    "package",
+    "network",
+    "latency",
+    "storage",
+    "volume",
+    "backup",
+    "restore",
+    "account",
+    "member",
+    "owner",
+    "schedule",
+    "worker",
+    "queue",
+    "message",
+    "timeout",
+    "retry",
+    "policy",
+    "limit",
+    "quota",
+    "rule",
+    "report",
+    "document",
+    "section",
+    "chapter",
+    "figure",
+    "listing",
+    "example",
+    "manual",
+    "guide",
+    "release",
+    "version",
+    "upgrade",
+    "migrate",
+    "deploy",
+    "cluster",
+    "node",
+    "replica",
+    "shard",
+)
+
+
+def _filler_sentence(section: int, paragraph: int, index: int) -> str:
+    length = 8 + (section + 2 * paragraph + 3 * index) % 9
+    start = 11 * section + 7 * paragraph + 5 * index
+    words = [
+        FILLER_WORDS[(start + 3 * word + word * word) % len(FILLER_WORDS)]
+        for word in range(length)
+    ]
+    return " ".join(words).capitalize() + "."
+
+
+def filler_sections(
+    count: int,
+    paragraphs: int,
+    sentences: int,
+) -> list[list[str]]:
+    """Make sections of paragraphs of pseudo English, the same on every call.
+
+    Each paragraph starts with a mark that no other paragraph has, such as
+    ``S1P3`` for the paragraph 3 of the section 1, both counted from 0. Its
+    sentences follow, one blank apart. A sentence has 8 to 16 words of
+    `FILLER_WORDS`, which follow from its position, without any randomness.
+
+    Args:
+        count: The number of sections.
+        paragraphs: The number of paragraphs of each section.
+        sentences: The number of sentences of each paragraph.
+
+    Returns:
+        The paragraphs of each section.
+    """
+    return [
+        [
+            f"S{section}P{paragraph} "
+            + " ".join(
+                _filler_sentence(section, paragraph, index)
+                for index in range(sentences)
+            )
+            for paragraph in range(paragraphs)
+        ]
+        for section in range(count)
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class ProseStyle:
+    """The layout of the pages of `build_prose_pdf`, in points.
+
+    Attributes:
+        leading: The distance between the baselines of two lines of a
+            paragraph.
+        space_after: The extra space after each paragraph.
+        first_indent: The indent of the first line of each paragraph.
+        bottom_margin: The distance between the text and the bottom edge of
+            the page.
+        page_number_y: The baseline of the page number, centred on each
+            page, or None for pages without a number.
+        watermark: Whether a DRAFT watermark crosses each page at 45
+            degrees.
+        roman_pages: The number of first pages whose number is a lower case
+            roman numeral, as in a book with front matter. The arabic
+            numbers start again at 1 after them.
+        page_labels: Whether the PDF has page labels that tell those numbers:
+            roman lower case on the first pages, then arabic from 1.
+    """
+
+    leading: float = 12.0
+    space_after: float = 6.0
+    first_indent: float = 0.0
+    bottom_margin: float = _PAGE_MARGIN
+    page_number_y: float | None = None
+    watermark: bool = False
+    roman_pages: int = 0
+    page_labels: bool = False
+
+
+_ROMAN_FOLIOS: Final = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix")
+
+
+def _draw_prose_page(
+    canvas: Canvas,
+    doc: BaseDocTemplate,
+    *,
+    style: ProseStyle,
+) -> None:
+    """Draw what the style adds to a page of `build_prose_pdf`, besides text.
+
+    Args:
+        canvas: The canvas of the page.
+        doc: The document, which gives the number of the page.
+        style: The layout of the pages.
+    """
+    canvas.saveState()
+    if style.page_labels and doc.page == 1:
+        canvas.addPageLabel(0, style="ROMAN_LOWER", start=1)
+        if style.roman_pages:
+            canvas.addPageLabel(style.roman_pages, style="ARABIC", start=1)
+    if style.page_number_y is not None:
+        folio = (
+            _ROMAN_FOLIOS[doc.page - 1]
+            if doc.page <= style.roman_pages
+            else str(doc.page - style.roman_pages)
+        )
+        canvas.setFont("Times-Roman", 10)
+        canvas.drawCentredString(_W / 2, style.page_number_y, folio)
+    if style.watermark:
+        canvas.translate(_W / 2, _H / 2)
+        canvas.rotate(45)
+        canvas.setFont("Helvetica", 72)
+        canvas.drawCentredString(0, 0, "DRAFT")
+    canvas.restoreState()
+
+
+def build_prose_pdf(
+    sections: Sequence[Sequence[str]],
+    out: Path,
+    style: ProseStyle | None = None,
+) -> Path:
+    """Write sections of paragraphs as an A4 PDF made with reportlab.
+
+    The PDF has one column, 25 mm from the left, right and top edges of the
+    page and `bottom_margin` from the bottom one, and no header. Its only
+    footer is the page number, if the style gives a baseline for it, in
+    Times-Roman 10. A watermark, if the style asks for one, is ``DRAFT`` in
+    Helvetica 72, centred on the page. The section ``i``, counted from 0,
+    opens with the title ``Chapter title i`` in Helvetica-Bold 16. Its
+    paragraphs follow, justified, in Times-Roman 10.
+
+    Args:
+        sections: The paragraphs of each section.
+        out: The PDF file to write.
+        style: The layout of the pages. The default `ProseStyle` if
+            omitted.
+
+    Returns:
+        The PDF file.
+    """
+    if style is None:
+        style = ProseStyle()
+    heading = ParagraphStyle(
+        "prose-heading",
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=20,
+        spaceBefore=10,
+        spaceAfter=8,
+    )
+    body = ParagraphStyle(
+        "prose",
+        fontName="Times-Roman",
+        fontSize=10,
+        leading=style.leading,
+        spaceAfter=style.space_after,
+        firstLineIndent=style.first_indent,
+        alignment=TA_JUSTIFY,
+    )
+    doc = BaseDocTemplate(
+        str(out),
+        pagesize=A4,
+        title="Example",
+        leftMargin=_PAGE_MARGIN,
+        rightMargin=_PAGE_MARGIN,
+        topMargin=_PAGE_MARGIN,
+        bottomMargin=style.bottom_margin,
+    )
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height)
+    doc.addPageTemplates(
+        [
+            PageTemplate(
+                "prose",
+                [frame],
+                onPage=partial(_draw_prose_page, style=style),
+            ),
+        ],
+    )
+    story: list[Flowable] = []
+    for index, texts in enumerate(sections):
+        story.append(Paragraph(f"Chapter title {index}", heading))
+        story += [Paragraph(text, body) for text in texts]
+    doc.build(story)
+    return out
+
+
+_REFERENCE = ParagraphStyle(
+    "reference",
+    fontName="Times-Roman",
+    fontSize=10,
+    leading=12,
+    leftIndent=18,
+    firstLineIndent=-18,
+)
+_REFERENCES_TITLE = ParagraphStyle(
+    "references-title",
+    fontName="Helvetica-Bold",
+    fontSize=16,
+    leading=20,
+    spaceAfter=8,
+)
+
+
+def build_references_pdf(
+    entries: Sequence[str],
+    out: Path,
+    *,
+    right_margin: float,
+) -> Path:
+    """Write a list of references with hanging indents as an A4 PDF.
+
+    The list is titled ``References``. Each entry is a paragraph in
+    Times-Roman 10, whose lines after the first are indented by 18 pt, with no
+    space between two entries. The left margin is 25 mm.
+
+    Args:
+        entries: The texts of the entries.
+        out: The PDF file to write.
+        right_margin: The right margin, in points, which sets where the lines
+            of the entries break.
+
+    Returns:
+        The PDF file.
+    """
+    story: list[Flowable] = [Paragraph("References", _REFERENCES_TITLE)]
+    story += [Paragraph(text, _REFERENCE) for text in entries]
+    SimpleDocTemplate(
+        str(out),
+        pagesize=A4,
+        title="Example",
+        leftMargin=_PAGE_MARGIN,
+        rightMargin=right_margin,
+    ).build(story)
+    return out
+
+
+_TABLE_TEXT = ParagraphStyle(
+    "table-text",
+    fontName="Times-Roman",
+    fontSize=10,
+    leading=12,
+    spaceAfter=6,
+)
+
+
+def build_table_pdf(
+    out: Path,
+    *,
+    margin: float,
+    rows: Sequence[Sequence[str]] | None = None,
+    padding: float | None = None,
+) -> Path:
+    """Write a long table as an A4 PDF.
+
+    A sentence introduces the table and another one ends the text, both in
+    Times-Roman 10. The table runs over several pages, and its header row is
+    not repeated on the next pages. Its first column is 120 pt wide, and the
+    other ones share 300 pt. Its cells are in Helvetica 10 on a 12 pt
+    leading, which their padding sets apart.
+
+    Args:
+        out: The PDF file to write.
+        margin: The distance between the text and each edge of the page, in
+            points.
+        rows: The rows of the table, the header row first. If omitted, a
+            table of settings: the header row ``Option`` and ``Default``, and
+            160 rows, the row ``i``, counted from 0, holding a setting name
+            made of a letter and a number, such as ``setting_c0``, and the
+            number ``10 * i + 7``.
+        padding: The space above and below the text of each cell, in
+            points. The 3 pt of reportlab if omitted.
+
+    Returns:
+        The PDF file.
+    """
+    if rows is None:
+        rows = [
+            ("Option", "Default"),
+            *(
+                (f"setting_{chr(97 + i % 26)}{i // 26}", str(10 * i + 7))
+                for i in range(160)
+            ),
+        ]
+    others = len(rows[0]) - 1
+    widths = [120, *[300 / others] * others]
+    style = None
+    if padding is not None:
+        style = TableStyle(
+            [
+                ("TOPPADDING", (0, 0), (-1, -1), padding),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
+            ],
+        )
+    story: list[Flowable] = [
+        Paragraph(
+            "The settings of the service are listed below with their "
+            "default values.",
+            _TABLE_TEXT,
+        ),
+        Table(rows, hAlign="LEFT", colWidths=widths, style=style),
+        Paragraph(
+            "All the values can be changed in the configuration file.",
+            _TABLE_TEXT,
+        ),
+    ]
+    SimpleDocTemplate(
+        str(out),
+        pagesize=A4,
+        title="Settings",
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
+    ).build(story)
+    return out
+
+
+# Layout of the PDF of a listing, in points: the left edge of the text and of
+# the code, the baseline of the first line of code and the distance between the
+# baselines of two lines of code.
+_LISTING_LEFT = 72
+_LISTING_TOP = 740
+_LISTING_LEADING = 12
+
+
+def build_listing_pdf(
+    code: Sequence[str],
+    out: Path,
+    *,
+    numbers: bool,
+    numbersep: float = 6.0,
+    page_lines: int | None = None,
+) -> Path:
+    """Write an A4 PDF of a code listing between two sentences.
+
+    The sentences are in Times-Roman 11, 72 pt from the left edge. The code is
+    in Courier 10, 72 pt from the left edge too, a line every 12 pt, and an
+    empty line leaves a blank. With numbers, each line, an empty one too, has
+    its number in Times-Roman 6, right aligned `numbersep` before the code:
+    this is how the LaTeX package listings sets the numbers of the lines in a
+    tiny type. A number is drawn before its code, as LaTeX does, so that it
+    opens the text of its line.
+
+    Args:
+        code: The lines of code, the first one being the line 1.
+        out: The PDF file to write.
+        numbers: Whether to number the lines.
+        numbersep: The distance between the right edge of the numbers and the
+            code, in points. The 6 pt default leaves the number in the same
+            segment as its code; two sizes of the code, 20 pt, or more set it
+            in a segment of its own.
+        page_lines: The number of lines of code on a page, the empty ones
+            included. The code goes on at the top of the next page after
+            them, as high as it starts on the first page, and the last
+            sentence follows the last line, on the last page. All the code
+            is on the first page if omitted.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 11)
+    canvas.drawString(
+        _LISTING_LEFT,
+        _LISTING_TOP + 20,
+        "The program prints the working directory.",
+    )
+    per_page = page_lines or max(len(code), 1)
+    row = -1  # The row of the last line of code, counted from the page top.
+    for number, text in enumerate(code, 1):
+        row = (number - 1) % per_page
+        if number > 1 and row == 0:
+            canvas.showPage()
+        y = _LISTING_TOP - _LISTING_LEADING * row
+        if numbers:
+            canvas.setFont("Times-Roman", 6)
+            canvas.drawRightString(_LISTING_LEFT - numbersep, y, str(number))
+        if text:
+            canvas.setFont("Courier", 10)
+            canvas.drawString(_LISTING_LEFT, y, text)
+    canvas.setFont("Times-Roman", 11)
+    canvas.drawString(
+        _LISTING_LEFT,
+        _LISTING_TOP - _LISTING_LEADING * (row + 2),
+        "Run it from any directory.",
+    )
+    canvas.save()
+    return out
+
+
+def swap_pages(source: Path, out: Path, first: int, second: int) -> Path:
+    """Copy a PDF with two of its pages swapped.
+
+    Only the pages are copied: the new PDF has no bookmarks, and neither the
+    title nor the language of the source.
+
+    Args:
+        source: The PDF file to copy.
+        out: The PDF file to write.
+        first: Position of one of the two pages, from 0.
+        second: Position of the other page, from 0.
+
+    Returns:
+        The PDF file.
+    """
+    pages = PdfReader(source).pages
+    order = list(range(len(pages)))
+    order[first], order[second] = order[second], order[first]
+    writer = PdfWriter()
+    for index in order:
+        writer.add_page(pages[index])
+    writer.write(out)
     return out
 
 

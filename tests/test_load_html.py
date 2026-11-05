@@ -1,6 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for loading HTML documents."""
 
+import html
 from typing import TYPE_CHECKING
 
 import pytest
@@ -113,15 +114,15 @@ def test_unknown_profile(tmp_path: Path) -> None:
         load_html(tmp_path, HtmlConfig(profile="nope"), lang="auto")
 
 
-def test_detect_format_and_pdf_rejection(tmp_path: Path) -> None:
-    """Formats are detected and PDF is rejected for now."""
+def test_detect_format_and_damaged_pdf(tmp_path: Path) -> None:
+    """Formats are detected and a damaged PDF is an input error."""
     (tmp_path / "x.bin").write_bytes(b"%PDF-1.7")
     (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
     assert detect_format(tmp_path) == "html"
     assert detect_format(tmp_path / "x.bin") == "pdf"
     with pytest.raises(InputError, match="unsupported input"):
         detect_format(tmp_path / "notes.txt")
-    with pytest.raises(InputError, match="PDF input is not supported yet"):
+    with pytest.raises(InputError, match="invalid or damaged PDF"):
         load_document(tmp_path / "x.bin", Config())
 
 
@@ -143,3 +144,23 @@ def test_sphinx_toctree_is_not_content(tmp_path: Path) -> None:
     doc = load_html(page, HtmlConfig(), lang="auto")
     assert doc.generator == "sphinx"
     assert [b.kind.value for b in doc.blocks] == ["heading", "paragraph"]
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [("fr-CA", "fr-CA"), ('en"><script>alert(1)</script>', None), ("", None)],
+)
+def test_declared_language_must_be_a_language_tag(
+    tmp_path: Path,
+    declared: str,
+    expected: str | None,
+) -> None:
+    """A declared language that is not a language tag is ignored."""
+    page = tmp_path / "a.html"
+    page.write_text(
+        f'<html lang="{html.escape(declared)}"><body>'
+        "<p>Some text here.</p></body></html>",
+        encoding="utf-8",
+    )
+    doc = load_html(page, HtmlConfig(), lang="auto")
+    assert doc.declared_lang == expected

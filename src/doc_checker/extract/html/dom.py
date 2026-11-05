@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Final
 
 from doc_checker.extract.common import DEFAULT_ADMONITION_TITLES
 from doc_checker.model.document import BlockKind
+from doc_checker.text.normalize import printable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -22,7 +23,7 @@ class RawBlock:
         kind: Kind of the block.
         text: Text with ASCII whitespace collapsed, except for code.
         line: Source line of the element.
-        anchor: Identifier of the nearest anchor.
+        anchor: Printable identifier of the nearest anchor.
         level: Heading level, for headings.
         role: Special role, such as ``admonition-title``.
     """
@@ -194,8 +195,12 @@ class _Walker:
         self.run_line = None
 
     def update_anchor(self, element: HtmlElement) -> None:
-        """Make the element identifier the current anchor if it is one."""
-        identifier = element.get("id")
+        """Make the element identifier the current anchor if it is one.
+
+        The identifier is made printable, and an identifier that has
+        nothing left is not an anchor.
+        """
+        identifier = printable(element.get("id") or "")
         if not identifier:
             return
         tag = element.tag

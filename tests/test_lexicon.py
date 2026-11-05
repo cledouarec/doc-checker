@@ -1,7 +1,13 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for lexicons and language detection."""
 
-from doc_checker.text.lang import detect_language, resolve_language
+import pytest
+
+from doc_checker.text.lang import (
+    declared_language,
+    detect_language,
+    resolve_language,
+)
 from doc_checker.text.lexicon import is_modal, negation_count
 
 FR_SAMPLE = (
@@ -42,3 +48,25 @@ def test_resolve_language() -> None:
     assert resolve_language("auto", "en-US", "") == "en"
     assert resolve_language("auto", "DE", "") == "de"
     assert resolve_language("auto", None, FR_SAMPLE) == "fr"
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("en", "en"),
+        ("fr-CA", "fr-CA"),
+        ("zh-Hant-TW", "zh-Hant-TW"),
+        (None, None),
+        ("", None),
+        (" en", None),
+        ("en\n", None),
+        ("en_US", None),
+        ("en-", None),
+        ("toolonglanguage", None),
+        ("en\x07\U0000202e", None),
+        ('en"><script>alert(1)</script>', None),
+    ],
+)
+def test_declared_language(declared: str | None, expected: str | None) -> None:
+    """Only a language tag is kept as the language a document declares."""
+    assert declared_language(declared) == expected
