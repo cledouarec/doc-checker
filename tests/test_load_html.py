@@ -10,7 +10,7 @@ from doc_checker.config import Config, HtmlConfig
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
 from doc_checker.extract.html import load_html
-from doc_checker.model.document import BlockKind
+from doc_checker.model.document import NUMBER_ATTR, BlockKind
 from tests.builders import (
     SAMPLE_EN,
     SAMPLE_FR,
@@ -220,5 +220,5 @@ def test_numbered_headings_lose_their_numbers(tmp_path: Path) -> None:
     doc = load_html(site, HtmlConfig(), lang="auto")
     headings = [b for b in doc.blocks if b.kind is BlockKind.HEADING]
     assert [b.text for b in headings] == [s.title for s in SAMPLE_EN.sections]
-    assert headings[5].attrs["number"] == "2.2"
+    assert headings[5].attrs[NUMBER_ATTR] == "2.2"
     assert doc.normalization["heading_number"] == 9

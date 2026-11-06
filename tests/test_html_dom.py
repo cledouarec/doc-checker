@@ -180,3 +180,70 @@ def test_block_content_inside_list_items() -> None:
         ("paragraph", "Body text."),
         ("list_item", "First paragraph. Second paragraph."),
     ]
+
+
+def test_links_of_blocks() -> None:
+    """Each block keeps its links, code blocks none."""
+    root = _root(
+        '<p>Read <a href="a.html">the guide</a> and '
+        '<a href="#x"><code>x</code></a>.</p>'
+        '<ul><li>See <a href="b.html">b</a><ul><li><a href="c.html">c</a>'
+        "</li></ul></li></ul>"
+        '<pre>run <a href="d.html">d</a></pre>'
+        '<div>Loose <a href="e.html">e</a> text<a href="f.html"></a></div>',
+    )
+    assert [b.links for b in blocks_from_root(root.body)] == [
+        (("the guide", "a.html"), ("x", "#x")),
+        (("b", "b.html"),),
+        (("c", "c.html"),),
+        (),
+        (("e", "e.html"),),
+    ]
+
+
+def test_identifiers_point_to_blocks() -> None:
+    """Identifiers go to their block, or to the next one for a container."""
+    root = _root(
+        '<section id="s"><h2>Title</h2><p>Body <span id="mid">text</span>.'
+        '</p></section><div id="empty"></div><p><a name="old"></a>Next.</p>',
+    )
+    assert [(b.text, b.ids) for b in blocks_from_root(root.body)] == [
+        ("Title", ("s",)),
+        ("Body text.", ("mid",)),
+        ("Next.", ("empty", "old")),
+    ]
+
+
+def test_links_and_identifiers_of_a_table_and_its_caption() -> None:
+    """A caption keeps its own links, the table those of its cells."""
+    root = _root(
+        '<table id="t"><caption id="c">See <a href="x.html">x</a></caption>'
+        '<tr><td id="cell"><a href="y.html">y</a></td></tr></table>',
+    )
+    assert [
+        (b.kind.value, b.links, b.ids) for b in blocks_from_root(root.body)
+    ] == [
+        ("caption", (("x", "x.html"),), ("t", "c")),
+        ("table", (("y", "y.html"),), ("cell",)),
+    ]
+
+
+def test_identifiers_of_elements_without_text_go_to_the_next_block() -> None:
+    """A default admonition title or an empty heading passes its ids on."""
+    root = _root(
+        '<div class="admonition note"><p class="admonition-title" id="n">'
+        'Note</p><p>Body.</p></div><h2 id="empty"></h2><p>After.</p>',
+    )
+    assert [(b.text, b.ids) for b in blocks_from_root(root.body)] == [
+        ("Body.", ("n",)),
+        ("After.", ("empty",)),
+    ]
+
+
+def test_link_texts_of_blocks_are_printable() -> None:
+    """A link text loses its bidi overrides, a link of none is left out."""
+    root = _root(
+        '<p><a href="a.html">a&#x202e;b</a> <a href="b.html">&#x202e;</a></p>',
+    )
+    (block,) = blocks_from_root(root.body)
+    assert block.links == (("a b", "a.html"),)

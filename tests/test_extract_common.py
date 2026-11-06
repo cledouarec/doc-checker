@@ -2,6 +2,7 @@
 """Tests for the block building shared by the HTML and PDF loaders."""
 
 from collections import Counter
+from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
@@ -13,7 +14,12 @@ from doc_checker.extract.common import (
     normalized_block,
     strip_heading_numbers,
 )
-from doc_checker.model.document import Block, BlockKind, SourceRef
+from doc_checker.model.document import (
+    NUMBER_ATTR,
+    Block,
+    BlockKind,
+    SourceRef,
+)
 
 SOURCE = SourceRef("doc.pdf", page=2)
 
@@ -202,7 +208,7 @@ def test_numbers_of_a_numbered_document_are_set_apart() -> None:
         _heading("Unnumbered", 2),
     ]
     result = strip_heading_numbers(blocks, counter)
-    assert [(b.text, b.attrs.get("number")) for b in result] == [
+    assert [(b.text, b.attrs.get(NUMBER_ATTR)) for b in result] == [
         ("Getting started", "1"),
         ("Installation", "1.1"),
         ("Text of the section.", None),
@@ -233,7 +239,7 @@ def test_numbered_share_decides_a_numbered_document(
         _heading(f"Unnumbered topic {chr(97 + i)}") for i in range(plain)
     ]
     result = strip_heading_numbers([*numbered, *others], Counter())
-    assert [b.attrs.get("number") for b in result[:4]] == numbers
+    assert [b.attrs.get(NUMBER_ATTR) for b in result[:4]] == numbers
 
 
 def test_numbers_stay_where_headings_are_not_numbered() -> None:
@@ -257,7 +263,7 @@ def test_a_chapter_label_becomes_the_number_of_its_heading() -> None:
         _paragraph("Not a heading after it."),
     ]
     result = strip_heading_numbers(blocks, counter)
-    assert [(b.text, b.attrs.get("number")) for b in result] == [
+    assert [(b.text, b.attrs.get(NUMBER_ATTR)) for b in result] == [
         ("Getting started", "Chapter 2"),
         ("Chapter 3", None),
         ("Not a heading after it.", None),
@@ -280,5 +286,13 @@ def test_a_chapter_label_set_as_a_heading_is_taken_too() -> None:
     assert [b.text for b in result] == ["Getting started"]
     assert result[0].attrs == {
         "heading_source": "style",
-        "number": "Chapter 1",
+        NUMBER_ATTR: "Chapter 1",
     }
+
+
+def test_a_chapter_label_gives_its_anchors_to_its_heading() -> None:
+    """The anchors of a chapter label go first, without duplicates."""
+    label = replace(_paragraph("Chapter 2"), anchors=("chapter", "shared"))
+    title = replace(_heading("Getting started"), anchors=("shared", "start"))
+    (heading,) = strip_heading_numbers([label, title], Counter())
+    assert heading.anchors == ("chapter", "shared", "start")

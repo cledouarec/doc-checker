@@ -10,7 +10,7 @@ import pytest
 from doc_checker.compare.engine import CompareResult, compare_documents
 from doc_checker.config import Config
 from doc_checker.errors import ConfigError
-from doc_checker.model.document import BlockKind, SourceRef
+from doc_checker.model.document import BlockKind, Link, SourceRef
 from doc_checker.model.findings import DiffSegment
 from doc_checker.pipeline import write_reports
 from doc_checker.report.markdown import (
@@ -201,6 +201,29 @@ def test_render_blocks_pdf_header_and_warnings() -> None:
         "doc: pdf, 2 page(s), generator ReportLab, lang en, tagged no"
     )
     assert lines[1] == "warning: 1 page(s) without text, probably scanned: 2"
+
+
+def test_render_blocks_lists_links() -> None:
+    """The listing of a document shows the targets of its links."""
+    links = (
+        Link(
+            "guide",
+            "guide/",
+            page="guide/index.html",
+            fragment="x",
+            found=True,
+        ),
+        Link("gone", "gone.html", page="gone.html"),
+        Link("site", "https://example.org", url="//example.org"),
+    )
+    block = replace(make_block("See the guide."), links=links)
+    lines = render_blocks(make_document(block)).splitlines()
+    prefix = f"{'':>5}  {'link':<10}  "
+    assert lines[2:] == [
+        f"{prefix}guide -> guide/index.html#x",
+        f"{prefix}gone -> gone.html (missing)",
+        f"{prefix}site -> https://example.org",
+    ]
 
 
 def test_render_blocks_header_tells_tagging() -> None:
@@ -499,3 +522,17 @@ def test_visible_replaces_controls_and_bidi_characters(char: str) -> None:
 def test_visible_keeps_the_other_characters(char: str) -> None:
     """The tab, the line feed and what lies next to the ranges are kept."""
     assert visible(f"a{char}b") == f"a{char}b"
+
+
+def test_terminal_counts_a_group_once() -> None:
+    """A critical group is one line that tells its occurrences."""
+    texts = [f"Paragraph {i} says that the backup is safe." for i in range(6)]
+    ref = make_document(*[make_block(t) for t in texts])
+    new = make_document(
+        *[make_block(t.replace("is safe", "is not safe")) for t in texts],
+    )
+    summary = click.unstyle(
+        render_summary(compare_documents(ref, new, Config()), []),
+    )
+    assert "findings: 1 critical, 0 major, 0 minor, 0 info" in summary
+    assert "(6 occurrences)" in summary

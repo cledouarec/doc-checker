@@ -83,7 +83,14 @@ def test_redirect_page(tmp_path: Path) -> None:
         'content="0; url=guide/a.html"></head></html>'
     )
     path = _write(tmp_path / "old.html", html)
-    assert parse_page(path, "old.html").redirect_to == "guide/a.html"
+    page = parse_page(path, "old.html")
+    assert (page.redirect_to, page.redirect_href) == (
+        "guide/a.html",
+        "guide/a.html",
+    )
+    away = _write(tmp_path / "away.html", html.replace("guide", "https://x"))
+    page = parse_page(away, "away.html")
+    assert (page.redirect_to, page.redirect_href) == (None, None)
 
 
 @pytest.mark.parametrize(

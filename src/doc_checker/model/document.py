@@ -1,16 +1,21 @@
 # Copyright 2026 Christophe Le Douarec
 """Normalized document model shared by every extractor and analyzer."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:
     from collections import Counter
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 # Key of `Block.attrs` that tells how a PDF found a heading.
 HEADING_SOURCE: Final = "heading"
+# Key of `Block.attrs` that keeps the number set apart from a heading.
+NUMBER_ATTR: Final = "number"
+# What separates the cells of a row in the text of a table.
+CELL_SEPARATOR: Final = " | "
 
 
 class BlockKind(StrEnum):
@@ -63,6 +68,44 @@ class SourceRef:
         return f"{self.file}#{fragment}" if fragment else self.file
 
 
+@dataclass(frozen=True, slots=True)
+class Link:
+    """A link of a block, resolved to a page of the site or to a URL.
+
+    Attributes:
+        text: Text of the link, made printable: its blanks collapsed.
+        href: Target as written in the page, made printable.
+        url: Normalized URL of an external link, as `normalize_url` of
+            `doc_checker.extract.html.links` gives it; ``None`` for an
+            internal link.
+        page: Page of an internal link, a POSIX path relative to the site
+            root, after the redirections; ``None`` for an external link and
+            for a link out of the site.
+        fragment: Anchor of an internal link, if any, decoded and made
+            printable as the identifiers of the blocks are.
+        found: Whether the page of an internal link exists: a page that was
+            read, or a file under the site root.
+    """
+
+    text: str
+    href: str
+    url: str | None = None
+    page: str | None = None
+    fragment: str | None = None
+    found: bool = False
+
+    @property
+    def target(self) -> str:
+        """Where the link leads, as a report shows it.
+
+        ``href`` for an external link or a link out of the site, else the
+        page followed by its fragment, if there is one.
+        """
+        if self.url is not None or self.page is None:
+            return self.href
+        return f"{self.page}#{self.fragment}" if self.fragment else self.page
+
+
 @dataclass(slots=True)
 class Block:
     """A unit of content: heading, paragraph, list item, table, code...
@@ -77,10 +120,13 @@ class Block:
         attrs: Extra extractor attributes, such as ``role``. The heading of a
             PDF has `HEADING_SOURCE`, which is ``"outline"`` if a bookmark
             found it and ``"style"`` if its look did. The heading of an HTML
-            page does not have it.
+            page does not have it. A heading of a document that numbers its
+            headings has `NUMBER_ATTR`, its number set apart from its text.
         key_strict: Comparison key used to diff texts.
         key_loose: Case, accent and punctuation insensitive key used to
             align blocks.
+        links: Links of the block, in document order.
+        anchors: Identifiers that designate the block, in document order.
     """
 
     kind: BlockKind
@@ -92,6 +138,42 @@ class Block:
     attrs: dict[str, str] = field(default_factory=dict)
     key_strict: str = ""
     key_loose: str = ""
+    links: tuple[Link, ...] = ()
+    anchors: tuple[str, ...] = ()
+
+
+def carry_anchors(
+    blocks: Sequence[Block],
+    keep: Callable[[Block], bool],
+) -> list[Block]:
+    """Return the blocks to keep, with the anchors of the others.
+
+    A link to an anchor of a block that is left out, such as page chrome,
+    has to land somewhere: the anchors of each block left out go, in order
+    and without duplicates, in front of the anchors of the next kept block
+    of the same page. They are lost if the page keeps no block after it.
+
+    Args:
+        blocks: Blocks in reading order, left unchanged.
+        keep: Tells whether a block is kept.
+
+    Returns:
+        The kept blocks, in order. A block that receives anchors is a copy.
+    """
+    kept: list[Block] = []
+    waiting: dict[str, list[str]] = {}
+    for block in blocks:
+        file = block.source.file
+        if not keep(block):
+            waiting.setdefault(file, []).extend(block.anchors)
+            continue
+        carried = waiting.pop(file, None)
+        if carried:
+            anchors = tuple(dict.fromkeys((*carried, *block.anchors)))
+            kept.append(replace(block, anchors=anchors))
+        else:
+            kept.append(block)
+    return kept
 
 
 @dataclass(slots=True)

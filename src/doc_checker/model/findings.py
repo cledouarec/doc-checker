@@ -7,7 +7,7 @@ from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Literal, Self
 
 if TYPE_CHECKING:
-    from doc_checker.model.document import SourceRef
+    from doc_checker.model.document import BlockKind, SourceRef
 
 _ID_SEPARATOR = "\x1f"
 _ID_DIGEST_SIZE = 6
@@ -67,10 +67,17 @@ class DiffSegment:
 
 @dataclass(frozen=True, slots=True)
 class Side:
-    """One side of a finding: where it is and what the text looks like."""
+    """One side of a finding: where it is and what the text looks like.
+
+    Attributes:
+        source: Where the first block of the side comes from.
+        segments: The text, cut into unchanged, deleted and inserted pieces.
+        kind: Kind of the first block of the side, if known.
+    """
 
     source: SourceRef
     segments: tuple[DiffSegment, ...]
+    kind: BlockKind | None = None
 
     @property
     def text(self) -> str:
@@ -91,6 +98,10 @@ class Finding:
         new: New side, if the finding involves the new document.
         detail: Optional extra explanation.
         id: Stable identifier, usable to ignore the finding.
+        pattern: What the finding changes; findings of one rule with the
+            same pattern are grouped when there are enough of them.
+        occurrences: The findings a group stands for, empty for a finding
+            that is not a group.
     """
 
     rule: str
@@ -101,6 +112,8 @@ class Finding:
     new: Side | None
     detail: str | None = None
     id: str = ""
+    pattern: str | None = None
+    occurrences: tuple[Finding, ...] = ()
 
 
 def finding_id(rule: str, ref: Side | None, new: Side | None) -> str:
@@ -124,6 +137,23 @@ def finding_id(rule: str, ref: Side | None, new: Side | None) -> str:
             )
     digest = hashlib.blake2b(
         _ID_SEPARATOR.join(parts).encode(),
+        digest_size=_ID_DIGEST_SIZE,
+    )
+    return digest.hexdigest()
+
+
+def group_id(rule: str, pattern: str) -> str:
+    """Return the identifier of the group of a rule and a pattern.
+
+    Args:
+        rule: Rule identifier.
+        pattern: Pattern shared by the findings of the group.
+
+    Returns:
+        Twelve hexadecimal characters.
+    """
+    digest = hashlib.blake2b(
+        _ID_SEPARATOR.join(["group", rule, pattern]).encode(),
         digest_size=_ID_DIGEST_SIZE,
     )
     return digest.hexdigest()

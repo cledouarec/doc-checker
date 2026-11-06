@@ -1,6 +1,11 @@
 # Copyright 2026 Christophe Le Douarec
-"""French and English words whose change alters the meaning of a text."""
+"""French and English words whose change alters the meaning of a text.
 
+The module also knows the words that a generator adds to a text: the
+default titles of admonitions and the labels of chapters.
+"""
+
+import re
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
@@ -171,3 +176,25 @@ def is_admonition_title(text: str) -> bool:
     return text.strip().casefold().rstrip(":").strip() in (
         DEFAULT_ADMONITION_TITLES
     )
+
+
+# A label that a generator sets above the title of a chapter, a part or an
+# appendix, such as ``Chapter 3`` or ``Annexe B``.
+CHAPTER_LABEL: Final = re.compile(
+    r"^(?:chapter|chapitre|part|partie|appendix|annexe)"
+    r"\s+(?:\d+|[ivxlc]+|[a-z])$",
+    re.IGNORECASE,
+)
+
+
+def is_chapter_label(text: str) -> bool:
+    """Tell whether a text is a chapter label, such as ``Chapter 3``.
+
+    Args:
+        text: The text of a block.
+
+    Returns:
+        Whether the whole text is a label word followed by a number, a roman
+        numeral or a letter.
+    """
+    return CHAPTER_LABEL.fullmatch(text) is not None

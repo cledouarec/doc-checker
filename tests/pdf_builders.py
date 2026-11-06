@@ -28,7 +28,7 @@ from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
+from reportlab.lib.utils import ImageReader, simpleSplit
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     BaseDocTemplate,
@@ -450,6 +450,10 @@ def _write_text(pdf: FPDF, text: str, align: str) -> None:
 
 
 def _write_section(pdf: _TwoColumns, section: Section) -> None:
+    if section.heading_as_text:
+        pdf.set_font("times", size=12)
+        _write_text(pdf, section.title, "J")
+        pdf.ln(2.5)
     for text in map(link_text, section.paragraphs):
         _write_text(pdf, soft_hyphenate(text), "J")
         pdf.ln(2.5)
@@ -479,7 +483,9 @@ def build_fpdf2_pdf(spec: DocSpec, out: Path) -> Path:
     """Write the documentation as a tagged two column A5 PDF made with fpdf2.
 
     The PDF has the language and the title of the documentation, bookmarks for
-    the section titles, and the page number and count in the footer.
+    the section titles, and the page number and count in the footer. The
+    title of a section with ``heading_as_text`` is a paragraph, with no
+    bookmark.
 
     Args:
         spec: The documentation to write.
@@ -506,13 +512,21 @@ def build_fpdf2_pdf(spec: DocSpec, out: Path) -> Path:
             t_margin=2,
             b_margin=1.5,
         ),
+        TextStyle(
+            font_family="helvetica",
+            font_style="B",
+            font_size_pt=11,
+            t_margin=2,
+            b_margin=1,
+        ),
     )
     pdf.add_page()
     for section in spec.sections:
         pdf.set_font("times", size=12)
         # Without room for the title, fpdf2 breaks the page inside it.
         pdf.ensure_room(12)
-        pdf.start_section(section.title, level=section.level - 1)
+        if not section.heading_as_text:
+            pdf.start_section(section.title, level=section.level - 1)
         _write_section(pdf, section)
     pdf.output(out)
     return out
@@ -1392,6 +1406,63 @@ def build_listing_pdf(
         _LISTING_TOP - _LISTING_LEADING * (row + 2),
         "Run it from any directory.",
     )
+    canvas.save()
+    return out
+
+
+# Layout of the PDF of numbered sections, in points: the left edge of the
+# text, the baseline of the first title, the distance between the baselines
+# of two lines of a title and of a paragraph, and the extra space after a
+# title and after a paragraph.
+_TITLES_LEFT = 72
+_TITLES_TOP = 780
+_TITLE_LEADING = 17
+_TITLE_SPACE = 9
+_TEXT_LEADING = 13
+_TEXT_SPACE = 14
+_TITLE_FONT = ("Helvetica-Bold", 13)
+_TEXT_FONT = ("Times-Roman", 10)
+
+
+def build_numbered_pdf(
+    sections: Sequence[tuple[str, str]],
+    out: Path,
+    *,
+    title_width: float,
+    numbered: bool = True,
+) -> Path:
+    """Write numbered sections on one A4 page, with no outline.
+
+    Each section is a title in Helvetica-Bold 13, its number first, broken
+    into lines no wider than `title_width`, then the same sentence on three
+    lines in Times-Roman 10. Only the style of the titles tells them apart,
+    so a title broken into more lines than a heading has is a paragraph.
+
+    Args:
+        sections: The number and the title of each section.
+        out: The PDF file to write.
+        title_width: The widest line of a title, in points.
+        numbered: Whether the titles start with their numbers.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    y = _TITLES_TOP
+    for number, title in sections:
+        canvas.setFont(*_TITLE_FONT)
+        heading = f"{number} {title}" if numbered else title
+        lines = simpleSplit(heading, *_TITLE_FONT, title_width)
+        for line in lines:
+            canvas.drawString(_TITLES_LEFT, y, line)
+            y -= _TITLE_LEADING
+        y -= _TITLE_SPACE
+        canvas.setFont(*_TEXT_FONT)
+        sentence = f"The step {title.lower()} is described with each option."
+        for _ in range(3):
+            canvas.drawString(_TITLES_LEFT, y, sentence)
+            y -= _TEXT_LEADING
+        y -= _TEXT_SPACE
     canvas.save()
     return out
 
