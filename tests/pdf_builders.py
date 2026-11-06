@@ -51,7 +51,13 @@ from reportlab.platypus.tableofcontents import TableOfContents
 from doc_checker.extract.pdf.layout import Line
 from doc_checker.extract.pdf.reader import PdfChar, PdfPageText
 from doc_checker.extract.pdf.segments import Segment
-from tests.builders import DocSpec, Section, smart_typography
+from tests.builders import (
+    DocSpec,
+    Section,
+    link_text,
+    section_numbers,
+    smart_typography,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
@@ -96,7 +102,8 @@ def pdf_typography(text: str, lang: str) -> str:
     Returns:
         The typeset text.
     """
-    return smart_typography(text, lang).replace("\U0000202f", "\xa0")
+    text = smart_typography(link_text(text), lang)
+    return text.replace("\U0000202f", "\xa0")
 
 
 def scan_image() -> PILImage.Image:
@@ -164,13 +171,14 @@ class _Heading(Paragraph):
 class _Document(BaseDocTemplate):
     """An A4 document with a running header and footer on each page."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - one keyword per PDF feature
         self,
         path: Path,
         spec: DocSpec,
         *,
         artifacts: bool,
         outline: bool,
+        outline_depth: int | None,
         toc: bool,
     ) -> None:
         super().__init__(
@@ -186,6 +194,7 @@ class _Document(BaseDocTemplate):
         self.spec = spec
         self.artifacts = artifacts
         self.outline = outline
+        self.outline_depth = outline_depth
         self.toc = toc
         self.chapter = ""
         body = Frame(
@@ -239,7 +248,8 @@ class _Document(BaseDocTemplate):
         text = flowable.getPlainText()
         if flowable.level == 0:
             self.chapter = text
-        if self.outline:
+        depth = self.outline_depth
+        if self.outline and (depth is None or flowable.level < depth):
             key = f"h{self.seq.nextf('heading')}"
             self.canv.bookmarkPage(key)
             self.canv.addOutlineEntry(text, key, level=flowable.level)
@@ -254,11 +264,21 @@ def _title_markup(text: str, lang: str) -> str:
     return html.escape(pdf_typography(text, lang), quote=False)
 
 
-def _section_flowables(section: Section, lang: str) -> list[Flowable]:
+def _section_flowables(
+    section: Section,
+    lang: str,
+    *,
+    number: str | None = None,
+    chapter: int | None = None,
+) -> list[Flowable]:
     style = _H1 if section.level == 1 else _H2
-    flowables: list[Flowable] = [
-        _Heading(_title_markup(section.title, lang), style, section.level - 1),
-    ]
+    title = _title_markup(section.title, lang)
+    flowables: list[Flowable] = []
+    if chapter is not None:
+        flowables.append(Paragraph(f"Chapter {chapter}", _H2))
+    if number is not None:
+        title = f"{number} {title}"
+    flowables.append(_Heading(title, style, section.level - 1))
     flowables += [
         Paragraph(_body_markup(text, lang), _BODY)
         for text in section.paragraphs
@@ -303,6 +323,9 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
     artifacts: bool = False,
     outline: bool = True,
     scanned_page: bool = False,
+    numbered: bool = False,
+    chapter_labels: bool = False,
+    outline_depth: int | None = None,
 ) -> Path:
     """Write the documentation as an A4 PDF made with reportlab.
 
@@ -317,10 +340,18 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
         artifacts: Whether to mark the running header and footer as artifacts.
         outline: Whether to add the section titles as bookmarks.
         scanned_page: Whether to end with a page that is only an image.
+        numbered: Whether the titles and their bookmarks start with their
+            section number.
+        chapter_labels: Whether each level 1 title is preceded by a
+            ``Chapter N`` line, with no bookmark.
+        outline_depth: The deepest title level that gets a bookmark, with
+            1 for the chapters, or ``None`` for a bookmark on every title.
 
     Returns:
         The PDF file.
     """
+    numbers = section_numbers(spec) if numbered else {}
+    chapters = 0
     story: list[Flowable] = []
     if toc:
         story += [
@@ -331,7 +362,15 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
     for index, section in enumerate(spec.sections):
         if index:
             story.append(PageBreak())
-        story += _section_flowables(section, spec.lang)
+        chapters += section.level == 1
+        story += _section_flowables(
+            section,
+            spec.lang,
+            number=numbers.get(section.slug),
+            chapter=chapters
+            if chapter_labels and section.level == 1
+            else None,
+        )
     if scanned_page:
         story += [NextPageTemplate("scan"), PageBreak(), _scan_flowable()]
     document = _Document(
@@ -339,6 +378,7 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
         spec,
         artifacts=artifacts,
         outline=outline,
+        outline_depth=outline_depth,
         toc=toc,
     )
     document.multiBuild(story)
@@ -410,10 +450,10 @@ def _write_text(pdf: FPDF, text: str, align: str) -> None:
 
 
 def _write_section(pdf: _TwoColumns, section: Section) -> None:
-    for text in section.paragraphs:
+    for text in map(link_text, section.paragraphs):
         _write_text(pdf, soft_hyphenate(text), "J")
         pdf.ln(2.5)
-    for text in section.bullets:
+    for text in map(link_text, section.bullets):
         _write_text(pdf, "\U00002013 " + soft_hyphenate(text), "L")
         pdf.ln(1.5)
     if section.code:
@@ -431,7 +471,7 @@ def _write_section(pdf: _TwoColumns, section: Section) -> None:
         pdf.set_font("times", "B", 12)
         _write_text(pdf, "Note", "J")
         pdf.set_font("times", size=12)
-        _write_text(pdf, soft_hyphenate(section.note), "J")
+        _write_text(pdf, soft_hyphenate(link_text(section.note)), "J")
         pdf.ln(2.5)
 
 

@@ -8,7 +8,12 @@ from doc_checker.text.lang import (
     detect_language,
     resolve_language,
 )
-from doc_checker.text.lexicon import is_modal, negation_count
+from doc_checker.text.lexicon import (
+    DEFAULT_ADMONITION_TITLES,
+    is_admonition_title,
+    is_modal,
+    negation_count,
+)
 
 FR_SAMPLE = (
     "Le fichier est dans le dossier de la configuration "
@@ -70,3 +75,11 @@ def test_resolve_language() -> None:
 def test_declared_language(declared: str | None, expected: str | None) -> None:
     """Only a language tag is kept as the language a document declares."""
     assert declared_language(declared) == expected
+
+
+def test_admonition_titles() -> None:
+    """Default admonition titles are known, whatever their case or colon."""
+    assert {"note", "warning", "tip", "see also"} <= DEFAULT_ADMONITION_TITLES
+    assert is_admonition_title("Note:")
+    assert is_admonition_title(" Voir aussi ")
+    assert not is_admonition_title("Notes on the release")

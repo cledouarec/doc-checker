@@ -2,8 +2,11 @@
 """Tell the headings of a PDF from its other blocks, and give their level.
 
 When a PDF has an outline, its bookmarks are the word of its authors: a block
-that a bookmark points to is a heading, as deep as the bookmark. Without an
-outline, the headings are told by how they look: a short block that is set
+that a bookmark points to is a heading, as deep as the bookmark. The outline
+may stop short, as the bookmarks of LaTeX often stop at the chapters, so the
+styles complete it: a block set like a marked heading, or smaller than all of
+them, is a heading too. Without an outline, the headings are told by how they
+look: a short block that is set
 larger than the body text, or in bold, is a heading, and the more its style
 stands out, the higher its level. The number that starts a title, such as
 ``1.2.3``, tells the level better than the style does.
@@ -11,10 +14,11 @@ stands out, the higher its level. The number that starts a title, such as
 
 import re
 from bisect import bisect_left, bisect_right
-from typing import TYPE_CHECKING, Final
+from collections import Counter
+from typing import TYPE_CHECKING, Final, Literal
 
-from doc_checker.extract.common import DEFAULT_ADMONITION_TITLES
 from doc_checker.extract.pdf.chrome import HEADING_MIN_SIZE, title_key
+from doc_checker.text.lexicon import is_admonition_title
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -31,6 +35,15 @@ MAX_LEVEL: Final = 6  # Deepest level of a heading, as in HTML.
 _NUMBERING: Final = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\S")
 # A text that ends with one of these is a sentence, not a heading.
 _SENTENCE_ENDS: Final = (".", ",", ";", ":")
+
+# Matches a number of at least two parts, such as ``2.1``, at the start of a
+# title.
+_SUB_NUMBER: Final = re.compile(r"^\d+(?:\.\d+)+\.?\s+\S")
+# How far two sizes may differ, in points, for one style.
+STYLE_TOLERANCE: Final = 0.5
+
+# What found a heading: a bookmark, or the look of the block.
+type HeadingSource = Literal["outline", "style"]
 
 # The style of a text: its size in points, and whether it is bold.
 type _Style = tuple[float, bool]
@@ -129,15 +142,6 @@ def bookmark_levels(
     return levels
 
 
-def _is_admonition_title(text: str) -> bool:
-    """Return whether a text is the default title of an admonition.
-
-    The case is ignored, and so is a colon after the title, as in the HTML
-    reader.
-    """
-    return text.casefold().rstrip(":") in DEFAULT_ADMONITION_TITLES
-
-
 def _is_candidate(block: DraftBlock, text: str, body: float) -> bool:
     """Return whether a block looks like a heading.
 
@@ -168,7 +172,7 @@ def _is_candidate(block: DraftBlock, text: str, body: float) -> bool:
         and len(block.lines) <= HEADING_MAX_LINES
         and len(text.split()) <= HEADING_MAX_WORDS
         and not text.endswith(_SENTENCE_ENDS)
-        and not _is_admonition_title(text)
+        and not is_admonition_title(text)
         and (is_large or is_bold_line)
     )
 
@@ -232,3 +236,92 @@ def style_levels(
         index: _level(texts[index], ranks[style])
         for index, style in candidates.items()
     }
+
+
+def _same_style(first: _Style, second: _Style) -> bool:
+    """Return whether two styles are one: same weight, close sizes."""
+    return (
+        first[1] == second[1] and abs(first[0] - second[0]) <= STYLE_TOLERANCE
+    )
+
+
+def heading_levels(
+    blocks: Sequence[DraftBlock],
+    texts: Sequence[str],
+    bookmarks: Sequence[Bookmark],
+    *,
+    body: float,
+) -> dict[int, tuple[int, HeadingSource]]:
+    """Find the headings of a document: the outline, completed by the styles.
+
+    The bookmarks make the headings that `bookmark_levels` finds, and they
+    say what a heading is. If none of them matches a block, or there are
+    none, `style_levels` tells all the headings. Otherwise, every other block
+    that `_is_candidate` accepts becomes a heading by its style, where
+    ``first`` is its first line:
+
+    - If a marked heading has its style, that is the same weight and a size
+      within `STYLE_TOLERANCE`, its level is the one that most marked
+      headings of that style have, the smallest on a tie.
+    - Otherwise it is a heading if its size is at least `HEADING_MIN_SIZE`
+      body sizes and smaller than the smallest marked heading by more than
+      `STYLE_TOLERANCE`, or if its text starts with a number of two parts or
+      more, such as ``2.1``. The count of the parts of that number is its
+      level; without a number, the level is that of the deepest marked
+      heading plus the rank of its style, from 1, among the styles of the
+      blocks promoted this way, large before small and bold first.
+
+    No level exceeds `MAX_LEVEL`.
+
+    Args:
+        blocks: The blocks of the document, in reading order.
+        texts: The text of each block, in the same order.
+        bookmarks: The outline of the document.
+        body: The body size of the document, in points.
+
+    Returns:
+        The level and the source of each heading, by position of the block.
+    """
+    marked = bookmark_levels(blocks, texts, bookmarks) if bookmarks else {}
+    if not marked:
+        return {
+            index: (level, "style")
+            for index, level in style_levels(blocks, texts, body=body).items()
+        }
+    styles: dict[int, _Style] = {
+        index: (blocks[index].lines[0].size, blocks[index].lines[0].bold)
+        for index in marked
+    }
+    smallest = min(size for size, _ in styles.values())
+    deepest = max(marked.values())
+    levels: dict[int, tuple[int, HeadingSource]] = {
+        index: (level, "outline") for index, level in marked.items()
+    }
+    same: dict[int, int] = {}
+    others: dict[int, _Style] = {}
+    for index, (block, text) in enumerate(zip(blocks, texts, strict=True)):
+        if index in marked or not _is_candidate(block, text, body):
+            continue
+        first = block.lines[0]
+        style = (first.size, first.bold)
+        twins = [
+            marked[i]
+            for i, other in styles.items()
+            if _same_style(style, other)
+        ]
+        if twins:
+            counts = Counter(twins)
+            same[index] = min(counts, key=lambda lv: (-counts[lv], lv))
+        elif (
+            HEADING_MIN_SIZE * body <= first.size < smallest - STYLE_TOLERANCE
+            or _SUB_NUMBER.match(text)
+        ):
+            others[index] = style
+    ordered = sorted(set(others.values()), key=_style_order)
+    ranks = {style: rank for rank, style in enumerate(ordered, start=1)}
+    levels.update((index, (level, "style")) for index, level in same.items())
+    levels.update(
+        (index, (_level(texts[index], deepest + ranks[style]), "style"))
+        for index, style in others.items()
+    )
+    return levels

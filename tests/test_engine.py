@@ -231,3 +231,13 @@ def test_run_compare_rejects_mixed_formats(tmp_path: Path) -> None:
     pdf.write_bytes(b"%PDF-1.7")
     with pytest.raises(InputError, match="same format"):
         run_compare(site, pdf, Config())
+
+
+def test_unmatched_admonition_titles_are_not_compared() -> None:
+    """A default admonition title on one side only gives no finding."""
+    ref = make_document(*_b(P[0], "Note", P[1]))
+    new = make_document(*_b(P[0], P[1], "warning:"))
+    assert compare_documents(ref, new, Config()).findings == []
+    titled = make_document(make_block(P[0]), _heading("Summary", 2))
+    result = compare_documents(titled, make_document(*_b(P[0])), Config())
+    assert _rules(result) == [("section.missing", Severity.CRITICAL)]

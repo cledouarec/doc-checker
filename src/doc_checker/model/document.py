@@ -3,11 +3,14 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:
     from collections import Counter
     from pathlib import Path
+
+# Key of `Block.attrs` that tells how a PDF found a heading.
+HEADING_SOURCE: Final = "heading"
 
 
 class BlockKind(StrEnum):
@@ -71,7 +74,10 @@ class Block:
         source: Where the block comes from.
         level: Heading level, for headings.
         section_path: Titles of the enclosing headings, outermost first.
-        attrs: Extra extractor attributes, such as ``role``.
+        attrs: Extra extractor attributes, such as ``role``. The heading of a
+            PDF has `HEADING_SOURCE`, which is ``"outline"`` if a bookmark
+            found it and ``"style"`` if its look did. The heading of an HTML
+            page does not have it.
         key_strict: Comparison key used to diff texts.
         key_loose: Case, accent and punctuation insensitive key used to
             align blocks.

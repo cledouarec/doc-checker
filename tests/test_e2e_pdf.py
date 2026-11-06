@@ -313,6 +313,21 @@ BULLET_ITEMS = [
 ]
 # Each entry builds one text as two PDFs that differ only by their layout.
 LAYOUTS: dict[str, tuple[Builder, Builder]] = {
+    # LaTeX and Word number their headings, other generators do not.
+    "numbered-headings": (
+        partial(build_reportlab_pdf, SAMPLE_EN),
+        partial(build_reportlab_pdf, SAMPLE_EN, numbered=True),
+    ),
+    # LaTeX books set "Chapter 1" on a line of its own above the title.
+    "chapter-labels": (
+        partial(build_reportlab_pdf, SAMPLE_EN),
+        partial(build_reportlab_pdf, SAMPLE_EN, chapter_labels=True),
+    ),
+    # An outline that stops at the chapters, as hyperref's bookmarksdepth.
+    "partial-outline": (
+        partial(build_reportlab_pdf, SAMPLE_EN),
+        partial(build_reportlab_pdf, SAMPLE_EN, outline_depth=1),
+    ),
     "compound-breaks": (
         partial(build_lines_pdf, COMPOUND_WIDE),
         partial(build_lines_pdf, COMPOUND_NARROW),
