@@ -2,6 +2,7 @@
 """End to end comparison of documentation builds."""
 
 from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,7 +15,9 @@ from tests.builders import (
     SAMPLE_FR,
     DocSpec,
     add_paragraph,
+    build_docusaurus_like,
     build_mkdocs_like,
+    build_pandoc_like,
     build_sphinx_like,
     drop_paragraph,
     drop_section,
@@ -181,3 +184,46 @@ def test_moved_section_is_info_only(tmp_path: Path) -> None:
     findings = _compare(tmp_path, SAMPLE_EN, moved)
     assert findings
     assert {f.rule for f in findings} == {"block.moved"}
+
+
+type SiteBuilder = Callable[[DocSpec, Path], Path]
+
+# Each entry builds one documentation as two sites whose markup differs.
+MARKUPS: dict[str, tuple[SiteBuilder, SiteBuilder]] = {
+    "sphinx-chapters/pandoc": (
+        partial(build_sphinx_like, split="chapters"),
+        build_pandoc_like,
+    ),
+    "mkdocs/pandoc": (build_mkdocs_like, build_pandoc_like),
+    "sphinx-numbered/mkdocs": (
+        partial(build_sphinx_like, numbered=True),
+        build_mkdocs_like,
+    ),
+    "pandoc-numbered/sphinx-chapters": (
+        partial(build_pandoc_like, numbered=True),
+        partial(build_sphinx_like, split="chapters"),
+    ),
+    "docusaurus/mkdocs": (build_docusaurus_like, build_mkdocs_like),
+}
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["forward", "swapped"])
+@pytest.mark.parametrize("spec", [SAMPLE_EN, SAMPLE_FR], ids=["en", "fr"])
+@pytest.mark.parametrize("markup", list(MARKUPS))
+def test_markup_only_differences_produce_no_finding(
+    tmp_path: Path,
+    markup: str,
+    spec: DocSpec,
+    order: tuple[int, int],
+) -> None:
+    """One documentation in two markups has no finding, both ways."""
+    builders = MARKUPS[markup]
+    sites = (
+        builders[0](spec, tmp_path / "first"),
+        builders[1](spec, tmp_path / "second"),
+    )
+    result = run_compare(sites[order[0]], sites[order[1]], Config())
+    assert result.stats.matched > 0
+    assert [
+        (f.rule, f.severity) for f in result.findings if f.severity >= MI
+    ] == []

@@ -6,7 +6,11 @@ from itertools import starmap
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.errors import InputError
-from doc_checker.extract.common import assign_section_paths, normalized_block
+from doc_checker.extract.common import (
+    assign_section_paths,
+    normalized_block,
+    strip_heading_numbers,
+)
 from doc_checker.extract.html.chrome import drop_keys, find_chrome
 from doc_checker.extract.html.dom import blocks_from_root, strip_elements
 from doc_checker.extract.html.ordering import (
@@ -120,6 +124,7 @@ def load_html(path: Path, cfg: HtmlConfig, *, lang: str) -> Document:
         for blocks in per_page
         for block in drop_keys(blocks, chrome_keys)
     ]
+    blocks = strip_heading_numbers(blocks, counter)
     assign_section_paths(blocks)
     declared = declared_language(ordered[0].tree.get("lang"))
     sample = " ".join(block.text for block in blocks[:_LANG_SAMPLE_BLOCKS])

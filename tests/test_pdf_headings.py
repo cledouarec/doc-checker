@@ -10,6 +10,7 @@ from doc_checker.extract.pdf.headings import (
     HEADING_MAX_WORDS,
     bookmark_levels,
     bookmark_window,
+    heading_levels,
     style_levels,
 )
 from doc_checker.extract.pdf.reader import Bookmark
@@ -334,3 +335,40 @@ def test_numbering_gives_the_level(text: str, level: int) -> None:
     ]
     # Without a number, the second style ranks second.
     assert _styled(*blocks)[1] == level
+
+
+def _levels(
+    blocks: list[DraftBlock],
+    *marks: Bookmark,
+) -> dict[int, tuple[int, str]]:
+    """Find the headings of blocks whose text is that of their first line."""
+    texts = [block.lines[0].text for block in blocks]
+    return heading_levels(blocks, texts, marks, body=BODY)
+
+
+def test_a_partial_outline_is_completed_by_the_styles() -> None:
+    """Blocks styled like marked headings, or smaller ones, are headings."""
+    blocks = [
+        _block("Getting started", size=20.0, bold=True),
+        _block("Installation", page=1, size=14.0, bold=True),
+        _block("Body text of the section.", page=1),
+        _block("User guide", page=2, size=20.0, bold=True),
+        _block("2.1 Projects", page=2, bold=True),
+        _block("Option Default", page=2, bold=True),
+        _block("Release title", page=3, size=24.0, bold=True),
+    ]
+    assert _levels(blocks, Bookmark(0, "Getting started", 0)) == {
+        0: (1, "outline"),
+        1: (2, "style"),
+        3: (1, "style"),
+        4: (2, "style"),
+    }
+
+
+def test_without_an_outline_the_styles_tell_the_headings() -> None:
+    """With no bookmark, every heading comes from the styles."""
+    blocks = [
+        _block("Getting started", size=20.0, bold=True),
+        _block("Body text of the section."),
+    ]
+    assert _levels(blocks) == {0: (1, "style")}
