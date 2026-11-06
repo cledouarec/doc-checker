@@ -38,7 +38,13 @@ def make_block(
 
 @dataclass(frozen=True)
 class Section:
-    """A heading and the content that follows it."""
+    """A heading and the content that follows it.
+
+    The flags that end in ``_as_text`` make a builder write a part of the
+    section as plain paragraphs, which loses its kind. Only
+    `build_mkdocs_like` and `build_fpdf2_pdf` of `tests.pdf_builders` respect
+    them, the latter only ``heading_as_text``.
+    """
 
     title: str
     slug: str
@@ -48,6 +54,10 @@ class Section:
     code: str | None = None
     table: tuple[tuple[str, ...], ...] = ()
     note: str | None = None
+    heading_as_text: bool = False
+    bullets_as_text: bool = False
+    table_as_text: bool = False
+    code_as_text: bool = False
 
 
 @dataclass(frozen=True)
@@ -492,10 +502,20 @@ def _mkdocs_table(section: Section) -> str:
     )
 
 
-def _plain_lists(section: Section, resolve: Resolver) -> list[str]:
-    """Return the paragraphs and the bullets, as MkDocs-like builders write."""
+def _plain_lists(
+    section: Section,
+    resolve: Resolver,
+    *,
+    unlisted: bool = False,
+) -> list[str]:
+    """Return the paragraphs and the bullets, as MkDocs-like builders write.
+
+    With ``unlisted``, each bullet is a paragraph of its own.
+    """
     parts = [f"<p>{_render(p, resolve)}</p>" for p in section.paragraphs]
-    if section.bullets:
+    if unlisted:
+        parts += [f"<p>{_render(b, resolve)}</p>" for b in section.bullets]
+    elif section.bullets:
         items = "".join(
             f"<li>{_render(b, resolve)}</li>" for b in section.bullets
         )
@@ -505,20 +525,32 @@ def _plain_lists(section: Section, resolve: Resolver) -> list[str]:
 
 def _mkdocs_section(section: Section, resolve: Resolver) -> str:
     tag = f"h{section.level}"
-    parts = [
-        (
-            f'<{tag} id="{section.slug}">{_esc(section.title)}'
-            f'<a class="headerlink" href="#{section.slug}" '
-            f'title="Permanent link">\xb6</a></{tag}>'
-        ),
-    ]
-    parts += _plain_lists(section, resolve)
-    if section.code:
+    if section.heading_as_text:
+        parts = [f"<p>{_esc(section.title)}</p>"]
+    else:
+        parts = [
+            (
+                f'<{tag} id="{section.slug}">{_esc(section.title)}'
+                f'<a class="headerlink" href="#{section.slug}" '
+                f'title="Permanent link">\xb6</a></{tag}>'
+            ),
+        ]
+    parts += _plain_lists(
+        section,
+        resolve,
+        unlisted=section.bullets_as_text,
+    )
+    if section.code and section.code_as_text:
+        lines = "<br>".join(_esc(line) for line in section.code.split("\n"))
+        parts.append(f"<p>{lines}</p>")
+    elif section.code:
         parts.append(
             '<div class="highlight"><pre><span></span>'
             f"<code>{_esc(section.code)}</code></pre></div>",
         )
-    if section.table:
+    if section.table_as_text:
+        parts += [f"<p>{_esc(' '.join(row))}</p>" for row in section.table]
+    elif section.table:
         parts.append(_mkdocs_table(section))
     if section.note:
         parts.append(
@@ -798,26 +830,28 @@ def _not_found(what: str) -> ValueError:
     return ValueError(msg)
 
 
-def replace_text(spec: DocSpec, old: str, new: str) -> DocSpec:
-    """Replace a text in titles, paragraphs, bullets, notes and cells."""
-
-    def swap(text: str) -> str:
-        return text.replace(old, new)
-
+def map_texts(spec: DocSpec, change: Callable[[str], str]) -> DocSpec:
+    """Apply a change to titles, paragraphs, bullets, notes and cells."""
     sections = tuple(
         replace(
             section,
-            title=swap(section.title),
-            paragraphs=tuple(map(swap, section.paragraphs)),
-            bullets=tuple(map(swap, section.bullets)),
-            note=swap(section.note) if section.note else None,
-            table=tuple(tuple(map(swap, row)) for row in section.table),
+            title=change(section.title),
+            paragraphs=tuple(map(change, section.paragraphs)),
+            bullets=tuple(map(change, section.bullets)),
+            note=change(section.note) if section.note else None,
+            table=tuple(tuple(map(change, row)) for row in section.table),
         )
         for section in spec.sections
     )
-    if sections == spec.sections:
-        raise _not_found(old)
     return replace(spec, sections=sections)
+
+
+def replace_text(spec: DocSpec, old: str, new: str) -> DocSpec:
+    """Replace a text in titles, paragraphs, bullets, notes and cells."""
+    changed = map_texts(spec, lambda text: text.replace(old, new))
+    if changed == spec:
+        raise _not_found(old)
+    return changed
 
 
 def drop_paragraph(spec: DocSpec, prefix: str) -> DocSpec:
@@ -863,13 +897,58 @@ def move_section(spec: DocSpec, slug: str, *, after: str) -> DocSpec:
     return replace(spec, sections=sections)
 
 
+def _replace_section(spec: DocSpec, slug: str, **changes: object) -> DocSpec:
+    """Replace fields of the section with this slug."""
+    index = _index(spec, slug)
+    changed = replace(spec.sections[index], **changes)
+    sections = (*spec.sections[:index], changed, *spec.sections[index + 1 :])
+    return replace(spec, sections=sections)
+
+
 def add_paragraph(spec: DocSpec, slug: str, text: str) -> DocSpec:
     """Append a paragraph to the section with this slug."""
-    index = _index(spec, slug)
-    section = spec.sections[index]
-    added = replace(section, paragraphs=(*section.paragraphs, text))
-    sections = (*spec.sections[:index], added, *spec.sections[index + 1 :])
+    paragraphs = spec.sections[_index(spec, slug)].paragraphs
+    return _replace_section(spec, slug, paragraphs=(*paragraphs, text))
+
+
+def number_titles(spec: DocSpec) -> DocSpec:
+    """Start each title with its section number, as a numbered source does.
+
+    Every builder then numbers the titles, those it writes as paragraphs
+    with ``heading_as_text`` too, as a Word export or a hand numbered
+    Markdown source does.
+    """
+    numbers = section_numbers(spec)
+    sections = tuple(
+        replace(section, title=f"{numbers[section.slug]} {section.title}")
+        for section in spec.sections
+    )
     return replace(spec, sections=sections)
+
+
+def demote_heading(spec: DocSpec, slug: str) -> DocSpec:
+    """Write the title of the section with this slug as a paragraph."""
+    return _replace_section(spec, slug, heading_as_text=True)
+
+
+def set_level(spec: DocSpec, slug: str, level: int) -> DocSpec:
+    """Give the section with this slug another heading level."""
+    return _replace_section(spec, slug, level=level)
+
+
+def unlist(spec: DocSpec, slug: str) -> DocSpec:
+    """Write each bullet of the section with this slug as a paragraph."""
+    return _replace_section(spec, slug, bullets_as_text=True)
+
+
+def untable(spec: DocSpec, slug: str) -> DocSpec:
+    """Write each row of the table of the section as a paragraph."""
+    return _replace_section(spec, slug, table_as_text=True)
+
+
+def uncode(spec: DocSpec, slug: str) -> DocSpec:
+    """Write the code of the section with this slug as a paragraph."""
+    return _replace_section(spec, slug, code_as_text=True)
 
 
 SPLIT_WHOLE = (

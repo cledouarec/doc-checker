@@ -30,6 +30,8 @@ class RuleSpec:
 
 _CONTENT = Category.CONTENT
 _TEXT = Category.TEXT
+_STRUCTURE = Category.STRUCTURE
+_LINK = Category.LINK
 _SPECS: Final = (
     RuleSpec(
         "section.missing",
@@ -90,6 +92,50 @@ _SPECS: Final = (
         _TEXT,
         Severity.INFO,
         "Number format changed",
+    ),
+    RuleSpec(
+        "structure.heading_lost",
+        _STRUCTURE,
+        Severity.MAJOR,
+        "Heading became text",
+    ),
+    RuleSpec(
+        "structure.table_lost",
+        _STRUCTURE,
+        Severity.MAJOR,
+        "Table became text",
+    ),
+    RuleSpec(
+        "structure.code_lost",
+        _STRUCTURE,
+        Severity.MAJOR,
+        "Code became text",
+    ),
+    RuleSpec("structure.list_lost", _STRUCTURE, Severity.MINOR, "List lost"),
+    RuleSpec(
+        "structure.kind_changed",
+        _STRUCTURE,
+        Severity.INFO,
+        "Block kind changed",
+    ),
+    RuleSpec(
+        "structure.heading_level",
+        _STRUCTURE,
+        Severity.MINOR,
+        "Heading level changed",
+    ),
+    RuleSpec(
+        "link.broken",
+        _LINK,
+        Severity.CRITICAL,
+        "Internal link broken",
+    ),
+    RuleSpec("link.lost", _LINK, Severity.MAJOR, "Link lost"),
+    RuleSpec(
+        "link.target_changed",
+        _LINK,
+        Severity.MAJOR,
+        "Link target changed",
     ),
 )
 

@@ -1,7 +1,16 @@
 # Copyright 2026 Christophe Le Douarec
-"""Language aware canonical form of numbers."""
+"""Language aware canonical form of numbers, and the numbers of headings."""
 
+import re
 from typing import Final
+
+# The number that starts the title of a heading, in its group 1: numbers
+# joined by dots, such as ``2.1.3``, or a capital letter followed by them,
+# such as ``A.1`` in an appendix. A dot may follow it, then blanks and the
+# title, which the match leaves out.
+HEADING_NUMBER: Final = re.compile(
+    r"^(\d+(?:\.\d+)*|[A-Z](?:\.\d+)+)\.?\s+(?=\S)",
+)
 
 _GROUPING_SPACES: Final = (" ", "\xa0", "\U0000202f")
 _GROUP_DIGITS: Final = 3

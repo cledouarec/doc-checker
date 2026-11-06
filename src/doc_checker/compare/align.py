@@ -28,8 +28,14 @@ MAX_DP_CELLS: Final = 40_000
 GREEDY_WINDOW: Final = 50
 SPLIT_MERGE_RATIO: Final = 0.9
 MAX_SPLIT_PARTS: Final = 6
+MAX_STRUCTURE_PARTS: Final = 100
 
 _PERCENT: Final = 100
+# The score of `fuzz.ratio` that a split or a merge must reach.
+_SPLIT_SCORE: Final = SPLIT_MERGE_RATIO * _PERCENT
+# The kinds whose blocks may split into many parts: a table into one block
+# per cell or row, code into one block per line.
+_STRUCTURES: Final = frozenset({BlockKind.TABLE, BlockKind.CODE})
 _GROUPS: Final = {
     BlockKind.HEADING: "h",
     BlockKind.CODE: "c",
@@ -261,11 +267,39 @@ def _dynamic(
     return pairs[::-1]
 
 
+def _opens(first: Block, single: Block) -> bool:
+    """Return whether a block reads like the start of another block.
+
+    Args:
+        first: The block that may open a run.
+        single: The block that may have been split or merged.
+
+    Returns:
+        Whether the loose key of ``first`` scores `SPLIT_MERGE_RATIO`
+        against as many first characters of the loose key of ``single``.
+    """
+    key = first.key_loose
+    start = single.key_loose[: len(key)]
+    score = fuzz.ratio(key, start, score_cutoff=_SPLIT_SCORE) / _PERCENT
+    return score >= SPLIT_MERGE_RATIO
+
+
 def _best_run(
     single: Block,
     runs: Sequence[Block],
 ) -> tuple[float, int, int] | None:
     """Return the best contiguous run of blocks equal to one block.
+
+    Every run of 2 to `MAX_SPLIT_PARTS` blocks is tried. A table or a code
+    block is also looked for in longer runs, of up to `MAX_STRUCTURE_PARTS`
+    blocks, but only from a block that opens like it (`_opens`): a table
+    split into a block per cell or row, or code split into a block per line,
+    starts with the start of the table or of the code.
+
+    A run is only scored if the length of its joined keys lets
+    ``fuzz.ratio`` reach `SPLIT_MERGE_RATIO`: two texts of lengths ``L1``
+    and ``L2`` score at most ``2 * min(L1, L2) / (L1 + L2)``. A run stops
+    growing once it is too long.
 
     Args:
         single: The block that may have been split or merged.
@@ -274,14 +308,28 @@ def _best_run(
     Returns:
         The score, start and end of the best run, or ``None``.
     """
+    structure = single.kind in _STRUCTURES
+    size = len(single.key_loose)
+    shortest = size * SPLIT_MERGE_RATIO / (2 - SPLIT_MERGE_RATIO)
+    longest = size * (2 - SPLIT_MERGE_RATIO) / SPLIT_MERGE_RATIO
     best: tuple[float, int, int] | None = None
     for start in range(len(runs)):
-        for length in range(2, MAX_SPLIT_PARTS + 1):
-            end = start + length
-            if end > len(runs):
+        parts = MAX_SPLIT_PARTS
+        if structure and _opens(runs[start], single):
+            parts = MAX_STRUCTURE_PARTS
+        # The length of the keys of the run joined by blanks.
+        length = len(runs[start].key_loose)
+        for end in range(start + 2, min(start + parts, len(runs)) + 1):
+            length += 1 + len(runs[end - 1].key_loose)
+            if length > longest:
                 break
+            if length < shortest:
+                continue
             joined = " ".join(block.key_loose for block in runs[start:end])
-            ratio = fuzz.ratio(single.key_loose, joined) / _PERCENT
+            ratio = (
+                fuzz.ratio(single.key_loose, joined, score_cutoff=_SPLIT_SCORE)
+                / _PERCENT
+            )
             if ratio >= SPLIT_MERGE_RATIO and (
                 best is None or ratio > best[0]
             ):

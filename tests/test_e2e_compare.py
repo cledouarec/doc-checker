@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from doc_checker.config import Config
+from doc_checker.compare.aggregate import GROUP_MIN_OCCURRENCES
+from doc_checker.config import DEFAULT_HTML_EXCLUDE, Config, HtmlConfig
 from doc_checker.model.findings import Finding, Severity
 from doc_checker.pipeline import run_compare
 from tests.builders import (
@@ -19,16 +20,25 @@ from tests.builders import (
     build_mkdocs_like,
     build_pandoc_like,
     build_sphinx_like,
+    demote_heading,
     drop_paragraph,
     drop_section,
+    map_texts,
     move_section,
+    number_titles,
     replace_text,
+    set_level,
+    uncode,
+    unlist,
+    untable,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 BANNER = "Docs for version 2.0."
+# The sample with numbered titles, which every builder writes.
+NUMBERED_EN = number_titles(SAMPLE_EN)
 C = Severity.CRITICAL
 MA = Severity.MAJOR
 MI = Severity.MINOR
@@ -178,6 +188,216 @@ def test_injected_defect_is_reported(
     assert relevant == [(rule, severity)]
 
 
+# Changes of structure, each with the one finding of at least minor
+# severity that it must give.
+STRUCTURE_DEFECTS: list[tuple[DocSpec, Transform, str, Severity]] = [
+    (
+        SAMPLE_EN,
+        lambda s: demote_heading(s, "exports"),
+        "structure.heading_lost",
+        MA,
+    ),
+    # The paragraph keeps the number that the heading sets apart.
+    (
+        NUMBERED_EN,
+        lambda s: demote_heading(s, "exports"),
+        "structure.heading_lost",
+        MA,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: unlist(s, "installation"),
+        "structure.list_lost",
+        MI,
+    ),
+    (SAMPLE_EN, lambda s: untable(s, "projects"), "structure.table_lost", MA),
+    (
+        SAMPLE_EN,
+        lambda s: uncode(s, "installation"),
+        "structure.code_lost",
+        MA,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: set_level(s, "exports", 3),
+        "structure.heading_level",
+        MI,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(s, "(#command-line)", "(#command-lines)"),
+        "link.broken",
+        C,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(s, "[retried](#first-steps)", "retried"),
+        "link.lost",
+        MA,
+    ),
+    (
+        SAMPLE_EN,
+        lambda s: replace_text(
+            s,
+            "[configuration](#first-steps)",
+            "[configuration](#limits)",
+        ),
+        "link.target_changed",
+        MA,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("spec", "transform", "rule", "severity"),
+    STRUCTURE_DEFECTS,
+)
+def test_structure_defect_is_reported(
+    tmp_path: Path,
+    spec: DocSpec,
+    transform: Transform,
+    rule: str,
+    severity: Severity,
+) -> None:
+    """Each change of structure is reported once, with its severity."""
+    findings = _compare(tmp_path, spec, transform(spec))
+    assert [(f.rule, f.severity) for f in findings if f.severity >= MI] == [
+        (rule, severity),
+    ]
+
+
+TITLES = ("Install", "Requirements", "Download", "Configure", "Usage")
+NUMBERS = ("1", "1.1", "1.2", "1.3", "2")
+# The position of the title that loses its heading.
+LOST = 2
+
+
+def _page(path: Path, body: str) -> Path:
+    """Write a single HTML page whose main element holds a body."""
+    path.write_text(
+        '<!DOCTYPE html><html lang="en"><head><title>Manual</title></head>'
+        f"<body><main>{body}</main></body></html>",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _text(title: str) -> str:
+    """Return the paragraph of a section."""
+    return f"<p>The {title.lower()} step of the tool is described in full.</p>"
+
+
+def _numbered_sections(lost: int | None, *, numbered: bool = True) -> str:
+    """Return numbered sections, one title in bold text if ``lost`` is set."""
+    parts = []
+    for index, (number, title) in enumerate(zip(NUMBERS, TITLES, strict=True)):
+        text = f"{number} {title}" if numbered else title
+        heading = f"<p><strong>{text}</strong></p>" if index == lost else None
+        parts += [heading or f"<h2>{text}</h2>", _text(title)]
+    return "".join(parts)
+
+
+def _labelled_chapters(lost: int | None) -> str:
+    """Return labelled chapters, one title in bold text if ``lost`` is set."""
+    parts = []
+    for index, title in enumerate(TITLES[:3]):
+        heading = f"<p><b>{title}</b></p>" if index == lost else None
+        parts += [
+            f"<p>Chapter {index + 1}</p>",
+            heading or f"<h1>{title}</h1>",
+            _text(title),
+        ]
+    return "".join(parts)
+
+
+# Pages whose titles carry numbers, which the HTML of a word processor
+# keeps in the text of a title that is no heading.
+NUMBERED_PAGES: dict[str, Callable[[int | None], str]] = {
+    "number": _numbered_sections,
+    "label": _labelled_chapters,
+}
+
+
+@pytest.mark.parametrize("pages", list(NUMBERED_PAGES))
+def test_numbered_title_written_as_text_only_loses_its_kind(
+    tmp_path: Path,
+    pages: str,
+) -> None:
+    """The number of a title that lost its heading is no text change."""
+    body = NUMBERED_PAGES[pages]
+    kept = _page(tmp_path / "kept.html", body(None))
+    lost = _page(tmp_path / "lost.html", body(LOST))
+    forward = run_compare(kept, lost, Config()).findings
+    swapped = run_compare(lost, kept, Config()).findings
+    assert [(f.rule, f.severity) for f in forward if f.severity >= MI] == [
+        ("structure.heading_lost", MA),
+    ]
+    assert [(f.rule, f.severity) for f in swapped if f.severity >= MI] == []
+
+
+def test_numbered_title_written_as_text_against_plain_titles(
+    tmp_path: Path,
+) -> None:
+    """A numbered build that wrote a title as text only loses its kind."""
+    titles = _numbered_sections(None, numbered=False)
+    plain = _page(tmp_path / "plain.html", titles)
+    lost = _page(tmp_path / "lost.html", _numbered_sections(LOST))
+    forward = run_compare(plain, lost, Config()).findings
+    swapped = run_compare(lost, plain, Config()).findings
+    assert [(f.rule, f.severity) for f in forward if f.severity >= MI] == [
+        ("structure.heading_lost", MA),
+    ]
+    assert [(f.rule, f.severity) for f in swapped if f.severity >= MI] == []
+
+
+def _left_out(*chapters: str) -> Config:
+    """Return a configuration that leaves chapters out of Sphinx and MkDocs."""
+    patterns = [p for c in chapters for p in (f"{c}.html", f"{c}/**")]
+    return Config(html=HtmlConfig(exclude=(*DEFAULT_HTML_EXCLUDE, *patterns)))
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["forward", "swapped"])
+def test_links_to_left_out_pages_follow_their_names(
+    tmp_path: Path,
+    order: tuple[int, int],
+) -> None:
+    """A link to a page left out leads to it in both URL layouts."""
+    sites = (
+        build_sphinx_like(SAMPLE_EN, tmp_path / "sphinx", split="chapters"),
+        build_mkdocs_like(SAMPLE_EN, tmp_path / "mkdocs"),
+    )
+    cfg = _left_out("reference")
+    result = run_compare(sites[order[0]], sites[order[1]], cfg)
+    pages = {
+        link.page
+        for doc in (result.ref, result.new)
+        for block in doc.blocks
+        for link in block.links
+    }
+    assert {"reference.html", "reference/index.html"} <= pages
+    assert result.stats.matched > 0
+    assert [
+        (f.rule, f.severity) for f in result.findings if f.severity >= MI
+    ] == []
+
+
+def test_link_moved_between_left_out_pages_is_reported(tmp_path: Path) -> None:
+    """A link that leads to another page left out is a changed target."""
+    ref_spec = replace_text(SAMPLE_EN, "(#command-line)", "(../reference/)")
+    new_spec = replace_text(
+        SAMPLE_EN,
+        "(#command-line)",
+        "(../getting-started/)",
+    )
+    ref = build_mkdocs_like(ref_spec, tmp_path / "ref")
+    new = build_mkdocs_like(new_spec, tmp_path / "new")
+    cfg = _left_out("reference", "getting-started")
+    findings = run_compare(ref, new, cfg).findings
+    assert [(f.rule, f.severity) for f in findings if f.severity >= MI] == [
+        ("link.target_changed", MA),
+    ]
+
+
 def test_moved_section_is_info_only(tmp_path: Path) -> None:
     """A section moved elsewhere is only reported as moved."""
     moved = move_section(SAMPLE_EN, "limits", after="installation")
@@ -204,6 +424,14 @@ MARKUPS: dict[str, tuple[SiteBuilder, SiteBuilder]] = {
         partial(build_sphinx_like, split="chapters"),
     ),
     "docusaurus/mkdocs": (build_docusaurus_like, build_mkdocs_like),
+    "docusaurus-base/sphinx-chapters": (
+        partial(build_docusaurus_like, base="/example/"),
+        partial(build_sphinx_like, split="chapters"),
+    ),
+    "docusaurus-base/pandoc": (
+        partial(build_docusaurus_like, base="/example/"),
+        build_pandoc_like,
+    ),
 }
 
 
@@ -227,3 +455,12 @@ def test_markup_only_differences_produce_no_finding(
     assert [
         (f.rule, f.severity) for f in result.findings if f.severity >= MI
     ] == []
+
+
+def test_accents_lost_everywhere_are_one_finding(tmp_path: Path) -> None:
+    """A generator that loses every acute accent gives one group."""
+    plain = map_texts(SAMPLE_FR, lambda text: text.replace("é", "e"))
+    findings = _compare(tmp_path, SAMPLE_FR, plain)
+    (group,) = [f for f in findings if f.severity >= MI]
+    assert (group.rule, group.severity) == ("text.accent_lost", MA)
+    assert len(group.occurrences) >= GROUP_MIN_OCCURRENCES

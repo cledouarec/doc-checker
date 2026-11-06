@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from doc_checker.model.document import Document, SourceRef
+from doc_checker.model.document import Document, SourceRef, carry_anchors
 from doc_checker.model.findings import (
     DiffSegment,
     Severity,
@@ -15,6 +15,7 @@ from doc_checker.model.findings import (
     finding_id,
 )
 from doc_checker.rules import RULES, get_rule
+from tests.builders import make_block
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -151,5 +152,22 @@ def test_missing_content_rules_are_critical() -> None:
 
 def test_rule_registry_is_consistent() -> None:
     """Every rule is registered under its own identifier."""
-    assert len(RULES) == 20
+    assert len(RULES) == 29
     assert all(spec.id == key for key, spec in RULES.items())
+
+
+def test_carry_anchors_moves_dropped_anchors_within_a_page() -> None:
+    """Anchors of dropped blocks go to the next kept block of their page."""
+    blocks = [
+        replace(make_block("Drop one."), anchors=("x",)),
+        replace(make_block("Drop two."), anchors=("y", "x")),
+        replace(make_block("Keep one."), anchors=("x", "z")),
+        replace(make_block("Drop three."), anchors=("lost",)),
+        make_block("Keep two.", file="other.html"),
+    ]
+    kept = carry_anchors(blocks, lambda block: block.text.startswith("Keep"))
+    assert [(block.text, block.anchors) for block in kept] == [
+        ("Keep one.", ("x", "y", "z")),
+        ("Keep two.", ()),
+    ]
+    assert blocks[2].anchors == ("x", "z")

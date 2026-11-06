@@ -14,8 +14,11 @@ from tests.builders import (
     SAMPLE_EN,
     SAMPLE_FR,
     DocSpec,
+    demote_heading,
     drop_section,
     move_section,
+    number_titles,
+    set_level,
 )
 from tests.pdf_builders import (
     ProseStyle,
@@ -24,6 +27,7 @@ from tests.pdf_builders import (
     build_fpdf2_pdf,
     build_lines_pdf,
     build_listing_pdf,
+    build_numbered_pdf,
     build_prose_pdf,
     build_references_pdf,
     build_reportlab_pdf,
@@ -129,6 +133,31 @@ def test_missing_section_without_bookmarks(tmp_path: Path) -> None:
     ]
 
 
+def test_demoted_heading_is_reported(tmp_path: Path) -> None:
+    """A heading of the outline written as a paragraph is a major finding."""
+    demoted = demote_heading(SAMPLE_EN, "exports")
+    findings = _compare(tmp_path, SAMPLE_EN, demoted).findings
+    assert [(f.rule, f.severity) for f in findings if f.severity >= MI] == [
+        ("structure.heading_lost", Severity.MAJOR),
+    ]
+
+
+def test_numbered_demoted_heading_is_reported(tmp_path: Path) -> None:
+    """A numbered heading written as a paragraph only loses its kind."""
+    numbered = number_titles(SAMPLE_EN)
+    demoted = demote_heading(numbered, "exports")
+    forward = _compare(tmp_path, numbered, demoted).findings
+    swapped = run_compare(
+        tmp_path / "new.pdf",
+        tmp_path / "ref.pdf",
+        Config(),
+    ).findings
+    assert [(f.rule, f.severity) for f in forward if f.severity >= MI] == [
+        ("structure.heading_lost", Severity.MAJOR),
+    ]
+    assert [(f.rule, f.severity) for f in swapped if f.severity >= MI] == []
+
+
 def test_swapped_pages_are_info_only(tmp_path: Path) -> None:
     """Two swapped pages are only reported as moved blocks."""
     ref = build_reportlab_pdf(SAMPLE_EN, tmp_path / "ref.pdf")
@@ -215,6 +244,17 @@ STEP_ROWS = [
     ("Step", "Duration", "Checked"),
     *((f"Step {i + 1}", f"{10 * i + 7} ms", "Yes") for i in range(160)),
 ]
+# Numbered sections whose third title is broken into four lines when the
+# titles are 120 pt wide, one line more than a heading has.
+NUMBERED_SECTIONS = [
+    ("1", "Install"),
+    ("1.1", "Requirements"),
+    ("1.2", "Download the archive from the release page of the project"),
+    ("1.3", "Configure"),
+    ("2", "Usage"),
+]
+WIDE_TITLES = 420.0
+NARROW_TITLES = 120.0
 # A listing with empty lines, which a numbered listing keeps as a number alone.
 CODE_SAMPLE = [
     "import os",
@@ -317,6 +357,34 @@ LAYOUTS: dict[str, tuple[Builder, Builder]] = {
     "numbered-headings": (
         partial(build_reportlab_pdf, SAMPLE_EN),
         partial(build_reportlab_pdf, SAMPLE_EN, numbered=True),
+    ),
+    # A long numbered title that a narrow column breaks into too many lines
+    # for a heading: it becomes a paragraph that keeps its number.
+    "numbered-title-wrap": (
+        partial(
+            build_numbered_pdf,
+            NUMBERED_SECTIONS,
+            title_width=WIDE_TITLES,
+        ),
+        partial(
+            build_numbered_pdf,
+            NUMBERED_SECTIONS,
+            title_width=NARROW_TITLES,
+        ),
+    ),
+    # The same, against a generator that does not number its titles.
+    "plain-and-numbered-title-wrap": (
+        partial(
+            build_numbered_pdf,
+            NUMBERED_SECTIONS,
+            title_width=WIDE_TITLES,
+            numbered=False,
+        ),
+        partial(
+            build_numbered_pdf,
+            NUMBERED_SECTIONS,
+            title_width=NARROW_TITLES,
+        ),
     ),
     # LaTeX books set "Chapter 1" on a line of its own above the title.
     "chapter-labels": (
@@ -520,3 +588,32 @@ def test_layout_only_differences_produce_no_finding(
     assert [
         (f.rule, f.severity) for f in result.findings if f.severity >= MI
     ] == []
+
+
+def test_wrapped_numbered_title_only_loses_its_kind(tmp_path: Path) -> None:
+    """A numbered title broken into too many lines is an inferred change."""
+    wide, narrow = (
+        build_numbered_pdf(
+            NUMBERED_SECTIONS,
+            tmp_path / f"{width}.pdf",
+            title_width=width,
+        )
+        for width in (WIDE_TITLES, NARROW_TITLES)
+    )
+    forward = run_compare(wide, narrow, Config()).findings
+    swapped = run_compare(narrow, wide, Config()).findings
+    assert [(f.rule, f.severity) for f in forward] == [
+        ("structure.heading_lost", Severity.INFO),
+    ]
+    assert [(f.rule, f.severity) for f in swapped] == [
+        ("structure.kind_changed", Severity.INFO),
+    ]
+
+
+def test_heading_level_change_is_reported(tmp_path: Path) -> None:
+    """A heading one level deeper in the outline is a minor finding."""
+    deeper = set_level(SAMPLE_EN, "exports", 3)
+    findings = _compare(tmp_path, SAMPLE_EN, deeper).findings
+    assert [(f.rule, f.severity) for f in findings if f.severity >= MI] == [
+        ("structure.heading_level", Severity.MINOR),
+    ]

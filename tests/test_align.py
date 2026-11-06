@@ -1,15 +1,14 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the global alignment of blocks."""
 
-from typing import TYPE_CHECKING
+import time
+
+import pytest
 
 import doc_checker.compare.align as align_module
 from doc_checker.compare.align import Pair, align
 from doc_checker.model.document import Block, BlockKind
 from tests.builders import SPLIT_PARTS, SPLIT_WHOLE, make_block
-
-if TYPE_CHECKING:
-    import pytest
 
 P = [
     f"Paragraph number {w} talks about topic {w}."
@@ -17,6 +16,9 @@ P = [
 ]
 
 type Kind = tuple[str, tuple[int, ...], tuple[int, ...], bool]
+
+# A generous bound on the time of an alignment that once took minutes.
+MAX_SECONDS = 10.0
 
 
 def _b(*texts: str) -> list[Block]:
@@ -108,6 +110,68 @@ def test_long_code_block() -> None:
     lines[1500] = "line_1500 = -1"
     new = [make_block("\n".join(lines), BlockKind.CODE)]
     assert _kinds(_align(ref, new)) == [("modified", (0,), (0,), False)]
+
+
+def test_a_large_table_found_cell_by_cell() -> None:
+    """A table split into more than six blocks is still one split."""
+    rows = [(f"option{i}", f"value{i}") for i in range(12)]
+    table = make_block(
+        "\n".join(f"{name} | {value}" for name, value in rows),
+        BlockKind.TABLE,
+    )
+    cells = [make_block(cell) for row in rows for cell in row]
+    assert _kinds(_align([table], cells)) == [
+        ("split", (0,), tuple(range(24)), False),
+    ]
+
+
+def test_code_split_into_lines_is_one_split() -> None:
+    """A code block whose forty lines became paragraphs is one split."""
+    lines = [f"run step {i} --verbose" for i in range(40)]
+    code = make_block("\n".join(lines), BlockKind.CODE)
+    assert _kinds(_align([code], [make_block(line) for line in lines])) == [
+        ("split", (0,), tuple(range(40)), False),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("whole", "parts"),
+    [
+        # 18 characters against 22: the shortest run that may score 0.9.
+        ("alpha beta gamma delta", ("alpha beta", "gamma d")),
+        # 22 characters against 18: the longest run that may score 0.9.
+        ("alpha beta gamma d", ("alpha beta", "gamma delta")),
+    ],
+)
+def test_runs_on_the_length_bound_are_scored(
+    whole: str,
+    parts: tuple[str, str],
+) -> None:
+    """A run whose length allows exactly the split ratio is still a split."""
+    assert _kinds(_align(_b(whole), _b(*parts))) == [
+        ("split", (0,), (0, 1), False),
+    ]
+
+
+def test_unmatched_long_code_is_aligned_quickly() -> None:
+    """Long code without a match among many blocks is not a slow search."""
+    lines = [
+        f"node_{i} = check(cluster, {i % 17}, retries={i % 5})"
+        for i in range(290)
+    ]
+    code = make_block("\n".join(lines), BlockKind.CODE)
+    blocks = _b(
+        *(
+            f"Step {i} of the upgrade checks the state of the cluster node "
+            f"{i % 17} and then writes the result to the log."
+            for i in range(2000)
+        ),
+    )
+    start = time.perf_counter()
+    kinds = _kinds(_align([code], blocks))
+    assert time.perf_counter() - start < MAX_SECONDS
+    assert ("deleted", (0,), (), False) in kinds
+    assert len(kinds) == len(blocks) + 1
 
 
 def test_heading_matches_paragraph_with_same_text() -> None:

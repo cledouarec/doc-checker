@@ -14,10 +14,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from doc_checker.compare.engine import CompareResult
-    from doc_checker.model.document import Document
+    from doc_checker.model.document import Block, Document, Link
 
 _MAX_TEXT: Final = 200
 _NO_GENERATOR: Final = "-"
+_LINK_KIND: Final = "link"
+_MISSING: Final = " (missing)"
 _ELLIPSIS: Final = "\U00002026"
 _REPLACEMENT: Final = "\U0000fffd"
 # What `printable` blanks out, but the tab and the line feed.
@@ -60,6 +62,24 @@ def _shorten(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + _ELLIPSIS
 
 
+def _link_line(link: Link) -> str:
+    """Return the line of a link: its text, its target, if it is missing."""
+    missing = _MISSING if link.url is None and not link.found else ""
+    return (
+        f"{'':>5}  {_LINK_KIND:<10}  "
+        f"{_one_line(link.text)} -> {_one_line(link.target)}{missing}"
+    )
+
+
+def _block_lines(index: int, block: Block) -> list[str]:
+    """Return the line of a block, then the line of each of its links."""
+    line = (
+        f"{index:>5}  {block.kind.value:<10}  {_one_line(block.source.href)}  "
+        f"{_shorten(block.text, _MAX_TEXT)}"
+    )
+    return [line, *map(_link_line, block.links)]
+
+
 def render_blocks(doc: Document) -> str:
     """Return a listing of the normalized blocks of a document.
 
@@ -67,11 +87,14 @@ def render_blocks(doc: Document) -> str:
         doc: Loaded document.
 
     Returns:
-        A header line, then one line per warning and one line per block. The
-        header tells the generator, a dash if it is unknown, and whether a PDF
-        is tagged. The values that come from the document are on one line
-        and have their controls made visible, as `visible` does; an
-        excerpt of a block shows its line breaks as marks.
+        A header line, then one line per warning and one line per block,
+        followed by one line per link of the block: its text and its
+        `Link.target`, then ``(missing)`` for an internal link whose page
+        does not exist. The header tells the generator, a dash if it is
+        unknown, and whether a PDF is tagged. The values that come from the
+        document are on one line and have their controls made visible, as
+        `visible` does; an excerpt of a block shows its line breaks as
+        marks.
     """
     header = (
         f"{_one_line(str(doc.path))}: {doc.format}, {len(doc.parts)} page(s), "
@@ -82,11 +105,8 @@ def render_blocks(doc: Document) -> str:
         header += ", tagged yes" if doc.tagged else ", tagged no"
     lines = [header]
     lines.extend(f"warning: {_one_line(warning)}" for warning in doc.warnings)
-    lines.extend(
-        f"{index:>5}  {block.kind.value:<10}  {_one_line(block.source.href)}  "
-        f"{_shorten(block.text, _MAX_TEXT)}"
-        for index, block in enumerate(doc.blocks)
-    )
+    for index, block in enumerate(doc.blocks):
+        lines.extend(_block_lines(index, block))
     return "\n".join(lines)
 
 
@@ -140,7 +160,14 @@ def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
         location = _one_line(side.source.href) if side else ""
         quote = _shorten(side.text, _QUOTE_CHARS) if side else ""
         label = _styled(Severity.CRITICAL, "CRITICAL")
-        lines.append(f'  {label} {finding.rule}  {location}  "{quote}"')
+        count = (
+            f" ({len(finding.occurrences)} occurrences)"
+            if finding.occurrences
+            else ""
+        )
+        lines.append(
+            f'  {label} {finding.rule}  {location}  "{quote}"{count}',
+        )
     tag = click.style("warning", fg="yellow")
     lines.extend(
         f"{tag}: {which}: {_one_line(warning)}"

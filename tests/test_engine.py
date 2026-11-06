@@ -165,6 +165,46 @@ def test_ignore_patterns_and_finding_ids() -> None:
     assert compare_documents(ref, new, ignored).findings == []
 
 
+ACCENTED = [
+    f"Le paragraphe {word} décrit le service."
+    for word in ("un", "deux", "trois", "quatre", "cinq", "six")
+]
+
+
+def test_a_systematic_pattern_is_one_finding_and_can_be_ignored() -> None:
+    """Six identical accent losses are one group, which can be ignored."""
+    ref = make_document(*_b(*ACCENTED))
+    new = make_document(*_b(*(t.replace("é", "e") for t in ACCENTED)))
+    (group,) = compare_documents(ref, new, Config()).findings
+    assert (group.rule, len(group.occurrences)) == ("text.accent_lost", 6)
+    ignored = Config(ignore=IgnoreConfig(findings=(group.id,)))
+    assert compare_documents(ref, new, ignored).findings == []
+
+
+def test_an_occurrence_can_be_ignored_below_the_group_size() -> None:
+    """An ignored occurrence leaves five findings, still a group of five."""
+    ref = make_document(*_b(*ACCENTED))
+    new = make_document(*_b(*(t.replace("é", "e") for t in ACCENTED)))
+    (group,) = compare_documents(ref, new, Config()).findings
+    first = group.occurrences[0].id
+    one = Config(ignore=IgnoreConfig(findings=(first,)))
+    (rest,) = compare_documents(ref, new, one).findings
+    assert len(rest.occurrences) == 5
+    two = Config(ignore=IgnoreConfig(findings=(first, rest.occurrences[0].id)))
+    findings = compare_documents(ref, new, two).findings
+    assert [len(f.occurrences) for f in findings] == [0, 0, 0, 0]
+
+
+def test_an_ignored_group_stays_ignored_below_the_group_size() -> None:
+    """The members of an ignored group stay ignored when four are left."""
+    ref = make_document(*_b(*ACCENTED))
+    new = make_document(*_b(*(t.replace("é", "e") for t in ACCENTED)))
+    (group,) = compare_documents(ref, new, Config()).findings
+    first, second = (item.id for item in group.occurrences[:2])
+    ignored = Config(ignore=IgnoreConfig(findings=(group.id, first, second)))
+    assert compare_documents(ref, new, ignored).findings == []
+
+
 def test_toc_blocks_are_skipped_unless_configured() -> None:
     """Contents blocks are compared only with the compare_toc setting."""
     toc = make_block("Getting started . . . . 2", BlockKind.TOC)
@@ -241,3 +281,17 @@ def test_unmatched_admonition_titles_are_not_compared() -> None:
     titled = make_document(make_block(P[0]), _heading("Summary", 2))
     result = compare_documents(titled, make_document(*_b(P[0])), Config())
     assert _rules(result) == [("section.missing", Severity.CRITICAL)]
+
+
+def test_cell_separators_are_compared_between_two_tables() -> None:
+    """A table that stays a table keeps its cell separators in the diff."""
+    ref = make_document(
+        make_block("Option | Default\ntimeout | 30", BlockKind.TABLE),
+    )
+    new = make_document(
+        make_block("Option | Default\ntimeout 30", BlockKind.TABLE),
+    )
+    result = compare_documents(ref, new, Config())
+    assert _rules(result) == [("text.punctuation_changed", Severity.INFO)]
+    assert result.findings[0].ref is not None
+    assert result.findings[0].ref.kind is BlockKind.TABLE

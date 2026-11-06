@@ -235,3 +235,11 @@ def test_hyphens_next_to_digits_are_compared(ref: str, new: str) -> None:
 def test_has_encoding_damage(text: str, damaged: bool) -> None:  # ruff: ignore[boolean-type-hint-positional-argument] - pytest parameter
     """Replacement, private use and mojibake characters are detected."""
     assert has_encoding_damage(text) is damaged
+
+
+def test_case_change_across_a_hyphen() -> None:
+    """A case change is no typo because a hyphen came or went."""
+    assert _classify(
+        "Use the Non-blocking mode.",
+        "Use the nonblocking mode.",
+    ) == [("text.case_changed", MI)]

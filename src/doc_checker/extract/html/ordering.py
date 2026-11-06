@@ -11,10 +11,11 @@ if TYPE_CHECKING:
 
     from doc_checker.extract.html.site import HtmlPage
 
-_SCHEME: Final = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+# The scheme of a URL and its colon, matched at the start of a target.
+SCHEME: Final = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*:")
 _DIGITS: Final = re.compile(r"(\d+)")
 _INDEX_NAMES: Final = frozenset({"index.html", "index.htm"})
-_INDEX_PAGE: Final = "index.html"
+INDEX_PAGE: Final = "index.html"  # Page that a directory link leads to.
 _PARENT: Final = ".."
 
 type SortKey = tuple[tuple[int, tuple[int | str, ...]], ...]
@@ -32,7 +33,7 @@ def resolve_href(href: str, page_rel: str) -> str | None:
         the same page and paths outside the site.
     """
     href = href.strip()
-    if not href or href.startswith(("#", "//")) or _SCHEME.match(href):
+    if not href or href.startswith(("#", "//")) or SCHEME.match(href):
         return None
     path = urllib.parse.unquote(urllib.parse.urlsplit(href).path)
     if not path:
@@ -46,7 +47,7 @@ def resolve_href(href: str, page_rel: str) -> str | None:
     if joined == _PARENT or joined.startswith(f"{_PARENT}/"):
         return None
     if path.endswith("/") or not posixpath.splitext(joined)[1]:
-        joined = posixpath.normpath(posixpath.join(joined, _INDEX_PAGE))
+        joined = posixpath.normpath(posixpath.join(joined, INDEX_PAGE))
     return joined
 
 
