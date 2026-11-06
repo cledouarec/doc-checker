@@ -4,7 +4,9 @@
 import html
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from operator import itemgetter
 from pathlib import Path
 from typing import Literal
 
@@ -69,7 +71,7 @@ SAMPLE_EN = DocSpec(
             paragraphs=(
                 (
                     "Install the package with the default "
-                    "configuration before you start."
+                    "[configuration](#first-steps) before you start."
                 ),
                 (
                     "The installer downloads 100 files and requires "
@@ -107,7 +109,7 @@ SAMPLE_EN = DocSpec(
             paragraphs=(
                 (
                     "A project groups several documents that share the same "
-                    "settings."
+                    "[settings](#command-line)."
                 ),
                 "Each project has an owner who can invite other members.",
             ),
@@ -133,7 +135,7 @@ SAMPLE_EN = DocSpec(
             paragraphs=(
                 (
                     "The command line accepts options in any order after the "
-                    "subcommand."
+                    "[subcommand](https://example.org/cli)."
                 ),
                 'Set the "strict" mode to reject every invalid file.',
             ),
@@ -149,7 +151,7 @@ SAMPLE_EN = DocSpec(
                 ),
                 (
                     "Requests above the limit receive an error and must be "
-                    "retried later."
+                    "[retried](#first-steps) later."
                 ),
             ),
         ),
@@ -167,8 +169,9 @@ SAMPLE_FR = DocSpec(
             2,
             paragraphs=(
                 (
-                    "Installez le paquet avec la configuration "
-                    "par défaut avant de commencer."
+                    "Installez le paquet avec la "
+                    "[configuration](#premiers-pas) par défaut avant de "
+                    "commencer."
                 ),
                 (
                     "L'installateur télécharge 1 000 fichiers et "
@@ -201,7 +204,7 @@ SAMPLE_FR = DocSpec(
             paragraphs=(
                 (
                     "Un projet regroupe plusieurs documents qui partagent les "
-                    "mêmes réglages."
+                    "mêmes [réglages](#installation)."
                 ),
                 (
                     "Chaque projet possède un propriétaire qui peut inviter "
@@ -215,6 +218,102 @@ SAMPLE_FR = DocSpec(
 
 def _esc(text: str) -> str:
     return html.escape(text, quote=False)
+
+
+_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+
+
+def link_text(text: str) -> str:
+    """Replace each ``[text](target)`` link of a spec text by its text."""
+    return _LINK.sub(itemgetter(1), text)
+
+
+type Resolver = Callable[[str], str]
+
+
+def _render(
+    text: str,
+    resolve: Resolver,
+    *,
+    lang: str | None = None,
+    reference: bool = False,
+) -> str:
+    """Return the HTML of a spec text, its links turned into anchors.
+
+    Args:
+        text: The spec text, with ``[text](target)`` links.
+        resolve: Maps a link target to the href the builder writes.
+        lang: The language whose typography applies, or ``None`` for none.
+        reference: Whether the anchors carry the Sphinx reference classes.
+
+    Returns:
+        The escaped HTML.
+    """
+    if lang:
+        text = smart_typography(text, lang)
+    parts: list[str] = []
+    position = 0
+    for match in _LINK.finditer(text):
+        parts.append(_esc(text[position : match.start()]))
+        target = match[2]
+        css = ""
+        if reference:
+            kind = "internal" if target.startswith("#") else "external"
+            css = f' class="reference {kind}"'
+        href = html.escape(resolve(target), quote=True)
+        parts.append(f'<a{css} href="{href}">{_esc(match[1])}</a>')
+        position = match.end()
+    parts.append(_esc(text[position:]))
+    return "".join(parts)
+
+
+def _chapter_of(spec: DocSpec) -> dict[str, str]:
+    """Map each section slug to the slug of its chapter."""
+    owner: dict[str, str] = {}
+    for chapter in _chapters(spec):
+        for section in chapter:
+            owner[section.slug] = chapter[0].slug
+    return owner
+
+
+def _resolver(spec: DocSpec, here: str, other: str | None) -> Resolver:
+    """Return the link resolver of a page.
+
+    Args:
+        spec: The documentation.
+        here: The slug of the chapter the page shows.
+        other: The format of the href to a section of another chapter, with
+            the fields ``chapter`` and ``slug``, or ``None`` when every
+            section is on the page.
+
+    Returns:
+        A function from a link target to an href. External targets and
+        targets that are no section of the spec stay as written.
+    """
+    owner = _chapter_of(spec)
+
+    def resolve(target: str) -> str:
+        slug = target.removeprefix("#")
+        chapter = owner.get(slug)
+        if slug == target or chapter is None:
+            return target
+        if other is None or chapter == here:
+            return f"#{slug}"
+        return other.format(chapter=chapter, slug=slug)
+
+    return resolve
+
+
+def section_numbers(spec: DocSpec) -> dict[str, str]:
+    """Number the sections: ``c`` for a chapter, ``c.s`` and ``c.s.t``."""
+    numbers: dict[str, str] = {}
+    counts = [0, 0, 0]
+    for section in spec.sections:
+        depth = min(section.level, 3) - 1
+        counts[depth] += 1
+        counts[depth + 1 :] = [0] * (2 - depth)
+        numbers[section.slug] = ".".join(str(c) for c in counts[: depth + 1])
+    return numbers
 
 
 _DOUBLE_QUOTED = re.compile(r'"([^"]*)"')
@@ -245,9 +344,16 @@ def _chapters(spec: DocSpec) -> list[list[Section]]:
     return chapters
 
 
-def _sphinx_section(section: Section, lang: str) -> str:
+def _sphinx_section(
+    section: Section,
+    lang: str,
+    resolve: Resolver,
+    number: str | None,
+) -> str:
     tag = f"h{section.level}"
     title = _esc(smart_typography(section.title, lang))
+    if number:
+        title = f'<span class="section-number">{number}. </span>{title}'
     parts = [
         f'<section id="{section.slug}">',
         (
@@ -256,11 +362,12 @@ def _sphinx_section(section: Section, lang: str) -> str:
         ),
     ]
     parts += [
-        f"<p>{_esc(smart_typography(p, lang))}</p>" for p in section.paragraphs
+        f"<p>{_render(p, resolve, lang=lang, reference=True)}</p>"
+        for p in section.paragraphs
     ]
     if section.bullets:
         items = "".join(
-            f"<li><p>{_esc(smart_typography(b, lang))}</p></li>"
+            f"<li><p>{_render(b, resolve, lang=lang, reference=True)}</p></li>"
             for b in section.bullets
         )
         parts.append(f'<ul class="simple">{items}</ul>')
@@ -293,7 +400,8 @@ def _sphinx_section(section: Section, lang: str) -> str:
     if section.note:
         parts.append(
             '<div class="admonition note"><p class="admonition-title">Note</p>'
-            f"<p>{_esc(smart_typography(section.note, lang))}</p></div>",
+            f"<p>{_render(section.note, resolve, lang=lang, reference=True)}"
+            "</p></div>",
         )
     parts.append("</section>")
     return "\n".join(parts)
@@ -336,13 +444,22 @@ def build_sphinx_like(
     out: Path,
     *,
     split: Literal["single", "chapters"] = "single",
+    numbered: bool = False,
 ) -> Path:
     """Write the documentation as a Sphinx Read the Docs theme build."""
     out.mkdir(parents=True, exist_ok=True)
     chapters = _chapters(spec)
+    numbers = section_numbers(spec) if numbered else {}
+
+    def render(chapter: list[Section], resolve: Resolver) -> str:
+        return "\n".join(
+            _sphinx_section(s, spec.lang, resolve, numbers.get(s.slug))
+            for s in chapter
+        )
+
     if split == "single":
         nav = [(f"#{c[0].slug}", c[0].title) for c in chapters]
-        body = "\n".join(_sphinx_section(s, spec.lang) for s in spec.sections)
+        body = render(list(spec.sections), _resolver(spec, "", None))
         page = _sphinx_page(spec, spec.title, body, nav)
         (out / "index.html").write_text(page, encoding="utf-8")
         return out
@@ -356,13 +473,37 @@ def build_sphinx_like(
     page = _sphinx_page(spec, spec.title, index, nav)
     (out / "index.html").write_text(page, encoding="utf-8")
     for chapter in chapters:
-        body = "\n".join(_sphinx_section(s, spec.lang) for s in chapter)
+        resolve = _resolver(spec, chapter[0].slug, "{chapter}.html#{slug}")
+        body = render(chapter, resolve)
         page = _sphinx_page(spec, chapter[0].title, body, nav)
         (out / f"{chapter[0].slug}.html").write_text(page, encoding="utf-8")
     return out
 
 
-def _mkdocs_section(section: Section) -> str:
+def _mkdocs_table(section: Section) -> str:
+    header, *rows = section.table
+    head = "".join(f"<th>{_esc(c)}</th>" for c in header)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in row) + "</tr>"
+        for row in rows
+    )
+    return (
+        f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    )
+
+
+def _plain_lists(section: Section, resolve: Resolver) -> list[str]:
+    """Return the paragraphs and the bullets, as MkDocs-like builders write."""
+    parts = [f"<p>{_render(p, resolve)}</p>" for p in section.paragraphs]
+    if section.bullets:
+        items = "".join(
+            f"<li>{_render(b, resolve)}</li>" for b in section.bullets
+        )
+        parts.append(f"<ul>{items}</ul>")
+    return parts
+
+
+def _mkdocs_section(section: Section, resolve: Resolver) -> str:
     tag = f"h{section.level}"
     parts = [
         (
@@ -371,30 +512,18 @@ def _mkdocs_section(section: Section) -> str:
             f'title="Permanent link">\xb6</a></{tag}>'
         ),
     ]
-    parts += [f"<p>{_esc(p)}</p>" for p in section.paragraphs]
-    if section.bullets:
-        items = "".join(f"<li>{_esc(b)}</li>" for b in section.bullets)
-        parts.append(f"<ul>{items}</ul>")
+    parts += _plain_lists(section, resolve)
     if section.code:
         parts.append(
             '<div class="highlight"><pre><span></span>'
             f"<code>{_esc(section.code)}</code></pre></div>",
         )
     if section.table:
-        header, *rows = section.table
-        head = "".join(f"<th>{_esc(c)}</th>" for c in header)
-        body = "".join(
-            "<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in row) + "</tr>"
-            for row in rows
-        )
-        parts.append(
-            f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody>"
-            "</table>",
-        )
+        parts.append(_mkdocs_table(section))
     if section.note:
         parts.append(
             '<div class="admonition note"><p class="admonition-title">Note</p>'
-            f"<p>{_esc(section.note)}</p></div>",
+            f"<p>{_render(section.note, resolve)}</p></div>",
         )
     return "\n".join(parts)
 
@@ -463,7 +592,8 @@ def build_mkdocs_like(
     (out / "index.html").write_text(home, encoding="utf-8")
     for chapter in _chapters(spec):
         slug = chapter[0].slug
-        body = "\n".join(_mkdocs_section(s) for s in chapter)
+        resolve = _resolver(spec, slug, "../{chapter}/#{slug}")
+        body = "\n".join(_mkdocs_section(s, resolve) for s in chapter)
         page = _mkdocs_page(
             spec,
             chapter[0].title,
@@ -474,6 +604,192 @@ def build_mkdocs_like(
         )
         (out / slug).mkdir(exist_ok=True)
         (out / slug / "index.html").write_text(page, encoding="utf-8")
+    return out
+
+
+def _pandoc_section(
+    section: Section,
+    resolve: Resolver,
+    number: str | None,
+    code_count: int,
+) -> str:
+    tag = f"h{section.level}"
+    prefix = (
+        f'<span class="header-section-number">{number}</span> '
+        if number
+        else ""
+    )
+    parts = [
+        f'<{tag} id="{section.slug}">{prefix}{_esc(section.title)}</{tag}>',
+    ]
+    parts += _plain_lists(section, resolve)
+    if section.code:
+        k = code_count + 1
+        lines = "\n".join(
+            f'<span id="cb{k}-{j}"><a href="#cb{k}-{j}" aria-hidden="true" '
+            f'tabindex="-1"></a>{_esc(line)}</span>'
+            for j, line in enumerate(section.code.split("\n"), 1)
+        )
+        parts.append(
+            f'<div class="sourceCode" id="cb{k}">'
+            '<pre class="sourceCode bash"><code class="sourceCode bash">'
+            f"{lines}</code></pre></div>",
+        )
+    if section.table:
+        header, *rows = section.table
+        head = "".join(f"<th>{_esc(c)}</th>" for c in header)
+        body = "".join(
+            f'<tr class="{"odd" if n % 2 else "even"}">'
+            + "".join(f"<td>{_esc(c)}</td>" for c in row)
+            + "</tr>"
+            for n, row in enumerate(rows, 1)
+        )
+        parts.append(
+            f'<table><thead><tr class="header">{head}</tr></thead>'
+            f"<tbody>{body}</tbody></table>",
+        )
+    if section.note:
+        parts.append(
+            f'<div class="note"><p>{_render(section.note, resolve)}</p></div>',
+        )
+    return "\n".join(parts)
+
+
+def build_pandoc_like(
+    spec: DocSpec,
+    out: Path,
+    *,
+    numbered: bool = False,
+) -> Path:
+    """Write the documentation as one pandoc standalone HTML file."""
+    out.mkdir(parents=True, exist_ok=True)
+    numbers = section_numbers(spec) if numbered else {}
+    resolve = _resolver(spec, "", None)
+    codes = 0
+    sections = []
+    for section in spec.sections:
+        sections.append(
+            _pandoc_section(
+                section,
+                resolve,
+                numbers.get(section.slug),
+                codes,
+            ),
+        )
+        codes += bool(section.code)
+    title = _esc(spec.title)
+    page = (
+        f'<!DOCTYPE html><html lang="{spec.lang}"><head><meta charset="utf-8">'
+        f"<title>{title}</title></head><body>"
+        f'<header id="title-block-header"><h1 class="title">{title}</h1>'
+        f"</header>{chr(10).join(sections)}</body></html>\n"
+    )
+    (out / "index.html").write_text(page, encoding="utf-8")
+    return out
+
+
+_DOCUSAURUS_NOTE = {"en": "note", "fr": "remarque"}
+
+
+def _docusaurus_section(
+    section: Section,
+    resolve: Resolver,
+    lang: str,
+) -> str:
+    parts = []
+    if section.level > 1:
+        tag = f"h{section.level}"
+        title = _esc(section.title)
+        label = html.escape(section.title, quote=True)
+        parts.append(
+            f'<{tag} class="anchor anchorWithStickyNavbar" '
+            f'id="{section.slug}">{title}<a href="#{section.slug}" '
+            f'class="hash-link" aria-label="Direct link to {label}">'
+            "\U0000200b</a></" + tag + ">",
+        )
+    parts += _plain_lists(section, resolve)
+    if section.code:
+        lines = "".join(
+            '<span class="token-line"><span class="token plain">'
+            f"{_esc(line)}</span><br></span>"
+            for line in section.code.split("\n")
+        )
+        parts.append(
+            '<div class="language-bash theme-code-block">'
+            '<div class="codeBlockContent"><pre class="prism-code '
+            'language-bash"><code class="codeBlockLines">'
+            f"{lines}</code></pre>"
+            '<div class="buttonGroup"><button type="button">Copy</button>'
+            "</div></div></div>",
+        )
+    if section.table:
+        parts.append(_mkdocs_table(section))
+    if section.note:
+        parts.append(
+            '<div class="theme-admonition theme-admonition-note alert">'
+            '<div class="admonitionHeading"><span class="admonitionIcon">'
+            '<svg viewBox="0 0 14 16"><path d="M6 5h2v2H6z"></path></svg>'
+            f"</span>{_DOCUSAURUS_NOTE[lang]}</div>"
+            '<div class="admonitionContent">'
+            f"<p>{_render(section.note, resolve)}</p></div></div>",
+        )
+    return "\n".join(parts)
+
+
+def build_docusaurus_like(
+    spec: DocSpec,
+    out: Path,
+    *,
+    base: str = "/",
+) -> Path:
+    """Write the documentation as a Docusaurus build served under ``base``."""
+    out.mkdir(parents=True, exist_ok=True)
+    title = _esc(spec.title)
+    chapters = _chapters(spec)
+    safe = html.escape(base, quote=True)
+    navbar = (
+        '<nav class="navbar"><a class="navbar__brand" '
+        f'href="{safe}">{title}</a></nav>'
+    )
+    (out / "index.html").write_text(
+        f'<!DOCTYPE html><html lang="{spec.lang}" dir="ltr"><head>'
+        f'<meta charset="utf-8"><title>{title}</title></head><body>'
+        f'{navbar}<div class="main-wrapper"><main></main></div>'
+        "</body></html>\n",
+        encoding="utf-8",
+    )
+    sidebar = "".join(
+        f'<li><a class="menu__link" href="{safe}docs/{c[0].slug}/">'
+        f"{_esc(c[0].title)}</a></li>"
+        for c in chapters
+    )
+    for chapter in chapters:
+        head = chapter[0]
+        resolve = _resolver(spec, head.slug, base + "docs/{chapter}/#{slug}")
+        body = "\n".join(
+            _docusaurus_section(s, resolve, spec.lang) for s in chapter
+        )
+        page = (
+            f'<!DOCTYPE html><html lang="{spec.lang}" dir="ltr"><head>'
+            f'<meta charset="utf-8"><title>{_esc(head.title)} | {title}'
+            '</title><meta name="generator" content="Docusaurus v3.9.2">'
+            f"</head><body>{navbar}"
+            '<div class="main-wrapper"><aside '
+            'class="theme-doc-sidebar-container"><ul class="menu__list">'
+            f'{sidebar}</ul></aside><main class="docMainContainer">'
+            '<article><nav class="theme-doc-breadcrumbs"><ul>'
+            f'<li><a href="{safe}">Home</a></li></ul></nav>'
+            '<div class="theme-doc-markdown markdown"><header>'
+            f"<h1>{_esc(head.title)}</h1></header>\n{body}\n</div>"
+            f'<nav class="pagination-nav"><a href="{safe}">Home</a></nav>'
+            '</article></main></div><footer class="footer">'
+            "<p>\xa9 Copyright 2026.</p></footer></body></html>\n"
+        )
+        (out / "docs" / head.slug).mkdir(parents=True, exist_ok=True)
+        (out / "docs" / head.slug / "index.html").write_text(
+            page,
+            encoding="utf-8",
+        )
     return out
 
 

@@ -18,6 +18,7 @@ from doc_checker.model.findings import (
     finding_id,
 )
 from doc_checker.rules import get_rule
+from doc_checker.text.lexicon import is_admonition_title
 from doc_checker.text.normalize import loose_key
 from doc_checker.text.tokenize import Token, TokenKind, tokenize
 
@@ -284,15 +285,24 @@ class _Drafter:
                     drafts.append(
                         _Draft("section.missing", None, side, None, detail),
                     )
-                elif index not in covered:
+                elif index not in covered and not _is_default_title(block):
                     side = _whole([block], "delete")
                     drafts.append(_Draft("block.missing", None, side, None))
             elif pair.kind is PairKind.INSERTED:
-                side = _whole([self.new[pair.new[0]]], "insert")
-                drafts.append(_Draft("block.added", None, None, side))
+                block = self.new[pair.new[0]]
+                if not _is_default_title(block):
+                    side = _whole([block], "insert")
+                    drafts.append(_Draft("block.added", None, None, side))
             else:
                 drafts += self.matched(pair)
         return drafts
+
+
+def _is_default_title(block: Block) -> bool:
+    """Return whether a block, not a heading, is a default admonition title."""
+    return block.kind is not BlockKind.HEADING and is_admonition_title(
+        block.text,
+    )
 
 
 def _finalize(drafts: Iterable[_Draft], cfg: Config) -> list[Finding]:

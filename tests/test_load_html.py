@@ -10,11 +10,16 @@ from doc_checker.config import Config, HtmlConfig
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
 from doc_checker.extract.html import load_html
+from doc_checker.model.document import BlockKind
 from tests.builders import (
     SAMPLE_EN,
     SAMPLE_FR,
+    build_docusaurus_like,
     build_mkdocs_like,
+    build_pandoc_like,
     build_sphinx_like,
+    link_text,
+    replace_text,
 )
 
 if TYPE_CHECKING:
@@ -164,3 +169,56 @@ def test_declared_language_must_be_a_language_tag(
     )
     doc = load_html(page, HtmlConfig(), lang="auto")
     assert doc.declared_lang == expected
+
+
+def test_builders_render_links(tmp_path: Path) -> None:
+    """Each HTML builder links the sections, PDF texts keep the words."""
+    sphinx = build_sphinx_like(SAMPLE_EN, tmp_path / "s", split="chapters")
+    mkdocs = build_mkdocs_like(SAMPLE_EN, tmp_path / "m")
+    pandoc = build_pandoc_like(SAMPLE_EN, tmp_path / "p")
+    docusaurus = build_docusaurus_like(
+        SAMPLE_EN,
+        tmp_path / "d",
+        base="/example/",
+    )
+    pages = {
+        'href="reference.html#command-line"': sphinx / "user-guide.html",
+        'href="../reference/#command-line"': mkdocs / "user-guide/index.html",
+        'href="#command-line"': pandoc / "index.html",
+        'href="/example/docs/reference/#command-line"': (
+            docusaurus / "docs/user-guide/index.html"
+        ),
+        'href="https://example.org/cli"': mkdocs / "reference/index.html",
+    }
+    for href, page in pages.items():
+        assert href in page.read_text(encoding="utf-8")
+    assert link_text("see [Limits](#limits) now") == "see Limits now"
+
+
+def test_builders_keep_unknown_slug_on_the_page(tmp_path: Path) -> None:
+    """A link to no section stays a same page anchor in every builder."""
+    spec = replace_text(
+        SAMPLE_EN,
+        "[settings](#command-line)",
+        "[settings](#nowhere)",
+    )
+    pages = [
+        build_sphinx_like(spec, tmp_path / "s", split="chapters")
+        / "user-guide.html",
+        build_mkdocs_like(spec, tmp_path / "m") / "user-guide/index.html",
+        build_pandoc_like(spec, tmp_path / "p") / "index.html",
+        build_docusaurus_like(spec, tmp_path / "d")
+        / "docs/user-guide/index.html",
+    ]
+    for page in pages:
+        assert 'href="#nowhere"' in page.read_text(encoding="utf-8")
+
+
+def test_numbered_headings_lose_their_numbers(tmp_path: Path) -> None:
+    """Section numbers are set apart from the titles and counted."""
+    site = build_pandoc_like(SAMPLE_EN, tmp_path / "p", numbered=True)
+    doc = load_html(site, HtmlConfig(), lang="auto")
+    headings = [b for b in doc.blocks if b.kind is BlockKind.HEADING]
+    assert [b.text for b in headings] == [s.title for s in SAMPLE_EN.sections]
+    assert headings[5].attrs["number"] == "2.2"
+    assert doc.normalization["heading_number"] == 9

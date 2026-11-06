@@ -118,3 +118,56 @@ def is_modal(word: str) -> bool:
         Whether the word is a modal.
     """
     return _fold(word) in MODALS
+
+
+# The default titles of admonitions, as a text is compared with them: case
+# folded, and without a colon at the end.
+DEFAULT_ADMONITION_TITLES: Final[frozenset[str]] = frozenset(
+    {
+        "note",
+        "notes",
+        "warning",
+        "tip",
+        "hint",
+        "important",
+        "caution",
+        "danger",
+        "attention",
+        "error",
+        "info",
+        "example",
+        "see also",
+        "todo",
+        "abstract",
+        "summary",
+        "success",
+        "question",
+        "failure",
+        "bug",
+        "quote",
+        "remarque",
+        "avertissement",
+        "astuce",
+        "erreur",
+        "conseil",
+        "exemple",
+        "voir aussi",
+        "à faire",
+    },
+)
+
+
+def is_admonition_title(text: str) -> bool:
+    """Tell whether a text is the default title of an admonition.
+
+    The case is ignored, and so is a colon after the title.
+
+    Args:
+        text: The text of a block.
+
+    Returns:
+        Whether the text is one of the default titles.
+    """
+    return text.strip().casefold().rstrip(":").strip() in (
+        DEFAULT_ADMONITION_TITLES
+    )

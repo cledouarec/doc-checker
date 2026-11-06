@@ -4,12 +4,16 @@
 from collections import Counter
 from types import MappingProxyType
 
+import pytest
+
 from doc_checker.extract.common import (
-    DEFAULT_ADMONITION_TITLES,
+    NUMBERED_MIN,
+    NUMBERED_SHARE,
     assign_section_paths,
     normalized_block,
+    strip_heading_numbers,
 )
-from doc_checker.model.document import BlockKind, SourceRef
+from doc_checker.model.document import Block, BlockKind, SourceRef
 
 SOURCE = SourceRef("doc.pdf", page=2)
 
@@ -171,6 +175,110 @@ def test_heading_without_level_does_not_open_a_section() -> None:
     ) == [("Guide",), ("Guide",), ("Guide",)]
 
 
-def test_default_admonition_titles() -> None:
-    """The default titles of admonitions are shared by HTML and PDF."""
-    assert {"note", "warning", "tip", "see also"} <= DEFAULT_ADMONITION_TITLES
+def _heading(text: str, level: int = 1) -> Block:
+    """Make a heading of a PDF page."""
+    return normalized_block(
+        BlockKind.HEADING,
+        text,
+        SOURCE,
+        Counter(),
+        level=level,
+    )
+
+
+def _paragraph(text: str) -> Block:
+    """Make a paragraph of a PDF page."""
+    return normalized_block(BlockKind.PARAGRAPH, text, SOURCE, Counter())
+
+
+def test_numbers_of_a_numbered_document_are_set_apart() -> None:
+    """The numbers of the headings leave their texts and are kept apart."""
+    counter: Counter[str] = Counter()
+    blocks = [
+        _heading("1 Getting started"),
+        _heading("1.1. Installation", 2),
+        _paragraph("Text of the section."),
+        _heading("A.1 Annex", 2),
+        _heading("Unnumbered", 2),
+    ]
+    result = strip_heading_numbers(blocks, counter)
+    assert [(b.text, b.attrs.get("number")) for b in result] == [
+        ("Getting started", "1"),
+        ("Installation", "1.1"),
+        ("Text of the section.", None),
+        ("Annex", "A.1"),
+        ("Unnumbered", None),
+    ]
+    assert (result[1].key_strict, result[1].raw_text) == (
+        "Installation",
+        "1.1. Installation",
+    )
+    assert counter["heading_number"] == 3
+
+
+@pytest.mark.parametrize(
+    ("extra", "numbers"),
+    [(0, ["1", "2", "3", "4"]), (1, [None, None, None, None])],
+    ids=["at-the-share", "below-the-share"],
+)
+def test_numbered_share_decides_a_numbered_document(
+    extra: int,
+    numbers: list[str | None],
+) -> None:
+    """Numbers leave the headings at the numbered share, not below it."""
+    numbered = [_heading(f"{n} Step {n}") for n in range(1, 5)]
+    assert len(numbered) > NUMBERED_MIN
+    plain = round(len(numbered) / NUMBERED_SHARE) - len(numbered) + extra
+    others = [
+        _heading(f"Unnumbered topic {chr(97 + i)}") for i in range(plain)
+    ]
+    result = strip_heading_numbers([*numbered, *others], Counter())
+    assert [b.attrs.get("number") for b in result[:4]] == numbers
+
+
+def test_numbers_stay_where_headings_are_not_numbered() -> None:
+    """A document that does not number its headings keeps their numbers."""
+    blocks = [
+        _heading("2026 roadmap"),
+        _heading("Goals", 2),
+        _heading("Risks", 2),
+        _heading("3 ways to start", 2),
+    ]
+    assert strip_heading_numbers(blocks, Counter()) == blocks
+
+
+def test_a_chapter_label_becomes_the_number_of_its_heading() -> None:
+    """A chapter label before a heading is the number of that heading."""
+    counter: Counter[str] = Counter()
+    blocks = [
+        _paragraph("Chapter 2"),
+        _heading("Getting started"),
+        _paragraph("Chapter 3"),
+        _paragraph("Not a heading after it."),
+    ]
+    result = strip_heading_numbers(blocks, counter)
+    assert [(b.text, b.attrs.get("number")) for b in result] == [
+        ("Getting started", "Chapter 2"),
+        ("Chapter 3", None),
+        ("Not a heading after it.", None),
+    ]
+    assert counter["heading_number"] == 1
+
+
+def test_a_chapter_label_set_as_a_heading_is_taken_too() -> None:
+    """A chapter label that is a heading goes, and attrs are merged."""
+    counter: Counter[str] = Counter()
+    title = normalized_block(
+        BlockKind.HEADING,
+        "Getting started",
+        SOURCE,
+        counter,
+        level=2,
+        attrs={"heading_source": "style"},
+    )
+    result = strip_heading_numbers([_heading("Chapter 1", 2), title], counter)
+    assert [b.text for b in result] == ["Getting started"]
+    assert result[0].attrs == {
+        "heading_source": "style",
+        "number": "Chapter 1",
+    }

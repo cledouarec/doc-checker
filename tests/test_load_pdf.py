@@ -13,7 +13,7 @@ from doc_checker.config import Config, PdfConfig
 from doc_checker.errors import InputError
 from doc_checker.extract import detect_format, load_document
 from doc_checker.extract.pdf import load_pdf
-from doc_checker.model.document import BlockKind
+from doc_checker.model.document import HEADING_SOURCE, BlockKind
 from tests.builders import SAMPLE_EN, SAMPLE_FR
 from tests.pdf_builders import (
     build_fpdf2_pdf,
@@ -374,11 +374,34 @@ def test_unmatched_bookmarks_leave_headings_to_styles(tmp_path: Path) -> None:
     assert _headings(doc) == SECTION_HEADINGS
 
 
-def test_matched_bookmarks_alone_tell_headings(tmp_path: Path) -> None:
-    """Once a bookmark matches a block, the styles make no heading."""
+def test_a_partial_outline_is_completed(tmp_path: Path) -> None:
+    """One matching bookmark no longer hides the headings of the styles."""
     plain = build_reportlab_pdf(SAMPLE_EN, tmp_path / "p.pdf", outline=False)
     doc = _load(_with_outline(plain, tmp_path / "o.pdf", "Getting started"))
-    assert _headings(doc) == [("Getting started", 1)]
+    assert _headings(doc) == SECTION_HEADINGS
+    sources = [
+        b.attrs.get(HEADING_SOURCE)
+        for b in doc.blocks
+        if b.kind is BlockKind.HEADING
+    ]
+    assert sources == ["outline"] + ["style"] * 8
+
+
+def test_an_outline_of_chapters_keeps_the_sections(tmp_path: Path) -> None:
+    """An outline that stops at the chapters keeps the section headings."""
+    path = build_reportlab_pdf(SAMPLE_EN, tmp_path / "c.pdf", outline_depth=1)
+    assert _headings(_load(path)) == SECTION_HEADINGS
+
+
+def test_a_full_outline_gives_every_heading(pdfs: dict[str, Path]) -> None:
+    """In a PDF with a full outline, every heading comes from it."""
+    doc = _load(pdfs["rl_en"])
+    sources = {
+        b.attrs.get(HEADING_SOURCE)
+        for b in doc.blocks
+        if b.kind is BlockKind.HEADING
+    }
+    assert sources == {"outline"}
 
 
 def test_styles_tell_headings_without_bookmarks(tmp_path: Path) -> None:
@@ -410,3 +433,23 @@ def test_numbered_listing_in_tiny_type(tmp_path: Path) -> None:
         "import os",
         6,
     )
+
+
+def test_numbers_and_chapter_labels_leave_headings(tmp_path: Path) -> None:
+    """Heading numbers and chapter labels leave the text of a PDF."""
+    path = build_reportlab_pdf(
+        SAMPLE_EN,
+        tmp_path / "n.pdf",
+        numbered=True,
+        chapter_labels=True,
+    )
+    doc = _load(path)
+    assert _headings(doc) == SECTION_HEADINGS
+    assert {
+        b.attrs[HEADING_SOURCE]
+        for b in doc.blocks
+        if b.kind is BlockKind.HEADING
+    } == {"outline"}
+    assert "Chapter 1" not in {b.text for b in doc.blocks}
+    # Three chapter labels, then nine heading numbers.
+    assert doc.normalization["heading_number"] == 12

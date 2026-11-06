@@ -5,8 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.extract.common import DEFAULT_ADMONITION_TITLES
 from doc_checker.model.document import BlockKind
+from doc_checker.text.lexicon import is_admonition_title
 from doc_checker.text.normalize import printable
 
 if TYPE_CHECKING:
@@ -259,7 +259,7 @@ class _Walker:
         )
         if not is_title:
             self.emit(BlockKind.PARAGRAPH, text, element)
-        elif text.casefold().rstrip(":") not in DEFAULT_ADMONITION_TITLES:
+        elif not is_admonition_title(text):
             self.emit(
                 BlockKind.PARAGRAPH,
                 text,

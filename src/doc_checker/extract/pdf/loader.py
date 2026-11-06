@@ -15,7 +15,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.errors import InputError
-from doc_checker.extract.common import assign_section_paths, normalized_block
+from doc_checker.extract.common import (
+    assign_section_paths,
+    normalized_block,
+    strip_heading_numbers,
+)
 from doc_checker.extract.pdf.blocks import (
     group_lines,
     merge_flows,
@@ -23,7 +27,7 @@ from doc_checker.extract.pdf.blocks import (
 )
 from doc_checker.extract.pdf.catalog import read_catalog
 from doc_checker.extract.pdf.chrome import find_chrome, title_pages
-from doc_checker.extract.pdf.headings import bookmark_levels, style_levels
+from doc_checker.extract.pdf.headings import HeadingSource, heading_levels
 from doc_checker.extract.pdf.joining import code_text, prose_text, vocabulary
 from doc_checker.extract.pdf.kinds import is_caption, toc_pages
 from doc_checker.extract.pdf.layout import page_lines
@@ -34,7 +38,12 @@ from doc_checker.extract.pdf.reader import (
     read_page,
 )
 from doc_checker.extract.pdf.segments import body_size, build_segments
-from doc_checker.model.document import BlockKind, Document, SourceRef
+from doc_checker.model.document import (
+    HEADING_SOURCE,
+    BlockKind,
+    Document,
+    SourceRef,
+)
 from doc_checker.text.lang import declared_language, resolve_language
 
 if TYPE_CHECKING:
@@ -271,12 +280,12 @@ def _levels(
     bookmarks: Sequence[Bookmark],
     *,
     body: float,
-) -> dict[int, int]:
-    """Find the headings of a document and their levels.
+) -> dict[int, tuple[int, HeadingSource]]:
+    """Find the headings of a document, their levels and their sources.
 
-    The bookmarks tell the headings when at least one of them matches a block.
-    Otherwise, without bookmarks or with an outline whose titles are found in
-    no block, the styles of the blocks tell them.
+    The outline makes the headings that its bookmarks match, and the styles of
+    the blocks complete it. Without bookmarks, or with an outline whose
+    titles are found in no block, the styles tell all the headings.
 
     Args:
         drafts: The draft blocks of the document, in reading order.
@@ -285,10 +294,9 @@ def _levels(
         body: The body size of the document, in points.
 
     Returns:
-        The level of each heading, by position of its block.
+        The level and the source of each heading, by position of its block.
     """
-    levels = bookmark_levels(drafts, texts, bookmarks) if bookmarks else {}
-    return levels or style_levels(drafts, texts, body=body)
+    return heading_levels(drafts, texts, bookmarks, body=body)
 
 
 def _kind(
@@ -337,7 +345,7 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
     drafts: Sequence[DraftBlock],
     texts: Sequence[str],
     *,
-    levels: Mapping[int, int],
+    levels: Mapping[int, tuple[int, HeadingSource]],
     kinds: Mapping[int, BlockKind],
     file: str,
     counter: Counter[str],
@@ -347,7 +355,8 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
     Args:
         drafts: The draft blocks of the document, in reading order.
         texts: The text of each block, in the same order.
-        levels: The level of each heading, by position of its block.
+        levels: The level and the source of each heading, by position of
+            its block.
         kinds: The kind of each contents or index page, by position of the
             page.
         file: The name of the PDF file, which the blocks point to.
@@ -366,15 +375,18 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
             heading=index in levels,
             counter=counter,
         )
+        heading = kind is BlockKind.HEADING
         blocks.append(
             normalized_block(
                 kind,
                 raw_text,
                 SourceRef(file, page=page + 1),
                 counter,
-                level=levels[index] if kind is BlockKind.HEADING else None,
+                level=levels[index][0] if heading else None,
+                attrs={HEADING_SOURCE: levels[index][1]} if heading else None,
             ),
         )
+    blocks = strip_heading_numbers(blocks, counter)
     assign_section_paths(blocks)
     return blocks
 
