@@ -44,16 +44,3 @@ def find_chrome(pages: Sequence[Sequence[Block]]) -> frozenset[str]:
     return frozenset(
         key for key, count in counts.items() if count >= threshold
     )
-
-
-def drop_keys(blocks: Sequence[Block], keys: frozenset[str]) -> list[Block]:
-    """Return the blocks whose strict key is not in ``keys``.
-
-    Args:
-        blocks: Blocks to filter.
-        keys: Strict keys to drop.
-
-    Returns:
-        The remaining blocks, in order.
-    """
-    return [block for block in blocks if block.key_strict not in keys]

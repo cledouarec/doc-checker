@@ -1,42 +1,72 @@
 # Copyright 2026 Christophe Le Douarec
-"""Turn the alignment of two documents into findings."""
+"""Turn the alignment of two documents into findings.
+
+Each pair of the alignment gives its drafts: a missing, added, moved, split
+or merged block, and the word level differences of matched blocks. An
+unmatched default admonition title or chapter label gives none, as the
+generator adds them, and so does the number of a title that lost its
+heading.
+
+The kinds of matched blocks are compared too, by `kind_drafts` of
+`doc_checker.compare.structure`: a heading, a table, a code block or the
+items of a list that lost their kind are reported, and any other change of
+kind is information. Between two PDF documents, whose kinds are inferred
+from the layout, those findings are information, except the loss of a
+heading of the outline where the new outline has headings of its level.
+The levels of matched headings are compared by `level_drafts` of the same
+module, with a map of the levels learned from the pairs of headings, so
+that a generator that shifts every heading changes nothing. The links of
+matched blocks are compared by `link_drafts` of `doc_checker.compare.links`,
+which reports the links lost, broken or leading elsewhere.
+
+The drafts then take the severities of the configuration, and those of the
+disabled rules, below the minimum severity or ignored are left out. Last,
+`group_findings` of `doc_checker.compare.aggregate` replaces the findings of
+one rule and pattern, once there are five of them, by one group.
+"""
 
 import re
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final
 
+from doc_checker.compare.aggregate import group_findings, text_pattern
 from doc_checker.compare.align import Pair, PairKind, align
 from doc_checker.compare.classify import HunkContext, classify_hunk
-from doc_checker.compare.textdiff import Hunk, diff_tokens
+from doc_checker.compare.drafts import MATCHED, Draft, whole
+from doc_checker.compare.links import link_drafts
+from doc_checker.compare.structure import kind_drafts, level_drafts
+from doc_checker.compare.textdiff import Hunk, diff_tokens, span_text
 from doc_checker.config import rule_disabled
-from doc_checker.model.document import Block, BlockKind, Document
+from doc_checker.model.document import (
+    CELL_SEPARATOR,
+    NUMBER_ATTR,
+    Block,
+    BlockKind,
+    Document,
+    carry_anchors,
+)
 from doc_checker.model.findings import (
     DiffSegment,
     Finding,
-    Severity,
     Side,
     finding_id,
+    group_id,
 )
 from doc_checker.rules import get_rule
-from doc_checker.text.lexicon import is_admonition_title
+from doc_checker.text.lexicon import is_admonition_title, is_chapter_label
 from doc_checker.text.normalize import loose_key
+from doc_checker.text.numbers import HEADING_NUMBER
 from doc_checker.text.tokenize import Token, TokenKind, tokenize
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from doc_checker.compare.drafts import SegmentOp
     from doc_checker.config import Config
 
 CONTEXT_TOKENS: Final = 8
-EXCERPT_MAX_CHARS: Final = 300
 
-_ELLIPSIS: Final = "\U00002026"
-_MATCHED: Final = frozenset(
-    {PairKind.EQUAL, PairKind.MODIFIED, PairKind.SPLIT, PairKind.MERGE},
-)
 _CONTENTS: Final = frozenset({BlockKind.TOC, BlockKind.INDEX})
-
-type SegmentOp = Literal["equal", "delete", "insert"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,15 +96,16 @@ class CompareResult:
     stats: CompareStats
 
 
-@dataclass(frozen=True, slots=True)
-class _Draft:
-    """A finding before configuration overrides and filters."""
-
-    rule: str
-    severity: Severity | None
-    ref: Side | None
-    new: Side | None
-    detail: str | None = None
+def _keyed(block: Block, patterns: Sequence[re.Pattern[str]]) -> Block:
+    """Return a block whose keys lost the ignored patterns, if any."""
+    if not patterns:
+        return block
+    key = block.key_strict
+    for pattern in patterns:
+        key = pattern.sub("", key)
+    if block.kind is not BlockKind.CODE:
+        key = " ".join(key.split())
+    return replace(block, key_strict=key, key_loose=loose_key(key))
 
 
 def _prepare(
@@ -86,36 +117,21 @@ def _prepare(
 ) -> list[Block]:
     """Return the blocks to compare, with ignored patterns removed.
 
-    Page chrome is dropped. So are the table of contents and index blocks,
-    unless ``compare_toc`` is set.
+    Page chrome is left out. So are the table of contents and index blocks,
+    unless ``compare_toc`` is set, and the blocks that the ignored patterns
+    leave without a loose key. The anchors of the blocks left out go to the
+    next kept block of their page, as `carry_anchors` moves them, so that
+    the links to them still lead somewhere.
     """
     skipped = frozenset() if compare_toc else _CONTENTS
-    prepared = []
-    for block in blocks:
-        if block.key_strict in chrome or block.kind in skipped:
-            continue
-        key = block.key_strict
-        for pattern in patterns:
-            key = pattern.sub("", key)
-        if patterns and block.kind is not BlockKind.CODE:
-            key = " ".join(key.split())
-        loose = loose_key(key) if patterns else block.key_loose
-        if loose:
-            prepared.append(replace(block, key_strict=key, key_loose=loose))
-    return prepared
-
-
-def _truncate(text: str) -> str:
-    """Return the text cut to ``EXCERPT_MAX_CHARS`` characters."""
-    if len(text) <= EXCERPT_MAX_CHARS:
-        return text
-    return text[:EXCERPT_MAX_CHARS] + _ELLIPSIS
-
-
-def _whole(blocks: Sequence[Block], op: SegmentOp) -> Side:
-    """Return a side showing the whole text of blocks."""
-    text = " ".join(block.text for block in blocks)
-    return Side(blocks[0].source, (DiffSegment(op, _truncate(text)),))
+    # A block left out loses its loose key, as a block without words.
+    keyed = [
+        replace(block, key_loose="")
+        if block.key_strict in chrome or block.kind in skipped
+        else _keyed(block, patterns)
+        for block in blocks
+    ]
+    return carry_anchors(keyed, lambda block: bool(block.key_loose))
 
 
 def _segments(
@@ -153,16 +169,21 @@ class _Drafter:
         ref: Sequence[Block],
         new: Sequence[Block],
         langs: tuple[str | None, str | None],
+        *,
+        pdf: bool,
     ) -> None:
         self.ref = ref
         self.new = new
         self.langs = langs
+        self.pdf = pdf
         self.vocabulary = frozenset(
             token.text.casefold()
             for block in ref
             for token in tokenize(block.key_strict)
             if token.kind is TokenKind.WORD
         )
+        # Whether each document numbers its headings.
+        self.numbered = (_numbered(ref), _numbered(new))
 
     def missing_sections(
         self,
@@ -197,10 +218,31 @@ class _Drafter:
         self,
         ref_blocks: Sequence[Block],
         new_blocks: Sequence[Block],
-    ) -> list[_Draft]:
-        """Return one draft per word level difference between blocks."""
-        ref_text = " ".join(block.key_strict for block in ref_blocks)
-        new_text = " ".join(block.key_strict for block in new_blocks)
+    ) -> list[Draft]:
+        """Return one draft per word level difference between blocks.
+
+        When the kinds of the blocks differ on the two sides, the cell
+        separators of a table are left out: a table whose rows became
+        paragraphs lost them with its kind, which `kind_drafts` reports. So
+        is the number that starts a block that is no heading, if the other
+        side has a heading, and that heading has its number set apart or
+        the document of the block numbers its headings: a title that lost
+        its heading keeps the number that its generator gave it, and the
+        numbers of the headings are never compared.
+        """
+        flat = {block.kind for block in ref_blocks} != {
+            block.kind for block in new_blocks
+        }
+        ref_numbered = _numbers_left_out(new_blocks, own=self.numbered[0])
+        new_numbered = _numbers_left_out(ref_blocks, own=self.numbered[1])
+        ref_text = " ".join(
+            _diff_key(block, flat=flat, numbered=ref_numbered)
+            for block in ref_blocks
+        )
+        new_text = " ".join(
+            _diff_key(block, flat=flat, numbered=new_numbered)
+            for block in new_blocks
+        )
         ref_tokens, new_tokens = tokenize(ref_text), tokenize(new_text)
         ctx = HunkContext(
             ref_text,
@@ -221,7 +263,7 @@ class _Drafter:
         ctx: HunkContext,
         ref_block: Block,
         new_block: Block,
-    ) -> _Draft:
+    ) -> Draft:
         """Return the draft of one word level difference."""
         classification = classify_hunk(hunk, ctx)
         ref_segments = _segments(
@@ -236,78 +278,179 @@ class _Drafter:
             (hunk.new_start, hunk.new_end),
             "insert",
         )
-        return _Draft(
+        deleted = span_text(
+            ctx.ref_text,
+            ctx.ref_tokens,
+            hunk.ref_start,
+            hunk.ref_end,
+        )
+        inserted = span_text(
+            ctx.new_text,
+            ctx.new_tokens,
+            hunk.new_start,
+            hunk.new_end,
+        )
+        pattern = text_pattern(classification.rule, deleted, inserted)
+        return Draft(
             classification.rule,
             classification.severity,
-            Side(ref_block.source, ref_segments),
-            Side(new_block.source, new_segments),
+            Side(ref_block.source, ref_segments, ref_block.kind),
+            Side(new_block.source, new_segments, new_block.kind),
+            pattern=pattern,
         )
 
-    def matched(self, pair: Pair) -> list[_Draft]:
+    def matched(self, pair: Pair) -> list[Draft]:
         """Return the drafts of a pair of matched blocks."""
         ref_blocks = [self.ref[i] for i in pair.ref]
         new_blocks = [self.new[j] for j in pair.new]
         drafts = []
         if pair.moved:
             drafts.append(
-                _Draft(
+                Draft(
                     "block.moved",
                     None,
-                    _whole(ref_blocks, "equal"),
-                    _whole(new_blocks, "equal"),
+                    whole(ref_blocks, "equal"),
+                    whole(new_blocks, "equal"),
                 ),
             )
         if pair.kind in {PairKind.SPLIT, PairKind.MERGE}:
             drafts.append(
-                _Draft(
+                Draft(
                     "block.split_merged",
                     None,
-                    _whole(ref_blocks, "equal"),
-                    _whole(new_blocks, "equal"),
+                    whole(ref_blocks, "equal"),
+                    whole(new_blocks, "equal"),
                 ),
             )
         if pair.kind is not PairKind.EQUAL:
             drafts += self.hunks(ref_blocks, new_blocks)
         return drafts
 
-    def drafts(self, pairs: Sequence[Pair]) -> list[_Draft]:
-        """Return the drafts of all pairs, in pair order."""
+    def drafts(self, pairs: Sequence[Pair]) -> list[Draft]:
+        """Return the drafts of all pairs, in pair order.
+
+        The changes of kind of a pair follow its other drafts, then its change
+        of heading level, then its links that were lost or changed.
+        """
         deleted = [p.ref[0] for p in pairs if p.kind is PairKind.DELETED]
         heads, covered = self.missing_sections(deleted)
-        drafts: list[_Draft] = []
-        for pair in pairs:
+        kinds = kind_drafts(pairs, self.ref, self.new, pdf=self.pdf)
+        levels = level_drafts(pairs, self.ref, self.new, pdf=self.pdf)
+        links = link_drafts(pairs, self.ref, self.new)
+        drafts: list[Draft] = []
+        for position, pair in enumerate(pairs):
             if pair.kind is PairKind.DELETED:
                 index = pair.ref[0]
                 block = self.ref[index]
                 if index in heads:
                     detail = f"{heads[index]} blocks missing in this section"
-                    side = _whole([block], "delete")
+                    side = whole([block], "delete")
                     drafts.append(
-                        _Draft("section.missing", None, side, None, detail),
+                        Draft("section.missing", None, side, None, detail),
                     )
-                elif index not in covered and not _is_default_title(block):
-                    side = _whole([block], "delete")
-                    drafts.append(_Draft("block.missing", None, side, None))
+                elif index not in covered and not _unreported(block):
+                    side = whole([block], "delete")
+                    drafts.append(
+                        Draft(
+                            "block.missing",
+                            None,
+                            side,
+                            None,
+                            pattern=block.key_loose,
+                        ),
+                    )
             elif pair.kind is PairKind.INSERTED:
                 block = self.new[pair.new[0]]
-                if not _is_default_title(block):
-                    side = _whole([block], "insert")
-                    drafts.append(_Draft("block.added", None, None, side))
+                if not _unreported(block):
+                    side = whole([block], "insert")
+                    drafts.append(
+                        Draft(
+                            "block.added",
+                            None,
+                            None,
+                            side,
+                            pattern=block.key_loose,
+                        ),
+                    )
             else:
                 drafts += self.matched(pair)
+            drafts += kinds.get(position, [])
+            drafts += levels.get(position, [])
+            drafts += links.get(position, [])
         return drafts
 
 
-def _is_default_title(block: Block) -> bool:
-    """Return whether a block, not a heading, is a default admonition title."""
-    return block.kind is not BlockKind.HEADING and is_admonition_title(
-        block.text,
+def _numbered(blocks: Sequence[Block]) -> bool:
+    """Return whether a heading among blocks has its number set apart."""
+    return any(
+        block.kind is BlockKind.HEADING and NUMBER_ATTR in block.attrs
+        for block in blocks
     )
 
 
-def _finalize(drafts: Iterable[_Draft], cfg: Config) -> list[Finding]:
-    """Return the findings, with overrides, filters and identifiers."""
+def _numbers_left_out(other: Sequence[Block], *, own: bool) -> bool:
+    """Return whether the blocks of a side may lose the number they start with.
+
+    Args:
+        other: The blocks of the other side of their pair.
+        own: Whether the document of the blocks numbers its headings.
+
+    Returns:
+        Whether the other side has a heading, and either that heading has
+        its number set apart or the document of the blocks numbers its
+        headings.
+    """
+    headings = [block for block in other if block.kind is BlockKind.HEADING]
+    return bool(headings) and (own or _numbered(headings))
+
+
+def _diff_key(block: Block, *, flat: bool, numbered: bool) -> str:
+    """Return the key of a block to diff, without what its kind brought.
+
+    Args:
+        block: A block to diff.
+        flat: Whether the kinds of the blocks of its pair differ.
+        numbered: Whether the block may lose the number it starts with, as
+            `_numbers_left_out` tells.
+
+    Returns:
+        The strict key. If ``flat`` is set, each cell separator of a table
+        is replaced by a blank and, if ``numbered`` is set too, the heading
+        number that starts a block that is no heading is left out.
+    """
+    key = block.key_strict
+    if not flat:
+        return key
+    if block.kind is BlockKind.TABLE:
+        key = key.replace(CELL_SEPARATOR, " ")
+    if numbered and block.kind is not BlockKind.HEADING:
+        match = HEADING_NUMBER.match(key)
+        key = key[match.end() :] if match else key
+    return key
+
+
+def _unreported(block: Block) -> bool:
+    """Return whether an unmatched block comes from its generator.
+
+    Such a block gives no finding: a default admonition title that is no
+    heading, such as ``Note``, or a chapter label, such as ``Chapter 3``.
+    The other document folded the label into the number of the heading that
+    follows it, unless that title lost its heading.
+    """
+    return is_chapter_label(block.text) or (
+        block.kind is not BlockKind.HEADING and is_admonition_title(block.text)
+    )
+
+
+def _finalize(drafts: Iterable[Draft], cfg: Config) -> list[Finding]:
+    """Return the findings, with overrides, filters, identifiers and groups.
+
+    A finding is left out before the grouping if its identifier is ignored,
+    or if the identifier of the group of its rule and pattern is: an ignored
+    group stays ignored when fewer findings than a group needs are left.
+    """
     findings = []
+    ignored = cfg.ignore.findings
     for draft in drafts:
         if rule_disabled(cfg, draft.rule):
             continue
@@ -317,7 +460,10 @@ def _finalize(drafts: Iterable[_Draft], cfg: Config) -> list[Finding]:
         if severity < cfg.min_severity:
             continue
         identifier = finding_id(draft.rule, draft.ref, draft.new)
-        if identifier in cfg.ignore.findings:
+        if identifier in ignored or (
+            draft.pattern is not None
+            and group_id(draft.rule, draft.pattern) in ignored
+        ):
             continue
         findings.append(
             Finding(
@@ -329,9 +475,10 @@ def _finalize(drafts: Iterable[_Draft], cfg: Config) -> list[Finding]:
                 draft.new,
                 draft.detail,
                 identifier,
+                draft.pattern,
             ),
         )
-    return findings
+    return group_findings(findings)
 
 
 def compare_documents(
@@ -363,11 +510,16 @@ def compare_documents(
         match=cfg.compare.match,
         moved_match=cfg.compare.moved_match,
     )
-    drafter = _Drafter(ref_blocks, new_blocks, (ref.lang, new.lang))
+    drafter = _Drafter(
+        ref_blocks,
+        new_blocks,
+        (ref.lang, new.lang),
+        pdf=ref.format == "pdf",
+    )
     stats = CompareStats(
         ref_blocks=len(ref_blocks),
         new_blocks=len(new_blocks),
-        matched=sum(len(pair.ref) for pair in pairs if pair.kind in _MATCHED),
+        matched=sum(len(pair.ref) for pair in pairs if pair.kind in MATCHED),
         moved=sum(pair.moved for pair in pairs),
     )
     return CompareResult(

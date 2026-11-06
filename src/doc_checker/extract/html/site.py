@@ -43,12 +43,16 @@ class HtmlPage:
     Attributes:
         rel_path: POSIX path of the page, relative to the site root.
         tree: Parsed document.
-        redirect_to: Target page when the page only redirects elsewhere.
+        redirect_to: Target page when the page only redirects elsewhere in
+            the site, before the base of the site is known.
+        redirect_href: URL of that redirection as written in the page, set
+            when ``redirect_to`` is.
     """
 
     rel_path: str
     tree: HtmlElement
     redirect_to: str | None
+    redirect_href: str | None = None
 
 
 def discover_pages(root: Path, cfg: HtmlConfig) -> list[tuple[Path, str]]:
@@ -91,13 +95,13 @@ def _charset(data: bytes) -> str:
     return _DEFAULT_CHARSET
 
 
-def _redirect_target(tree: HtmlElement, rel_path: str) -> str | None:
-    """Return the target of a meta refresh redirection, if any."""
+def _refresh_url(tree: HtmlElement) -> str | None:
+    """Return the URL of a meta refresh redirection, as written, if any."""
     for meta in tree.iter("meta"):
         if (meta.get("http-equiv") or "").casefold() == _REFRESH:
             match = _REFRESH_URL.search(meta.get("content") or "")
             if match:
-                return resolve_href(match.group(1), rel_path)
+                return match.group(1)
     return None
 
 
@@ -127,4 +131,6 @@ def parse_page(path: Path, rel_path: str) -> HtmlPage:
         tree = lxml.html.document_fromstring(data, parser=parser)
     except lxml.etree.ParserError, ValueError:
         raise InputError(invalid) from None
-    return HtmlPage(rel_path, tree, _redirect_target(tree, rel_path))
+    url = _refresh_url(tree)
+    target = None if url is None else resolve_href(url, rel_path)
+    return HtmlPage(rel_path, tree, target, None if target is None else url)

@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Final
 
 from rapidfuzz.distance import DamerauLevenshtein
 
-from doc_checker.compare.textdiff import Hunk, span_text
+from doc_checker.compare.textdiff import (
+    Hunk,
+    span_text,
+    without_letter_hyphens,
+)
 from doc_checker.model.findings import Severity
 from doc_checker.text.lexicon import is_modal, negation_count
 from doc_checker.text.normalize import count_marks, strip_accents
@@ -167,21 +171,21 @@ def _fold(text: str) -> str:
 
 
 def _accents(view: _View, _: HunkContext) -> Classification | None:
-    if (
-        view.op != "replace"
-        or view.ref == view.new
-        or _fold(view.ref) != _fold(view.new)
-    ):
+    ref = without_letter_hyphens(view.ref)
+    new = without_letter_hyphens(view.new)
+    if view.op != "replace" or ref == new or _fold(ref) != _fold(new):
         return None
-    if count_marks(view.new) < count_marks(view.ref):
+    if count_marks(new) < count_marks(ref):
         return Classification("text.accent_lost", Severity.MAJOR)
-    if strip_accents(view.ref) == strip_accents(view.new):
+    if strip_accents(ref) == strip_accents(new):
         return Classification("text.accent_changed", Severity.MINOR)
     return None
 
 
 def _case(view: _View, _: HunkContext) -> Classification | None:
-    if view.ref != view.new and view.ref.casefold() == view.new.casefold():
+    ref = without_letter_hyphens(view.ref)
+    new = without_letter_hyphens(view.new)
+    if ref != new and ref.casefold() == new.casefold():
         return Classification("text.case_changed", Severity.MINOR)
     return None
 

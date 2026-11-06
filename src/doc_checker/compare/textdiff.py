@@ -37,6 +37,18 @@ class Hunk:
     new_end: int
 
 
+def without_letter_hyphens(text: str) -> str:
+    """Return a text without the hyphens placed between two letters.
+
+    Args:
+        text: Any text.
+
+    Returns:
+        The text; a hyphen next to a digit stays.
+    """
+    return _LETTER_HYPHEN.sub("", text)
+
+
 def _key(token: Token) -> str:
     """Return the text a token is compared by.
 
@@ -48,7 +60,7 @@ def _key(token: Token) -> str:
         text of the token.
     """
     if token.kind is TokenKind.WORD:
-        return _LETTER_HYPHEN.sub("", token.text)
+        return without_letter_hyphens(token.text)
     return token.text
 
 

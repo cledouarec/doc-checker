@@ -5,30 +5,23 @@ The numbers of the headings, such as ``2.1`` or ``Chapter 3``, are set apart
 from the texts of the headings, as generators number them differently.
 """
 
-import re
 from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.model.document import Block, BlockKind
+from doc_checker.model.document import NUMBER_ATTR, Block, BlockKind
+from doc_checker.text.lexicon import is_chapter_label
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
+from doc_checker.text.numbers import HEADING_NUMBER
 
 if TYPE_CHECKING:
+    import re
     from collections.abc import Mapping, Sequence
 
     from doc_checker.model.document import SourceRef
 
 NUMBERED_MIN: Final = 3  # Fewest numbered headings of a numbered document.
 NUMBERED_SHARE: Final = 0.5  # Least share of the headings that are numbered.
-NUMBER_ATTR: Final = "number"  # Attribute that keeps the number of a heading.
-HEADING_NUMBER: Final = re.compile(
-    r"^(\d+(?:\.\d+)*|[A-Z](?:\.\d+)+)\.?\s+(?=\S)",
-)
-CHAPTER_LABEL: Final = re.compile(
-    r"^(?:chapter|chapitre|part|partie|appendix|annexe)"
-    r"\s+(?:\d+|[ivxlc]+|[a-z])$",
-    re.IGNORECASE,
-)
 
 
 def normalized_block(  # ruff: ignore[too-many-arguments] - one argument per field of a block
@@ -82,11 +75,6 @@ def assign_section_paths(blocks: Sequence[Block]) -> None:
         block.section_path = tuple(text for _, text in stack)
 
 
-def _is_label(block: Block) -> bool:
-    """Return whether the whole text of a block is a chapter label."""
-    return CHAPTER_LABEL.fullmatch(block.text) is not None
-
-
 def _numbered(block: Block, number: str) -> Block:
     """Return a heading with a number, kept in its attributes."""
     return replace(block, attrs={**block.attrs, NUMBER_ATTR: number})
@@ -97,6 +85,9 @@ def _without_labels(
     counter: Counter[str],
 ) -> list[Block]:
     """Fold each chapter label into the heading that follows it.
+
+    The anchors of a label go, without duplicates, before those of the
+    heading.
 
     Args:
         blocks: Blocks in reading order.
@@ -113,9 +104,11 @@ def _without_labels(
         if (
             following is not None
             and following.kind is BlockKind.HEADING
-            and _is_label(block)
+            and is_chapter_label(block.text)
         ):
-            result.append(_numbered(following, block.text))
+            anchors = dict.fromkeys((*block.anchors, *following.anchors))
+            heading = replace(following, anchors=tuple(anchors))
+            result.append(_numbered(heading, block.text))
             counter["heading_number"] += 1
             index += 2
         else:
@@ -148,11 +141,11 @@ def strip_heading_numbers(
     """Set the numbers of the headings apart from their texts.
 
     A chapter label, such as ``Chapter 2``, that is followed by a heading
-    is removed, and becomes the number of that heading. Then, if the
-    document numbers its headings, which is the case when enough of them
-    start with a number and these are a large share of the headings, the
-    numbers leave the texts of the headings. Each number is kept in the
-    attributes of its heading.
+    is removed, and becomes the number of that heading, which takes its
+    anchors first. Then, if the document numbers its headings, which is the
+    case when enough of them start with a number and these are a large
+    share of the headings, the numbers leave the texts of the headings.
+    Each number is kept in the attributes of its heading.
 
     Args:
         blocks: Blocks in reading order.
