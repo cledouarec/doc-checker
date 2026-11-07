@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from doc_checker.model.document import Document, SourceRef, carry_anchors
+from doc_checker.model.document import (
+    Document,
+    ImageRef,
+    PixelSource,
+    SourceRef,
+    carry_anchors,
+)
 from doc_checker.model.findings import (
     DiffSegment,
     Severity,
@@ -152,7 +158,7 @@ def test_missing_content_rules_are_critical() -> None:
 
 def test_rule_registry_is_consistent() -> None:
     """Every rule is registered under its own identifier."""
-    assert len(RULES) == 29
+    assert len(RULES) == 37
     assert all(spec.id == key for key, spec in RULES.items())
 
 
@@ -171,3 +177,23 @@ def test_carry_anchors_moves_dropped_anchors_within_a_page() -> None:
         ("Keep two.", ()),
     ]
     assert blocks[2].anchors == ("x", "z")
+
+
+def test_image_without_pixels_is_not_readable() -> None:
+    """An image without hashes has no pixels to compare."""
+    svg = ImageRef(name="img/a.svg", format="svg", digest="ab" * 16)
+    assert (svg.readable, svg.source, svg.alt) == (False, None, None)
+    png = ImageRef("a.png", "png", "cd" * 16, phash=1, dhash=2)
+    assert png.readable
+
+
+def test_pixel_source_hides_its_bytes() -> None:
+    """The bytes of a data URL stay out of the representation."""
+    assert "PNG" not in repr(PixelSource(data=b"\x89PNG" * 100))
+
+
+def test_text_blocks_and_sides_have_no_image() -> None:
+    """Text blocks and their sides carry no image."""
+    block = make_block("Some text here for the block.")
+    assert block.image is None
+    assert Side(block.source, ()).image is None

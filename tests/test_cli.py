@@ -218,3 +218,15 @@ def test_compare_missing_path_exits_2(tmp_path: Path) -> None:
     result = CliRunner().invoke(main, args)
     assert result.exit_code == 2
     assert "does not exist" in result.output
+
+
+def test_no_images_option_is_accepted(tmp_path: Path) -> None:
+    """Both commands accept the option that leaves the images out."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "s")
+    out = tmp_path / "out"
+    for args in (
+        ["extract", str(site), "--no-images"],
+        ["compare", str(site), str(site), "-o", str(out), "--no-images"],
+    ):
+        result = CliRunner().invoke(main, args)
+        assert result.exit_code == 0, result.output

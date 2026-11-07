@@ -1,17 +1,38 @@
 # Copyright 2026 Christophe Le Douarec
 """Builders of test blocks, documents and documentation sites."""
 
+import base64
 import html
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from hashlib import blake2b
 from operator import itemgetter
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from doc_checker.model.document import Block, BlockKind, Document, SourceRef
+from doc_checker.model.document import (
+    Block,
+    BlockKind,
+    Document,
+    ImageRef,
+    SourceRef,
+)
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
+from tests.image_builders import (
+    blurred,
+    drawing,
+    encode,
+    figure_drawing,
+    figure_svg,
+    grayed,
+    pixelated,
+    scaled,
+)
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 
 def make_block(
@@ -36,6 +57,39 @@ def make_block(
     )
 
 
+type Defect = Literal[
+    "jpeg10",
+    "jpeg95",
+    "x0.4",
+    "blur",
+    "nearest",
+    "gray",
+    "raster",
+    "other",
+    "noalt",
+    "dropped",
+]
+
+
+@dataclass(frozen=True)
+class Figure:
+    """A figure of a section: a drawing, its caption and its alternative text.
+
+    Attributes:
+        name: Name of the drawing, which seeds it and names its file.
+        caption: The caption.
+        alt: The alternative text.
+        kind: The format of the file.
+        defect: A planted defect, or ``None``.
+    """
+
+    name: str
+    caption: str
+    alt: str
+    kind: Literal["png", "jpeg", "svg"] = "png"
+    defect: Defect | None = None
+
+
 @dataclass(frozen=True)
 class Section:
     """A heading and the content that follows it.
@@ -58,6 +112,7 @@ class Section:
     bullets_as_text: bool = False
     table_as_text: bool = False
     code_as_text: bool = False
+    figures: tuple[Figure, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -230,6 +285,91 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
+def _attr(text: str) -> str:
+    return html.escape(text, quote=True)
+
+
+type FigureFile = tuple[str, bytes]
+
+
+def _encoded(image: Image.Image, suffix: str, quality: int = 90) -> FigureFile:
+    """Encode an image as a PNG or as a JPEG."""
+    if suffix == "jpg":
+        return "jpg", encode(image, "JPEG", quality=quality)
+    return "png", encode(image)
+
+
+_TRANSFORMS: dict[str, Callable[[Image.Image], Image.Image]] = {
+    "x0.4": lambda image: scaled(image, 0.4),
+    "blur": blurred,
+    "nearest": pixelated,
+    "gray": grayed,
+}
+_RASTER_DEFECTS = frozenset({"jpeg10", "jpeg95", "raster", *_TRANSFORMS})
+
+
+def figure_file(figure: Figure) -> FigureFile:
+    """Return the suffix, without the dot, and the bytes of a figure file.
+
+    A defect that changes the pixels of an SVG figure writes the PNG of its
+    drawing, since an SVG has no pixels to change.
+    """
+    name, defect = figure.name, figure.defect
+    other = defect == "other"
+    if figure.kind == "svg" and defect not in _RASTER_DEFECTS:
+        text = (
+            figure_svg(f"{name}-other", flipped=True)
+            if other
+            else figure_svg(name)
+        )
+        return "svg", text.encode()
+    suffix, quality = {"jpeg": "jpg"}.get(figure.kind, "png"), 90
+    if figure.kind == "svg":
+        image = figure_drawing(name)
+    else:
+        image = drawing(f"{name}-other" if other else name)
+    if defect in {"jpeg10", "jpeg95"}:
+        suffix, quality = "jpg", int(defect.removeprefix("jpeg"))
+    elif defect in _TRANSFORMS:
+        image = _TRANSFORMS[defect](image)
+    return _encoded(image, suffix, quality)
+
+
+def _figure_numbers(spec: DocSpec) -> dict[str, int]:
+    """Number the figures of the documentation from 1, in order."""
+    figures = [f.name for section in spec.sections for f in section.figures]
+    return {name: k for k, name in enumerate(figures, 1)}
+
+
+def _write_figures(
+    spec: DocSpec,
+    folder: Path,
+    pattern: str,
+    *,
+    inline: str | None = None,
+) -> None:
+    """Write the figure files in a folder, each under its own name.
+
+    Args:
+        spec: The documentation.
+        folder: The folder, created if it is missing.
+        pattern: The file name, with the fields ``name``, ``suffix`` and
+            ``h``, the digest of the bytes.
+        inline: A suffix whose files are written in the page, not here.
+    """
+    for section in spec.sections:
+        for figure in section.figures:
+            if figure.defect == "dropped":
+                continue
+            suffix, data = figure_file(figure)
+            if suffix == inline:
+                continue
+            digest = blake2b(data, digest_size=4).hexdigest()
+            folder.mkdir(parents=True, exist_ok=True)
+            file = pattern.format(name=figure.name, suffix=suffix, h=digest)
+            (folder / file).write_bytes(data)
+
+
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 
 
@@ -354,11 +494,32 @@ def _chapters(spec: DocSpec) -> list[list[Section]]:
     return chapters
 
 
+def _sphinx_figure(figure: Figure, k: int | None) -> str:
+    """Write a figure as Sphinx does, with a number if ``k`` is given."""
+    suffix, _ = figure_file(figure)
+    caption = _esc(figure.caption)
+    if figure.defect == "dropped":
+        return (
+            '<figure class="align-default">'
+            f"<figcaption>{caption}</figcaption></figure>"
+        )
+    alt = "" if figure.defect == "noalt" else f'alt="{_attr(figure.alt)}" '
+    number = f'<span class="caption-number">Fig. {k} </span>' if k else ""
+    return (
+        f'<figure class="align-default" id="fig-{figure.name}">'
+        f'<img {alt}src="_images/{figure.name}.{suffix}" />'
+        f'<figcaption><p>{number}<span class="caption-text">{caption}</span>'
+        f'<a class="headerlink" href="#fig-{figure.name}" '
+        'title="Link to this image">\xb6</a></p></figcaption></figure>'
+    )
+
+
 def _sphinx_section(
     section: Section,
     lang: str,
     resolve: Resolver,
     number: str | None,
+    figure_numbers: dict[str, int],
 ) -> str:
     tag = f"h{section.level}"
     title = _esc(smart_typography(section.title, lang))
@@ -374,6 +535,10 @@ def _sphinx_section(
     parts += [
         f"<p>{_render(p, resolve, lang=lang, reference=True)}</p>"
         for p in section.paragraphs
+    ]
+    parts += [
+        _sphinx_figure(figure, figure_numbers.get(figure.name))
+        for figure in section.figures
     ]
     if section.bullets:
         items = "".join(
@@ -460,10 +625,18 @@ def build_sphinx_like(
     out.mkdir(parents=True, exist_ok=True)
     chapters = _chapters(spec)
     numbers = section_numbers(spec) if numbered else {}
+    figure_numbers = _figure_numbers(spec) if numbered else {}
+    _write_figures(spec, out / "_images", "{name}.{suffix}")
 
     def render(chapter: list[Section], resolve: Resolver) -> str:
         return "\n".join(
-            _sphinx_section(s, spec.lang, resolve, numbers.get(s.slug))
+            _sphinx_section(
+                s,
+                spec.lang,
+                resolve,
+                numbers.get(s.slug),
+                figure_numbers,
+            )
             for s in chapter
         )
 
@@ -507,12 +680,15 @@ def _plain_lists(
     resolve: Resolver,
     *,
     unlisted: bool = False,
+    figures: Sequence[str] = (),
 ) -> list[str]:
     """Return the paragraphs and the bullets, as MkDocs-like builders write.
 
-    With ``unlisted``, each bullet is a paragraph of its own.
+    With ``unlisted``, each bullet is a paragraph of its own. The figures,
+    already written, come after the paragraphs.
     """
     parts = [f"<p>{_render(p, resolve)}</p>" for p in section.paragraphs]
+    parts += figures
     if unlisted:
         parts += [f"<p>{_render(b, resolve)}</p>" for b in section.bullets]
     elif section.bullets:
@@ -521,6 +697,21 @@ def _plain_lists(
         )
         parts.append(f"<ul>{items}</ul>")
     return parts
+
+
+def _mkdocs_figure(figure: Figure) -> str:
+    """Write a figure as Material for MkDocs does, an SVG in line."""
+    caption = f"<figcaption>{_esc(figure.caption)}</figcaption>"
+    if figure.defect == "dropped":
+        return f"<figure>{caption}</figure>"
+    suffix, data = figure_file(figure)
+    if suffix == "svg":
+        return f"<figure>{data.decode()}{caption}</figure>"
+    alt = "" if figure.defect == "noalt" else f'alt="{_attr(figure.alt)}" '
+    return (
+        f'<figure><img {alt}src="../img/{figure.name}.{suffix}" />'
+        f"{caption}</figure>"
+    )
 
 
 def _mkdocs_section(section: Section, resolve: Resolver) -> str:
@@ -539,6 +730,7 @@ def _mkdocs_section(section: Section, resolve: Resolver) -> str:
         section,
         resolve,
         unlisted=section.bullets_as_text,
+        figures=[_mkdocs_figure(f) for f in section.figures],
     )
     if section.code and section.code_as_text:
         lines = "<br>".join(_esc(line) for line in section.code.split("\n"))
@@ -613,6 +805,7 @@ def build_mkdocs_like(
 ) -> Path:
     """Write the documentation as a Material for MkDocs build."""
     out.mkdir(parents=True, exist_ok=True)
+    _write_figures(spec, out / "img", "{name}.{suffix}", inline="svg")
     home = _mkdocs_page(
         spec,
         spec.title,
@@ -639,11 +832,38 @@ def build_mkdocs_like(
     return out
 
 
+_MIME = {"png": "png", "jpg": "jpeg", "svg": "svg+xml"}
+
+
+def _pandoc_figure(figure: Figure, *, embed: bool) -> str:
+    """Write a figure as pandoc does, in line with ``embed``."""
+    caption = _esc(figure.caption)
+    text = f'<figcaption aria-hidden="true">{caption}</figcaption>'
+    if figure.defect == "dropped":
+        return f"<figure>{text}</figure>"
+    suffix, data = figure_file(figure)
+    label = _attr(figure.caption)
+    if embed:
+        payload = base64.b64encode(data).decode()
+        src = f"data:image/{_MIME[suffix]};base64,{payload}"
+        extra = (
+            ' role="img"'
+            if figure.defect == "noalt"
+            else f' role="img" aria-label="{label}"'
+        )
+    else:
+        src = f"img/{figure.name}.{suffix}"
+        extra = "" if figure.defect == "noalt" else f' alt="{label}"'
+    return f'<figure><img src="{src}"{extra} />{text}</figure>'
+
+
 def _pandoc_section(
     section: Section,
     resolve: Resolver,
     number: str | None,
     code_count: int,
+    *,
+    embed: bool,
 ) -> str:
     tag = f"h{section.level}"
     prefix = (
@@ -654,7 +874,11 @@ def _pandoc_section(
     parts = [
         f'<{tag} id="{section.slug}">{prefix}{_esc(section.title)}</{tag}>',
     ]
-    parts += _plain_lists(section, resolve)
+    parts += _plain_lists(
+        section,
+        resolve,
+        figures=[_pandoc_figure(f, embed=embed) for f in section.figures],
+    )
     if section.code:
         k = code_count + 1
         lines = "\n".join(
@@ -692,9 +916,15 @@ def build_pandoc_like(
     out: Path,
     *,
     numbered: bool = False,
+    embed: bool = False,
 ) -> Path:
-    """Write the documentation as one pandoc standalone HTML file."""
+    """Write the documentation as one pandoc standalone HTML file.
+
+    With ``embed``, the images are data URLs and no file is written.
+    """
     out.mkdir(parents=True, exist_ok=True)
+    if not embed:
+        _write_figures(spec, out / "img", "{name}.{suffix}")
     numbers = section_numbers(spec) if numbered else {}
     resolve = _resolver(spec, "", None)
     codes = 0
@@ -706,6 +936,7 @@ def build_pandoc_like(
                 resolve,
                 numbers.get(section.slug),
                 codes,
+                embed=embed,
             ),
         )
         codes += bool(section.code)
@@ -723,10 +954,24 @@ def build_pandoc_like(
 _DOCUSAURUS_NOTE = {"en": "note", "fr": "remarque"}
 
 
+def _docusaurus_figure(figure: Figure, base: str) -> str:
+    """Write a figure as Docusaurus does, its file named with a digest."""
+    caption = f"<p><em>{_esc(figure.caption)}</em></p>"
+    if figure.defect == "dropped":
+        return caption
+    suffix, data = figure_file(figure)
+    digest = blake2b(data, digest_size=4).hexdigest()
+    alt = "" if figure.defect == "noalt" else f'alt="{_attr(figure.alt)}" '
+    src = _attr(f"{base}assets/images/{figure.name}-{digest}.{suffix}")
+    image = f'<img loading="lazy" {alt}src="{src}" class="img_ev3q">'
+    return f"<p>{image}</p>{caption}"
+
+
 def _docusaurus_section(
     section: Section,
     resolve: Resolver,
     lang: str,
+    base: str,
 ) -> str:
     parts = []
     if section.level > 1:
@@ -739,7 +984,11 @@ def _docusaurus_section(
             f'class="hash-link" aria-label="Direct link to {label}">'
             "\U0000200b</a></" + tag + ">",
         )
-    parts += _plain_lists(section, resolve)
+    parts += _plain_lists(
+        section,
+        resolve,
+        figures=[_docusaurus_figure(f, base) for f in section.figures],
+    )
     if section.code:
         lines = "".join(
             '<span class="token-line"><span class="token plain">'
@@ -776,6 +1025,7 @@ def build_docusaurus_like(
 ) -> Path:
     """Write the documentation as a Docusaurus build served under ``base``."""
     out.mkdir(parents=True, exist_ok=True)
+    _write_figures(spec, out / "assets" / "images", "{name}-{h}.{suffix}")
     title = _esc(spec.title)
     chapters = _chapters(spec)
     safe = html.escape(base, quote=True)
@@ -799,7 +1049,7 @@ def build_docusaurus_like(
         head = chapter[0]
         resolve = _resolver(spec, head.slug, base + "docs/{chapter}/#{slug}")
         body = "\n".join(
-            _docusaurus_section(s, resolve, spec.lang) for s in chapter
+            _docusaurus_section(s, resolve, spec.lang, base) for s in chapter
         )
         page = (
             f'<!DOCTYPE html><html lang="{spec.lang}" dir="ltr"><head>'
@@ -983,4 +1233,65 @@ def make_document(
         chrome=[],
         chrome_keys=chrome_keys,
         warnings=[],
+    )
+
+
+def with_figures(spec: DocSpec) -> DocSpec:
+    """Give four sections of the English sample a figure each.
+
+    Args:
+        spec: A documentation with the sections of `SAMPLE_EN`.
+
+    Returns:
+        The documentation with its figures.
+    """
+    figures = {
+        "installation": Figure(
+            "setup",
+            "Steps of the installer",
+            "Installer steps",
+        ),
+        "projects": Figure(
+            "dashboard",
+            "Dashboard of a project",
+            "Project dashboard",
+            "jpeg",
+        ),
+        "command-line": Figure(
+            "pipeline",
+            "Pipeline of a command",
+            "Command pipeline",
+            "svg",
+        ),
+        "limits": Figure("quota", "Requests per client", "Quota chart"),
+    }
+    for slug, figure in figures.items():
+        spec = _replace_section(spec, slug, figures=(figure,))
+    return spec
+
+
+FIGURES_EN = with_figures(SAMPLE_EN)
+
+
+def figure_defect(spec: DocSpec, name: str, defect: Defect) -> DocSpec:
+    """Plant a defect in the figure with this name."""
+    for section in spec.sections:
+        for figure in section.figures:
+            if figure.name == name:
+                figures = tuple(
+                    replace(f, defect=defect) if f is figure else f
+                    for f in section.figures
+                )
+                return _replace_section(spec, section.slug, figures=figures)
+    raise _not_found(name)
+
+
+def make_image_block(ref: ImageRef, *, file: str = "index.html") -> Block:
+    """Return an image block, as an extractor would produce it."""
+    return Block(
+        kind=BlockKind.IMAGE,
+        text="",
+        raw_text="",
+        source=SourceRef(file),
+        image=ref,
     )

@@ -8,13 +8,15 @@ import pytest
 
 from doc_checker.config import (
     CliOverrides,
+    Config,
     PdfConfig,
     apply_overrides,
     load_config,
     rule_disabled,
 )
 from doc_checker.errors import ConfigError
-from doc_checker.model.findings import Severity
+from doc_checker.model.findings import Category, Severity
+from doc_checker.rules import get_rule
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -201,3 +203,33 @@ def test_unknown_disable_pattern_is_rejected(tmp_path: Path) -> None:
     cfg = load_config(None, cwd=tmp_path)
     with pytest.raises(ConfigError, match="no rule matches"):
         apply_overrides(cfg, CliOverrides(disable=("nope.*",)))
+
+
+IMAGE_RULES = {
+    "image.missing": Severity.CRITICAL,
+    "image.added": Severity.MINOR,
+    "image.replaced": Severity.MAJOR,
+    "image.degraded": Severity.MAJOR,
+    "image.reencoded": Severity.INFO,
+    "image.rasterized": Severity.MINOR,
+    "image.vectorized": Severity.INFO,
+    "image.alt_lost": Severity.MINOR,
+}
+
+
+def test_image_rules_have_the_severities_of_the_spec() -> None:
+    """The eight image rules are registered in the image category."""
+    assert {r: get_rule(r).severity for r in IMAGE_RULES} == IMAGE_RULES
+    assert {get_rule(r).category for r in IMAGE_RULES} == {Category.IMAGE}
+
+
+def test_images_can_be_turned_off(tmp_path: Path) -> None:
+    """Images are on by default, off by the file or by the option."""
+    assert load_config(None, cwd=tmp_path).images is True
+    off = apply_overrides(Config(), CliOverrides(no_images=True))
+    assert off.images is False
+    (tmp_path / "doc-checker.toml").write_text(
+        "[general]\nimages = false\n",
+        encoding="utf-8",
+    )
+    assert load_config(None, cwd=tmp_path).images is False

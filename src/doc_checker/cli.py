@@ -59,6 +59,11 @@ def _exit_on_error() -> Generator[None]:
 def _config_options[F: Callable[..., object]](function: F) -> F:
     """Return the command with the configuration options added."""
     function = click.option(
+        "--no-images",
+        is_flag=True,
+        help="Leave the images out of the extraction and the comparison.",
+    )(function)
+    function = click.option(
         "--exclude",
         multiple=True,
         metavar="GLOB",
@@ -123,13 +128,14 @@ def main(ctx: click.Context) -> None:
 @main.command()
 @click.argument("doc", type=click.Path(exists=True, path_type=Path))
 @_config_options
-def extract(
+def extract(  # ruff: ignore[too-many-arguments] - Click passes options as keywords
     *,
     doc: Path,
     config: Path | None,
     lang: str | None,
     content_selector: str | None,
     exclude: tuple[str, ...],
+    no_images: bool,
 ) -> None:
     """Print the normalized blocks of DOC, to tune selectors."""
     with _exit_on_error():
@@ -139,6 +145,7 @@ def extract(
                 lang=lang,
                 content_selector=content_selector,
                 exclude=exclude,
+                no_images=no_images,
             ),
         )
         document = load_document(doc, cfg)
@@ -191,6 +198,7 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
     lang: str | None,
     content_selector: str | None,
     exclude: tuple[str, ...],
+    no_images: bool,
 ) -> None:
     """Compare the NEW build of a documentation with its REF build."""
     with _exit_on_error():
@@ -207,6 +215,7 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
                 exclude=exclude,
                 disable=disable,
                 ignore_moves=ignore_moves,
+                no_images=no_images,
             ),
         )
         result = run_compare(ref, new, cfg)
