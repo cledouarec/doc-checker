@@ -14,6 +14,7 @@ import html
 import io
 import math
 import re
+import zlib
 from dataclasses import dataclass
 from functools import partial
 from itertools import chain, pairwise
@@ -25,6 +26,7 @@ from fpdf.fonts import TextStyle
 from PIL import Image as PILImage
 from PIL import ImageDraw
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import NameObject, NumberObject
 from reportlab.lib.colors import HexColor
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
@@ -65,6 +67,7 @@ from tests.builders import (
 from tests.image_builders import (
     FIGURE_SIZE,
     drawing,
+    encode,
     label_positions,
     labels,
     logo,
@@ -732,6 +735,386 @@ def build_images_pdf(
             width=image_size[0],
             height=image_size[1],
         )
+        canvas.showPage()
+    canvas.save()
+    return out
+
+
+def build_oversized_image_pdf(out: Path, *, header: bool = False) -> Path:
+    """Write a page of text and an image that announces too many pixels.
+
+    The image holds the pixels of a drawing of 400 by 250 pixels. Without
+    `header`, it is a PNG whose dictionary announces 10,000 by 5,000 pixels,
+    beyond the pixel limit. With it, it is a JPEG whose dictionary announces
+    its true size, but whose header announces 10,000 by 5,000 pixels.
+
+    Args:
+        out: The PDF file to write.
+        header: Whether the header of a JPEG, rather than the dictionary,
+            announces too many pixels.
+
+    Returns:
+        The PDF file.
+    """
+    picture = drawing("setup")
+    announced = (400, 250) if header else (10_000, 5_000)
+    if header:
+        data = encode(picture, "JPEG", quality=90)
+        start = data.index(b"\xff\xc0") + 5  # The height, then the width.
+        size = (5_000).to_bytes(2) + (10_000).to_bytes(2)
+        picture = io.BytesIO(data[:start] + size + data[start + 4 :])
+    plain = io.BytesIO()
+    canvas = Canvas(plain, pagesize=A4)
+    canvas.setFont("Helvetica", 11)
+    canvas.drawString(72, _H - 72, "The image below is too large.")
+    canvas.drawImage(
+        ImageReader(picture),
+        72,
+        _H - 250,
+        width=200,
+        height=125,
+    )
+    canvas.save()
+    writer = PdfWriter(clone_from=PdfReader(plain))
+    for xobject in writer.pages[0]["/Resources"]["/XObject"].values():
+        image = xobject.get_object()
+        image[NameObject("/Width")] = NumberObject(announced[0])
+        image[NameObject("/Height")] = NumberObject(announced[1])
+    writer.write(out)
+    return out
+
+
+def _write_objects(out: Path, objects: Sequence[bytes]) -> Path:
+    """Write a PDF of objects numbered from 1, the first being the catalog."""
+    data = b"%PDF-1.7\n"
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(data))
+        data += f"{number} 0 obj\n".encode("ascii") + body + b"\nendobj\n"
+    count = len(objects) + 1
+    entries = "".join(f"{offset:010d} 00000 n \n" for offset in offsets)
+    trailer = (
+        f"xref\n0 {count}\n0000000000 65535 f \n{entries}"
+        f"trailer\n<< /Size {count} /Root 1 0 R >>\n"
+        f"startxref\n{len(data)}\n%%EOF\n"
+    )
+    out.write_bytes(data + trailer.encode("ascii"))
+    return out
+
+
+def _stream_object(entries: str, data: bytes) -> bytes:
+    """Return a stream object: its dictionary entries, then its data."""
+    head = f"<< {entries} /Length {len(data)} >>\nstream\n"
+    return head.encode("ascii") + data + b"\nendstream"
+
+
+_RGB_IMAGE: Final = "/ColorSpace /DeviceRGB /BitsPerComponent 8"
+
+
+def build_image_stream_pdf(  # ruff: ignore[too-many-arguments] - one keyword per feature of the image and its pages
+    out: Path,
+    data: bytes,
+    *,
+    filters: str,
+    size: tuple[int, int] = (400, 250),
+    entries: str = _RGB_IMAGE,
+    pages: int = 1,
+) -> Path:
+    """Write A4 pages of a line of text, then an image of any stream.
+
+    The image is one XObject, which each page shows 200 by 125 points
+    under its line, and whose stream is written as it is given.
+
+    Args:
+        out: The PDF file to write.
+        data: The stream of the image.
+        filters: The value of its filter entry, such as ``/DCT`` or
+            ``[/FlateDecode /DCTDecode]``, or ``""`` for none.
+        size: The width and the height that its dictionary announces.
+        entries: The other entries of its dictionary: by default, an RGB
+            image of 8 bits a component.
+        pages: The number of pages that show the image.
+
+    Returns:
+        The PDF file.
+    """
+    content = (
+        b"BT /F1 12 Tf 72 770 Td (The image below is checked.) Tj ET\n"
+        b"q 200 0 0 125 72 600 cm /Im0 Do Q"
+    )
+    image = (
+        f"/Type /XObject /Subtype /Image /Width {size[0]} /Height {size[1]}"
+        f" {entries}"
+    )
+    if filters:
+        image += f" /Filter {filters}"
+    kids = " ".join(f"{6 + 2 * page} 0 R" for page in range(pages))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Font << /F1 3 0 R >> /XObject << /Im0 5 0 R >> >>",
+        _stream_object(image, data),
+    ]
+    for page in range(pages):
+        objects += [
+            (
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]"
+                f" /Resources 4 0 R /Contents {7 + 2 * page} 0 R >>"
+            ).encode("ascii"),
+            _stream_object("", content),
+        ]
+    return _write_objects(out, objects)
+
+
+FIGURE_LABEL: Final = "Label inside"
+_FIGURE_CONTENT: Final = (
+    b"0.27 0.47 0.67 rg 100 500 100 60 re f\n"
+    b"0.93 0.4 0.47 rg 220 500 100 60 re f\n"
+    b"0.8 0.73 0.27 rg 200 527 20 6 re f\n"
+    b"0 g BT /F1 11 Tf 110 525 Td (Label inside) Tj ET\n"
+    b"q 60 0 0 40 250 510 cm /Im0 Do Q"
+)
+
+
+def build_figure_pdf(  # ruff: ignore[too-many-arguments] - one keyword per feature of the figure and its pages
+    out: Path,
+    *,
+    form: bool,
+    inner: tuple[int, int] = (2, 2),
+    rotate: int = 0,
+    pages: int = 1,
+    roman: bool = False,
+) -> Path:
+    """Write A4 pages of text, a vector figure, then an image under it.
+
+    The figure, 220 by 60 points, is three filled rectangles of three
+    colours, the label `FIGURE_LABEL` in the first, and an image of 2 by 2
+    RGB pixels in the second. The image under the figure, far from it, has
+    the same pixels. Every page is the same.
+
+    Args:
+        out: The PDF file to write.
+        form: Whether the figure is drawn in a form XObject, else with the
+            paths of the page.
+        inner: The width and the height that the dictionary of the image of
+            the figure announces.
+        rotate: The ``/Rotate`` of the pages.
+        pages: The number of pages.
+        roman: Whether the pages are labelled i, ii, and so on.
+
+    Returns:
+        The PDF file.
+    """
+    pixels = bytes(range(12))
+    text = b"BT /F1 12 Tf 72 770 Td (The text above the figure.) Tj ET\n"
+    under = b"\nq 60 0 0 40 100 300 cm /Im1 Do Q"
+    figure = b"q /Fm0 Do Q" if form else _FIGURE_CONTENT
+    resources = (
+        "<< /Font << /F1 3 0 R >>"
+        " /XObject << /Im0 5 0 R /Im1 6 0 R /Fm0 7 0 R >> >>"
+    )
+    kids = " ".join(f"{9 + page} 0 R" for page in range(pages))
+    labels = " /PageLabels << /Nums [0 << /S /r >>] >>" if roman else ""
+    objects = [
+        f"<< /Type /Catalog /Pages 2 0 R{labels} >>".encode("ascii"),
+        f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        resources.encode("ascii"),
+        _stream_object(
+            f"/Type /XObject /Subtype /Image /Width {inner[0]}"
+            f" /Height {inner[1]} {_RGB_IMAGE}",
+            pixels,
+        ),
+        _stream_object(
+            f"/Type /XObject /Subtype /Image /Width 2 /Height 2 {_RGB_IMAGE}",
+            pixels,
+        ),
+        _stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 595 842]"
+            " /Resources 4 0 R",
+            _FIGURE_CONTENT,
+        ),
+        _stream_object("", text + figure + under),
+    ]
+    objects += [
+        (
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]"
+            f" /Rotate {rotate} /Resources 4 0 R /Contents 8 0 R >>"
+        ).encode("ascii")
+        for _ in range(pages)
+    ]
+    return _write_objects(out, objects)
+
+
+def _small_figure(x: float, y: float) -> str:
+    """Draw a small figure, 40 by 40 points, from its lower left corner.
+
+    Two nodes of two colours, a third of its width each, and an arc over
+    them that links them.
+    """
+    return (
+        f"0.2 0.4 0.8 rg {x} {y} 14 28 re f"
+        f" 0.9 0.3 0.3 rg {x + 26} {y} 14 28 re f"
+        f" 0 G {x + 7} {y + 28} m {x + 7} {y + 40} {x + 33} {y + 40}"
+        f" {x + 33} {y + 28} c S"
+    )
+
+
+def build_many_figures_pdf(
+    out: Path,
+    *,
+    figures: int,
+    forms: bool,
+    chars: int = 0,
+) -> Path:
+    """Write one page of many small figures on a grid, and scattered text.
+
+    Each figure, 40 by 40 points and 10 points from the next, is two filled
+    rectangles of two colours and an arc, drawn with the paths of the page
+    or with one form XObject that every figure shows. Each character is a
+    ``w`` of 4 points, at a place of its own on the page.
+
+    Args:
+        out: The PDF file to write.
+        figures: The number of figures.
+        forms: Whether the figures are forms, else clusters of paths.
+        chars: The number of characters.
+
+    Returns:
+        The PDF file.
+    """
+    columns = math.ceil(math.sqrt(figures))
+    side = 10 + 50 * columns
+    parts = []
+    for index in range(figures):
+        row, column = divmod(index, columns)
+        x, y = 10 + 50 * column, 10 + 50 * row
+        if forms:
+            parts.append(f"q 1 0 0 1 {x} {y} cm /Fm0 Do Q")
+        else:
+            parts.append(_small_figure(x, y))
+    words = " ".join(
+        f"1 0 0 1 {(k * 37) % side} {(k * 11) % side} Tm (w) Tj"
+        for k in range(chars)
+    )
+    content = " ".join(parts) + f" BT /F1 4 Tf {words} ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {side} {side}]"
+            " /Resources 4 0 R /Contents 5 0 R >>"
+        ).encode("ascii"),
+        (
+            "<< /Font << /F1 << /Type /Font /Subtype /Type1"
+            " /BaseFont /Helvetica >> >> /XObject << /Fm0 6 0 R >> >>"
+        ).encode("ascii"),
+        _stream_object("", content.encode("ascii")),
+        _stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 40 40]",
+            _small_figure(0, 0).encode("ascii"),
+        ),
+    ]
+    return _write_objects(out, objects)
+
+
+def build_shared_resources_pdf(
+    out: Path,
+    *,
+    pages: int,
+    xobjects: int,
+) -> Path:
+    """Write pages that share one resource dictionary of many XObjects.
+
+    Each page draws, under a line of text, the same JPEG of the setup
+    drawing, wrapped in Flate. The shared dictionary also holds `xobjects`
+    gray images, one pixel wide, that no page draws.
+
+    Args:
+        out: The PDF file to write.
+        pages: The number of pages.
+        xobjects: The number of images that no page draws.
+
+    Returns:
+        The PDF file.
+    """
+    first_page = 6 + xobjects
+    names = " ".join(f"/X{k} {6 + k} 0 R" for k in range(xobjects))
+    kids = " ".join(f"{first_page + 2 * k} 0 R" for k in range(pages))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        (
+            f"<< /XObject << /Im0 5 0 R {names} >> /Font << /F1 3 0 R >> >>"
+        ).encode("ascii"),
+        _stream_object(
+            "/Type /XObject /Subtype /Image /Width 400 /Height 250"
+            f" {_RGB_IMAGE} /Filter [/FlateDecode /DCTDecode]",
+            zlib.compress(encode(drawing("setup"), "JPEG", quality=90)),
+        ),
+    ]
+    objects += [
+        _stream_object(
+            "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray"
+            f" /BitsPerComponent 8 /Width 1 /Height {k + 1}"
+            " /Filter /FlateDecode",
+            zlib.compress(bytes(k + 1)),
+        )
+        for k in range(xobjects)
+    ]
+    for number in range(pages):
+        contents = first_page + 2 * number + 1
+        objects += [
+            (
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]"
+                f" /Resources 4 0 R /Contents {contents} 0 R >>"
+            ).encode("ascii"),
+            _stream_object(
+                "",
+                b"BT /F1 12 Tf 72 770 Td (Page %d text.) Tj ET\n"
+                b"q 200 0 0 125 72 600 cm /Im0 Do Q" % number,
+            ),
+        ]
+    return _write_objects(out, objects)
+
+
+_CHAPTERS: Final = ("Introduction", "Usage", "Reference", "Appendix")
+_CHAPTER_LINE: Final = (
+    "The service reads its settings, then starts its workers in order."
+)
+
+
+def build_ornaments_pdf(out: Path) -> Path:
+    """Write four chapters, each with an ornament between label and title.
+
+    Each page has a ``Chapter n`` label in Helvetica-Bold 16, then an image
+    of its own, 120 by 20 points, then the title of the chapter in
+    Helvetica-Bold 24, and three paragraphs of four lines in Times-Roman 11.
+    The PDF has no outline.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    for number, title in enumerate(_CHAPTERS, 1):
+        canvas.setFont("Helvetica-Bold", 16)
+        canvas.drawString(72, _H - 80, f"Chapter {number}")
+        ornament = ImageReader(drawing(f"ornament {number}", (240, 40)))
+        canvas.drawImage(ornament, 72, _H - 135, width=120, height=20)
+        canvas.setFont("Helvetica-Bold", 24)
+        canvas.drawString(72, _H - 170, title)
+        canvas.setFont("Times-Roman", 11)
+        y = _H - 210
+        for _ in range(3):
+            for _ in range(4):
+                canvas.drawString(72, y, _CHAPTER_LINE)
+                y -= 14
+            y -= 10
         canvas.showPage()
     canvas.save()
     return out

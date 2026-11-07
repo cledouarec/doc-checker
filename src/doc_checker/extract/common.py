@@ -12,7 +12,7 @@ from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.images.pixels import EXTERNAL
+from doc_checker.images.pixels import EXTERNAL, PAGE_LIMIT
 from doc_checker.model.document import NUMBER_ATTR, Block, BlockKind
 from doc_checker.text.lexicon import is_chapter_label
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
@@ -249,7 +249,8 @@ def repeated_images(
 def image_warnings(blocks: Sequence[Block]) -> list[str]:
     """Return the warning about the images whose pixels cannot be read.
 
-    An external image is never read, and is no warning.
+    An external image is never read, and is no warning; nor is a figure past
+    the page limit, which a warning of its page counts.
 
     Args:
         blocks: Blocks of a document.
@@ -265,7 +266,7 @@ def image_warnings(blocks: Sequence[Block]) -> list[str]:
         for block in blocks
         if block.image is not None
         and block.image.problem is not None
-        and block.image.problem != EXTERNAL
+        and block.image.problem not in {EXTERNAL, PAGE_LIMIT}
     ]
     if not names:
         return []

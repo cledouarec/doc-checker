@@ -3,10 +3,13 @@
 
 import io
 import warnings
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 from PIL import Image
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 MAX_PIXELS: Final = 40_000_000
 MAX_FILE_BYTES: Final = 50_000_000
@@ -22,6 +25,9 @@ CANNOT_DECODE: Final = "cannot decode"
 NOT_FOUND: Final = "not found"
 OUTSIDE: Final = "outside the site"
 EXTERNAL: Final = "external"  # Never fetched, compared by its URL.
+# A vector figure of a PDF page past the figures rendered on it, which a
+# warning of its page counts.
+PAGE_LIMIT: Final = "past the page limit"
 LOSSLESS_FORMATS: Final = frozenset(
     {"png", "gif", "bmp", "tiff", "flate", "raw", "ccitt", "jbig2"},
 )
@@ -57,6 +63,38 @@ class UnreadableImage(Exception):  # ruff: ignore[error-suffix-on-exception-name
         """
         super().__init__(reason)
         self.reason = reason
+
+
+def read_image_file(file: Path, limit: int = MAX_FILE_BYTES) -> bytes:
+    """Read an image file, its size checked before it is read.
+
+    Args:
+        file: The file.
+        limit: The most bytes it may have.
+
+    Returns:
+        Its bytes.
+
+    Raises:
+        UnreadableImage: `NOT_FOUND` if it is not a file or cannot be read,
+            `TOO_LARGE` beyond the limit.
+    """
+    try:
+        size = file.stat().st_size if file.is_file() else None
+    except OSError:
+        size = None
+    if size is None:
+        raise UnreadableImage(NOT_FOUND)
+    if size > limit:
+        raise UnreadableImage(TOO_LARGE)
+    try:
+        with file.open("rb") as stream:
+            data = stream.read(limit + 1)
+    except OSError:
+        raise UnreadableImage(NOT_FOUND) from None
+    if len(data) > limit:
+        raise UnreadableImage(TOO_LARGE)
+    return data
 
 
 def _refuse_large(image: Image.Image) -> None:

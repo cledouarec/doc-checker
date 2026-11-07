@@ -11,6 +11,7 @@ from doc_checker.config import Config
 from doc_checker.model.findings import Severity
 from doc_checker.pipeline import run_compare
 from tests.builders import (
+    FIGURES_EN,
     SAMPLE_EN,
     SAMPLE_FR,
     DocSpec,
@@ -568,6 +569,16 @@ LAYOUTS: dict[str, tuple[Builder, Builder]] = {
     "word-bullets-tight": (
         partial(build_bullets_pdf, BULLET_ITEMS, word=False),
         partial(build_bullets_pdf, BULLET_ITEMS, word=True, gap=False),
+    ),
+    # A figure drawn as paths, or the same figure in a form XObject.
+    "figures-as-forms": (
+        partial(build_reportlab_pdf, FIGURES_EN),
+        partial(build_reportlab_pdf, FIGURES_EN, figure_forms=True),
+    ),
+    # A logo drawn on every page is chrome.
+    "logo-on-pages": (
+        partial(build_reportlab_pdf, FIGURES_EN),
+        partial(build_reportlab_pdf, FIGURES_EN, logo=True),
     ),
 }
 
