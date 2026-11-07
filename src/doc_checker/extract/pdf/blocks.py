@@ -10,9 +10,13 @@ than hanging. The spacing is weighed against the pitch of the lines inside the
 paragraphs, measured on the document, as some documents set their lines one and
 a half or two lines apart. A line that holds only the next number of the
 numbered code before it is an empty line of that code, which it stays in, even
-if it opens a page or a column. A page or a column break ends a block too, even
-in the middle of a sentence, so a block that follows such a break is joined
-back to the block it continues.
+if it opens a page or a column. A caption starts a block of its own: its label
+and its number are followed by a colon or a dash, or by a full stop or a
+capital if it does not wrap a sentence of the line before. A reference to a
+figure in the text goes on in lower case, as in "Figure 3 shows", or ends a
+sentence, as in "as shown in Figure 3.". A page or a column break ends a block
+too, even in the middle of a sentence, so a block that follows such a break is
+joined back to the block it continues, unless it starts with a caption.
 """
 
 import re
@@ -22,6 +26,7 @@ from itertools import chain, pairwise
 from typing import TYPE_CHECKING, Final, Literal
 
 from doc_checker.extract.pdf.chrome import page_number
+from doc_checker.text.numbers import CAPTION_NUMBER
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -268,6 +273,69 @@ def _is_list_start(line: Line) -> bool:
     return not line.mono and _has_marker(line.text)
 
 
+def _caption_head(text: str) -> Literal["mark", "stop", "capital"] | None:
+    """Tell what follows the label and the number that start a caption.
+
+    A reference to a figure in the text goes on in lower case, as in
+    ``Figure 3 shows`` or ``Figure 4 on the next page``: it is no caption.
+
+    Args:
+        text: The text of a line or of a block.
+
+    Returns:
+        ``"mark"`` if the label and the number, as `CAPTION_NUMBER` reads
+        them, are followed by a colon, a hyphen, an en dash or an em dash,
+        ``"stop"`` by a full stop, ``"capital"`` by blanks and a capital
+        letter. None if the text starts with no label and number, or if
+        blanks and another character follow them.
+    """
+    match = CAPTION_NUMBER.match(text)
+    if match is None:
+        return None
+    separator = text[match.end(1) : match.end()].strip()
+    if separator == ".":
+        return "stop"
+    if separator:
+        return "mark"
+    return "capital" if text[match.end()].isupper() else None
+
+
+def _is_caption_start(previous: Line, line: Line) -> bool:
+    """Return whether a line starts a caption.
+
+    A layout may set a caption right under the line before it, such as the
+    last row of a table or another caption, or a column break may part it
+    from the block it follows in reading order. A reference to a figure that
+    ends a sentence, or a capital after the number, may start the line that
+    wraps a sentence of the line before, as in ``as shown in`` then
+    ``Figure 3. The``: such a line is no caption. A colon or a dash after
+    the number is one, and so is any caption under a line that starts a
+    caption itself, so that stacked captions split on a page as they do
+    across a break.
+
+    Args:
+        previous: The line before it, in reading order.
+        line: The line.
+
+    Returns:
+        Whether the line is not monospaced, as a line of code may look like a
+        caption, and its label and number, as `_caption_head` tells, are
+        followed by a colon or a dash, or by a full stop or blanks and a
+        capital letter if the line does not wrap the previous line, as
+        `_is_wrap` tells, or if the previous line starts a caption too.
+    """
+    if line.mono:
+        return False
+    head = _caption_head(line.text)
+    return head == "mark" or (
+        head is not None
+        and (
+            not _is_wrap(previous, line)
+            or _caption_head(previous.text) is not None
+        )
+    )
+
+
 def _indents_first_lines(group: Sequence[Line], margin: float) -> bool:
     """Return whether a group of lines indents the first lines of paragraphs.
 
@@ -280,7 +348,7 @@ def _indents_first_lines(group: Sequence[Line], margin: float) -> bool:
     entries of two lines.
 
     Args:
-        group: Consecutive lines that only the fifth rule of `group_lines`
+        group: Consecutive lines that only the sixth rule of `group_lines`
             may separate.
         margin: The left edge of the leftmost line of the group.
 
@@ -340,7 +408,7 @@ def _split_indents(group: Sequence[Line]) -> list[list[Line]]:
     """Split a group of lines before the indented first lines of paragraphs.
 
     Args:
-        group: Consecutive lines that only the fifth rule of `group_lines`
+        group: Consecutive lines that only the sixth rule of `group_lines`
             may separate.
 
     Returns:
@@ -442,8 +510,18 @@ def group_lines(lines: Sequence[Line]) -> list[DraftBlock]:
        the pitch that `paragraph_pitches` measures on the lines for the size,
        rounded to half a point, if it measures one.
     4. It is not monospaced and starts with a bullet or a number.
-    5. It is the indented first line of a paragraph, in a group of lines that
-       indents them. The groups are the blocks that rules 1 to 4 make. A group
+    5. It is not monospaced and starts with the label and the number of a
+       caption, as `CAPTION_NUMBER` reads them, followed by a colon, a
+       hyphen, an en dash or an em dash. Or they are followed by a full stop,
+       or by blanks and a capital letter, and the line does not wrap the
+       previous line: the previous line is monospaced, has fewer than
+       `WRAP_MIN_WORDS` words, ends like a sentence, as `TERMINAL` tells, or
+       starts with the label and the number of a caption itself.
+       A reference to a figure goes on in lower case, as in ``Figure 3
+       shows``, or ends a sentence that the line before wraps, as in ``as
+       shown in`` then ``Figure 3. The``: it is no caption.
+    6. It is the indented first line of a paragraph, in a group of lines that
+       indents them. The groups are the blocks that rules 1 to 5 make. A group
        indents first lines if more of its pairs of lines that wrap a
        paragraph, as `paragraph_pitches` describes them, start `INDENT_MIN`
        sizes or more to the left of the line before than to its right. With
@@ -486,6 +564,7 @@ def group_lines(lines: Sequence[Line]) -> list[DraftBlock]:
             or _is_style_change(previous, line)
             or _is_gap(previous, line, pitches)
             or _is_list_start(line)
+            or _is_caption_start(previous, line)
         ):
             groups.append([line])
             flows.append(opens_flow)
@@ -529,6 +608,7 @@ def _continues(
     return (
         not (previous.code or block.code)
         and not _has_marker(first.text)
+        and _caption_head(first.text) is None
         and TERMINAL.search(last.text) is None
         and abs(last.size - first.size) <= SIZE_TOLERANCE
         and not (last.bold or first.bold)
@@ -564,6 +644,14 @@ def merge_flows(
     code. If neither is code, it is added if all of these hold:
 
     - It does not start with a bullet or a number.
+    - It does not start with the label and the number of a caption followed
+      by a colon, a dash, a full stop or blanks and a capital letter, as
+      `_caption_head` tells. A figure that floats to the top of a page cuts
+      the sentence that ends the page before, and the reading order of the XY
+      cut may put a caption after a narrow table that it stands above: the
+      caption opens the page or the column, and starts a block of its own. A
+      reference to a figure that goes on in lower case, as in ``Figure 4 on
+      the next page``, goes on with the sentence.
     - The last line of the block before does not end like a sentence: it does
       not match `TERMINAL`.
     - The sizes of that line and of the first line of the block differ by

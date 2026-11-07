@@ -380,6 +380,94 @@ def test_code_is_not_split_on_what_looks_like_a_marker() -> None:
     assert (len(block.lines), block.code) == (3, True)
 
 
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "Figure 2: Dashboard of a project",
+        "Figure 2. Dashboard of a project",
+        "Figure 2 Dashboard of a project",
+        "Table 1 - Options",
+        "Table 1 \U00002013 Options",
+        "Table 3 Options",
+        "Fig. 1.2 Steps",
+    ],
+)
+def test_caption_starts_a_block(caption: str) -> None:
+    """A caption starts a block, even right under the line before it."""
+    for before in ("retries 3", "It ends a sentence."):
+        lines = [make_line(before, 700.0), make_line(caption, 688.0)]
+        assert _groups(lines) == [[before], [caption]]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Figure 3 shows the states of a job and the moves between them.",
+        "Table 2 lists the limits of the queue with their default values.",
+        "Figure 4 on the next page draws the queue and the workers.",
+    ],
+)
+def test_sentence_that_starts_with_a_reference_stays_in_its_paragraph(
+    line: str,
+) -> None:
+    """A sentence that opens on a figure in lower case is no caption."""
+    lines = [
+        make_line("The scheduler retries the failed jobs later.", 700.0),
+        make_line(line, 688.0),
+    ]
+    assert len(group_lines(lines)) == 1
+
+
+def test_caption_after_an_open_line_needs_a_colon_or_a_dash() -> None:
+    """After a line that a sentence wraps, only a colon or a dash tells."""
+    # Two captions stacked with no gap: the first one ends with no full stop.
+    stacked = [
+        make_line("Figure 2: Flow of a request through the workers", 700.0),
+        make_line("Table 2: Limits of the queue", 688.0),
+    ]
+    assert len(group_lines(stacked)) == 2
+    # A reference that ends a sentence, or a capital after the number, goes
+    # on with the sentence that the line before wraps.
+    for line in (
+        "Figure 3. The next stage reads the queue.",
+        "Figure 3 Dashboard and Table 2 Options show the rest.",
+    ):
+        prose = [
+            make_line("The three stages of the pipeline are drawn in", 700.0),
+            make_line(line, 688.0),
+        ]
+        assert len(group_lines(prose)) == 1
+
+
+@pytest.mark.parametrize("separator", [".", ""])
+def test_stacked_captions_split_alike_on_a_page_and_across_one(
+    separator: str,
+) -> None:
+    """A caption under another caption starts a block, whatever its break."""
+    first = f"Figure 2{separator} Flow of a request through the workers"
+    second = f"Table 2{separator} Limits of the queue"
+    on_a_page = [make_line(first, 700.0), make_line(second, 688.0)]
+    assert len(group_lines(on_a_page)) == 2
+    assert not _joined(
+        make_line(first, 80.0),
+        make_line(second, 780.0, page=1),
+    )
+
+
+def test_caption_in_a_wrapped_paragraph_or_code_stays_in_it() -> None:
+    """A line that wraps a sentence, or a line of code, is no caption."""
+    prose = [
+        make_line("The three stages of the pipeline are drawn in", 700.0),
+        make_line("Figure 3 and listed in the reference.", 688.0),
+    ]
+    assert len(group_lines(prose)) == 1
+    code = [
+        make_line("SELECT * FROM jobs", 700.0, mono=True),
+        make_line("Table 2: AS t", 689.0, mono=True),
+    ]
+    assert len(group_lines(code)) == 1
+
+
 def test_blank_numbered_lines_stay_in_their_code() -> None:
     """A lone number that goes on with the numbers of code is a blank line."""
     lines = [
@@ -687,6 +775,33 @@ def test_merge_stops_at_a_change_of_page_kind() -> None:
     toc = {0: BlockKind.TOC}
     assert len(merge_flows(split, Counter(), page_kinds=toc)) == 2
     assert len(merge_flows(split, Counter())) == 1
+
+
+def test_merge_never_continues_with_a_caption() -> None:
+    """A caption that opens a page or a column is never joined to a block."""
+    # A table row that the XY cut reads before the centered caption above
+    # it: the caption rises, which breaks the flow.
+    assert not _joined(
+        make_line("retries 3", 448.9),
+        make_line("Figure 2: Dashboard of a project", 507.9, x0=230.0),
+    )
+    # A sentence cut by a figure that floats to the top of the next page.
+    assert not _joined(
+        make_line("The three stages of the pipeline are", 80.0),
+        make_line("Figure 3: Stages of the pipeline.", 780.0, page=1),
+    )
+    assert _joined(
+        make_line("The three stages of the pipeline are", 80.0),
+        make_line("drawn in Figure 3.", 780.0, page=1),
+    )
+
+
+def test_merge_continues_with_a_reference_to_a_figure() -> None:
+    """A sentence that goes on with a reference to a figure is joined."""
+    assert _joined(
+        make_line("The layout of the dashboard is as shown in", 80.0),
+        make_line("Figure 4 on the next page, where it is.", 780.0, page=1),
+    )
 
 
 @pytest.mark.parametrize("number", ["1", "iv", "Page 3"])

@@ -26,6 +26,9 @@ ICON_CLASSES: Final = frozenset({"twemoji", "emoji", "gemoji"})
 _NAME_SEPARATOR: Final = re.compile(r"[}:]")
 _LENGTH: Final = re.compile(r"(?i)\s*(\d+(?:\.\d+)?|\.\d+)\s*(?:px)?\s*")
 _NUMBER: Final = re.compile(r"(?i)[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?")
+# The marks of a CDATA section that the HTML parser keeps in a text: those of
+# the comment that `keep_cdata` of the HTML site makes of it, then its own.
+_CDATA_MARKERS: Final = ("<!--[CDATA[", "]]-->", "<![CDATA[", "]]>")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,9 +56,12 @@ def _squash(text: str | None) -> str:
 
     Returns:
         The text without CDATA markers (the HTML parser keeps them as
-        text) and with runs of blanks reduced to one space.
+        text, as they are or as `_CDATA_MARKERS` gives them) and with runs
+        of blanks reduced to one space.
     """
-    plain = (text or "").replace("<![CDATA[", "").replace("]]>", "")
+    plain = text or ""
+    for marker in _CDATA_MARKERS:
+        plain = plain.replace(marker, "")
     return " ".join(plain.split())
 
 

@@ -318,3 +318,12 @@ def test_a_page_goes_on_with_the_contents_if_its_numbers_rise(
     """Without a title or leaders, page numbers that go back end the run."""
     lines = [*_contents(0), *_page(1, *texts)]
     assert toc_pages(lines).get(1) is kind
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Illustration 2: Logo", "Image 3 - Logo", "Dessin 4 : Plan"],
+)
+def test_more_caption_labels(text: str) -> None:
+    """Office suites name their figures in other ways."""
+    assert is_caption(text)

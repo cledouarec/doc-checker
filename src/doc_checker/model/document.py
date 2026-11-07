@@ -16,7 +16,8 @@ HEADING_SOURCE: Final = "heading"
 type HeadingSource = Literal["outline", "style"]
 FROM_OUTLINE: Final[HeadingSource] = "outline"
 FROM_STYLE: Final[HeadingSource] = "style"
-# Key of `Block.attrs` that keeps the number set apart from a heading.
+# Key of `Block.attrs` that keeps the number set apart from a heading or a
+# caption.
 NUMBER_ATTR: Final = "number"
 # What separates the cells of a row in the text of a table.
 CELL_SEPARATOR: Final = " | "
@@ -197,7 +198,8 @@ class Block:
             PDF has `HEADING_SOURCE`, which is `FROM_OUTLINE` if a bookmark
             found it and `FROM_STYLE` if its look did. The heading of an HTML
             page does not have it. A heading of a document that numbers its
-            headings has `NUMBER_ATTR`, its number set apart from its text.
+            headings has `NUMBER_ATTR`, its number set apart from its text,
+            and so does a caption whose label and number were set apart.
         key_strict: Comparison key used to diff texts.
         key_loose: Case, accent and punctuation insensitive key used to
             align blocks.

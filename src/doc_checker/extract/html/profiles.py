@@ -38,7 +38,9 @@ GLOBAL_STRIP: Final[tuple[str, ...]] = (
     "button",
     "nav",
     "[hidden]",
-    "[aria-hidden=true]",
+    # pandoc hides from screen readers the caption that its alternative
+    # text repeats, but shows it.
+    "[aria-hidden=true]:not(figcaption)",
     "[role=navigation]",
     "[role=search]",
     ".sr-only",

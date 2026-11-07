@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import lxml.html
 import pytest
 
+from doc_checker.extract.html.site import parse_page
 from doc_checker.images.pixels import UnreadableImage
 from doc_checker.images.svg import (
     SVG_MAX_BYTES,
@@ -18,6 +19,8 @@ from doc_checker.images.svg import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from doc_checker.images.svg import SvgIdentity
 
 SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200">'
@@ -158,12 +161,43 @@ CDATA_SVG = (
 )
 
 
-def test_cdata_is_the_same_inline_and_in_a_file() -> None:
-    """A CDATA section reads the same with either parser."""
-    page = lxml.html.fragment_fromstring(f"<div>{CDATA_SVG}</div>")
-    inline = svg_identity(page.find(".//svg"))
+# Sections that hold a ">", where the HTML parser of libxml2 2.14 ends the
+# comment that it makes of a section, unless the page is rewritten.
+GREATER_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 20">'
+    "<style><![CDATA[svg > text{fill:red}]]></style>"
+    "<text><![CDATA[a > b]]></text></svg>"
+)
+
+
+def _inline(folder: Path, svg: str) -> SvgIdentity:
+    """Return the identity of an SVG read inline in an HTML page."""
+    page = folder / "page.html"
+    page.write_bytes(f"<html><body><div>{svg}</div></body></html>".encode())
+    found = parse_page(page, "page.html").tree.find(".//svg")
+    assert found is not None
+    return svg_identity(found)
+
+
+def test_cdata_is_the_same_inline_and_in_a_file(tmp_path: Path) -> None:
+    """A CDATA section reads the same in a page and in a file."""
+    inline = _inline(tmp_path, CDATA_SVG)
     assert parse_svg(CDATA_SVG.encode()) == inline
     assert inline.texts == ("Label",)
+
+
+def test_cdata_is_kept_where_the_parser_drops_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parser that drops CDATA sections reads them as comments."""
+    monkeypatch.setattr(
+        "doc_checker.extract.html.site.drops_cdata",
+        lambda: True,
+    )
+    inline = _inline(tmp_path, GREATER_SVG)
+    assert parse_svg(GREATER_SVG.encode()) == inline
+    assert inline.texts == ("a > b",)
 
 
 def test_another_style_is_another_drawing() -> None:

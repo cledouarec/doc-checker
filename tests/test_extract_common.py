@@ -1,6 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the block building shared by the HTML and PDF loaders."""
 
+import time
 from collections import Counter
 from dataclasses import replace
 from types import MappingProxyType
@@ -12,14 +13,17 @@ from doc_checker.extract.common import (
     NUMBERED_SHARE,
     assign_section_paths,
     normalized_block,
+    strip_caption_numbers,
     strip_heading_numbers,
 )
+from doc_checker.images.refs import unreadable_ref
 from doc_checker.model.document import (
     NUMBER_ATTR,
     Block,
     BlockKind,
     SourceRef,
 )
+from tests.builders import make_block, make_image_block
 
 SOURCE = SourceRef("doc.pdf", page=2)
 
@@ -290,9 +294,89 @@ def test_a_chapter_label_set_as_a_heading_is_taken_too() -> None:
     }
 
 
+def test_a_chapter_label_folds_past_images() -> None:
+    """Images between a label and its heading stay, and the label folds."""
+    counter: Counter[str] = Counter()
+    ornament = make_image_block(
+        unreadable_ref(name="o.png", format="png", digest="0", problem="x"),
+    )
+    blocks = [
+        _paragraph("Chapter 2"),
+        ornament,
+        ornament,
+        _heading("Getting started"),
+        _paragraph("Chapter 3"),
+        ornament,
+        _paragraph("Not a heading after it."),
+    ]
+    result = strip_heading_numbers(blocks, counter)
+    assert [(b.kind, b.text, b.attrs.get(NUMBER_ATTR)) for b in result] == [
+        (BlockKind.IMAGE, "", None),
+        (BlockKind.IMAGE, "", None),
+        (BlockKind.HEADING, "Getting started", "Chapter 2"),
+        (BlockKind.PARAGRAPH, "Chapter 3", None),
+        (BlockKind.IMAGE, "", None),
+        (BlockKind.PARAGRAPH, "Not a heading after it.", None),
+    ]
+    assert counter["heading_number"] == 1
+
+
 def test_a_chapter_label_gives_its_anchors_to_its_heading() -> None:
     """The anchors of a chapter label go first, without duplicates."""
     label = replace(_paragraph("Chapter 2"), anchors=("chapter", "shared"))
     title = replace(_heading("Getting started"), anchors=("shared", "start"))
     (heading,) = strip_heading_numbers([label, title], Counter())
     assert heading.anchors == ("chapter", "shared", "start")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "number"),
+    [
+        ("Figure 1: Class hierarchy", "Class hierarchy", "1"),
+        ("Fig. 2 Status page", "Status page", "2"),
+        ("Figure 3.1 - Flow of a request", "Flow of a request", "3.1"),
+        ("Table 4. Options", "Options", "4"),
+        ("Tableau 5 : Options", "Options", "5"),
+        ("Figure 6\U00002013Chart", "Chart", "6"),
+        ("Illustration 7: Logo", "Logo", "7"),
+        ("Figure 8", "Figure 8", None),
+        ("Figures 9: many", "Figures 9: many", None),
+        ("Figure 1.5x faster", "Figure 1.5x faster", None),
+        ("Figure 3.1.", "Figure 3.1.", None),
+        ("Figure 3-2 Flow", "Flow", "3-2"),
+    ],
+)
+def test_caption_numbers_are_set_apart(
+    text: str,
+    expected: str,
+    number: str | None,
+) -> None:
+    """The label and number of a caption leave its text."""
+    counter: Counter[str] = Counter()
+    (block,) = strip_caption_numbers(
+        [make_block(text, BlockKind.CAPTION)],
+        counter,
+    )
+    assert block.text == expected
+    assert block.attrs.get(NUMBER_ATTR) == number
+    assert counter["caption_number"] == (number is not None)
+
+
+def test_only_captions_lose_their_numbers() -> None:
+    """A paragraph that starts like a caption keeps its text."""
+    block = make_block("Figure 1: shows the flow.")
+    assert strip_caption_numbers([block], Counter()) == [block]
+
+
+def test_label_folding_passes_a_run_of_images_once() -> None:
+    """A long run of image blocks is walked in linear time."""
+    images = [make_block("", BlockKind.IMAGE) for _ in range(20_000)]
+    heading = make_block("Setup", BlockKind.HEADING, level=1)
+    plain = [make_block("Introduction of the page."), *images, heading]
+    start = time.process_time()
+    assert len(strip_heading_numbers(plain, Counter())) == 20_002
+    assert time.process_time() - start < 1.0
+    labelled = [make_block("Chapter 2"), *images, heading]
+    result = strip_heading_numbers(labelled, Counter())
+    assert result[-1].attrs[NUMBER_ATTR] == "Chapter 2"
+    assert len(result) == 20_001

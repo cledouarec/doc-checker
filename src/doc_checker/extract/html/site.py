@@ -4,6 +4,7 @@
 import codecs
 import re
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 
@@ -34,6 +35,11 @@ _REFRESH_URL: Final = re.compile(
 )
 _DEFAULT_CHARSET: Final = "utf-8"
 _REFRESH: Final = "refresh"
+# The marks of a CDATA section and of a comment, in the bytes of a page.
+_CDATA_OPEN: Final = b"<![CDATA["
+_CDATA_CLOSE: Final = b"]]>"
+_COMMENT_OPEN: Final = b"<!--"
+_COMMENT_CLOSE: Final = b"-->"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,8 +109,75 @@ def _refresh_url(tree: HtmlElement) -> str | None:
     return None
 
 
+@cache
+def drops_cdata() -> bool:
+    """Tell whether the HTML parser drops the CDATA sections of a page.
+
+    libxml2 before 2.14, which the Windows wheels of lxml bundle, drops a
+    CDATA section of the content, such as the text of an inline SVG, while
+    libxml2 2.14 keeps it as a comment that holds ``[CDATA[``, its text and
+    ``]]``. The parser is asked once, with a paragraph that holds a section.
+
+    Returns:
+        Whether the paragraph comes back without a comment.
+    """
+    probe = lxml.html.fragment_fromstring("<p><![CDATA[x]]></p>")
+    return not any(node.tag is lxml.etree.Comment for node in probe.iter())
+
+
+def keep_cdata(data: bytes) -> bytes:
+    """Turn the CDATA sections of a page into the comments of libxml2 2.14.
+
+    Each section, from ``<![CDATA[`` to the first ``]]>`` after it, becomes
+    a comment that holds ``[CDATA[``, its text and ``]]``, which the SVG
+    reader takes back, so that every parser reads it alike. A section inside
+    a comment is left as it is, and so is the rest of the page from a
+    section or a comment that is not closed. Each search starts where the
+    last one ended: a hostile page costs a few reads of its bytes at most.
+
+    Args:
+        data: The bytes of the page.
+
+    Returns:
+        The bytes, with ``--`` added inside the ``<!`` and the ``>`` that
+        bound each section.
+    """
+    parts: list[bytes] = []
+    copied = start = 0
+    begin = data.find(_CDATA_OPEN)
+    while begin != -1:
+        comment = data.find(_COMMENT_OPEN, start, begin)
+        if comment != -1:
+            close = data.find(_COMMENT_CLOSE, comment + len(_COMMENT_OPEN))
+            if close == -1:
+                break
+            start = close + len(_COMMENT_CLOSE)
+            if begin < start:
+                begin = data.find(_CDATA_OPEN, start)
+            continue
+        end = data.find(_CDATA_CLOSE, begin + len(_CDATA_OPEN))
+        if end == -1:
+            break
+        # "<![CDATA[x]]>" becomes "<!--" + "[CDATA[x]]" + "-->".
+        parts.extend(
+            (
+                data[copied:begin],
+                _COMMENT_OPEN,
+                data[begin + 2 : end + 2],
+                _COMMENT_CLOSE,
+            ),
+        )
+        copied = start = end + len(_CDATA_CLOSE)
+        begin = data.find(_CDATA_OPEN, start)
+    parts.append(data[copied:])
+    return b"".join(parts)
+
+
 def parse_page(path: Path, rel_path: str) -> HtmlPage:
     """Read and parse one HTML page.
+
+    A parser that drops the CDATA sections of a page, as `drops_cdata`
+    tells, reads the page that `keep_cdata` makes, as libxml2 2.14 reads it.
 
     Args:
         path: File to read.
@@ -124,7 +197,12 @@ def parse_page(path: Path, rel_path: str) -> HtmlPage:
     invalid = f"cannot parse {rel_path}: empty or invalid HTML"
     if not data.strip():
         raise InputError(invalid)
-    parser = lxml.html.HTMLParser(encoding=_charset(data))
+    if drops_cdata():
+        data = keep_cdata(data)
+    # Without huge_tree, libxml2 stops at a text or an attribute of ten
+    # million characters, such as an embedded image, and drops the rest of
+    # the page silently. The walk of the blocks bounds the nesting.
+    parser = lxml.html.HTMLParser(encoding=_charset(data), huge_tree=True)
     try:
         tree = lxml.html.document_fromstring(data, parser=parser)
     except lxml.etree.ParserError, ValueError:

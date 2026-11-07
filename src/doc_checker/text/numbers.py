@@ -1,5 +1,5 @@
 # Copyright 2026 Christophe Le Douarec
-"""Language aware canonical form of numbers, and the numbers of headings."""
+"""Canonical form of numbers, and the numbers of headings and captions."""
 
 import re
 from typing import Final
@@ -10,6 +10,20 @@ from typing import Final
 # title, which the match leaves out.
 HEADING_NUMBER: Final = re.compile(
     r"^(\d+(?:\.\d+)*|[A-Z](?:\.\d+)+)\.?\s+(?=\S)",
+)
+
+# The labels of captions, in English and in French.
+CAPTION_LABEL: Final = (
+    r"(?:Figure|Fig\.|Table|Tableau|Listing|Illustration|Image|Dessin)"
+)
+# The label and number that start a caption, the number in group 1: numbers
+# joined by dots or hyphens, then a colon, dot, hyphen or dash with blanks
+# around it or not, or blanks alone, and the text, which the match leaves out.
+# The number is possessive: it is taken whole or not at all, so that
+# ``Figure 1.5x faster`` and ``Figure 3.1.`` do not match.
+CAPTION_NUMBER: Final = re.compile(
+    rf"^{CAPTION_LABEL}\s+(\d++(?:[.\-]\d++)*+)"
+    r"(?:\s*[:.\-\U00002013\U00002014]\s*|\s+)(?=\S)",
 )
 
 _GROUPING_SPACES: Final = (" ", "\xa0", "\U0000202f")
