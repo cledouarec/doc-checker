@@ -27,7 +27,7 @@ from doc_checker.extract.pdf.blocks import (
 )
 from doc_checker.extract.pdf.catalog import read_catalog
 from doc_checker.extract.pdf.chrome import find_chrome, title_pages
-from doc_checker.extract.pdf.headings import HeadingSource, heading_levels
+from doc_checker.extract.pdf.headings import heading_levels
 from doc_checker.extract.pdf.joining import code_text, prose_text, vocabulary
 from doc_checker.extract.pdf.kinds import is_caption, toc_pages
 from doc_checker.extract.pdf.layout import page_lines
@@ -45,6 +45,7 @@ from doc_checker.model.document import (
     SourceRef,
 )
 from doc_checker.text.lang import declared_language, resolve_language
+from doc_checker.text.normalize import ELLIPSIS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -57,14 +58,14 @@ if TYPE_CHECKING:
     from doc_checker.extract.pdf.catalog import PdfCatalog
     from doc_checker.extract.pdf.reader import Bookmark, PdfPageText
     from doc_checker.extract.pdf.segments import Segment
-    from doc_checker.model.document import Block
+    from doc_checker.model.document import Block, HeadingSource
 
 SCANNED_MIN_COVERAGE: Final = 0.5  # Smallest image share of a scanned page.
 SCANNED_LABELS_MAX: Final = 10  # Most page labels that a warning lists.
 LANG_SAMPLE_BLOCKS: Final = 200  # Blocks whose text tells the language.
 
 _DIGITS: Final = re.compile(r"\d+")
-_MORE_LABELS: Final = ", \U00002026"  # Ends a list of labels that goes on.
+_MORE_LABELS: Final = f", {ELLIPSIS}"  # Ends a list of labels that goes on.
 
 
 @dataclass(frozen=True, slots=True)

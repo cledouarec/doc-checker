@@ -24,11 +24,20 @@ def test_defaults_without_files(tmp_path: Path) -> None:
     """Without any configuration file, the defaults apply."""
     cfg = load_config(None, cwd=tmp_path)
     assert cfg.lang == "auto"
-    assert cfg.formats == ("md",)
+    assert cfg.formats == ("html", "md")
     assert cfg.min_severity is Severity.INFO
     assert cfg.output == tmp_path / "doc-checker-report"
     assert (cfg.compare.match, cfg.compare.moved_match) == (0.6, 0.8)
     assert "**/_static/**" in cfg.html.exclude
+
+
+def test_formats_may_be_html_only(tmp_path: Path) -> None:
+    """The HTML report alone may be asked for."""
+    (tmp_path / "doc-checker.toml").write_text(
+        '[general]\nformats = ["html"]\n',
+        encoding="utf-8",
+    )
+    assert load_config(None, cwd=tmp_path).formats == ("html",)
 
 
 def test_project_file_is_loaded(tmp_path: Path) -> None:

@@ -10,8 +10,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
-# Key of `Block.attrs` that tells how a PDF found a heading.
+# Key of `Block.attrs` that tells how a PDF found a heading, and its values:
+# a bookmark of the outline, or the look of the block.
 HEADING_SOURCE: Final = "heading"
+type HeadingSource = Literal["outline", "style"]
+FROM_OUTLINE: Final[HeadingSource] = "outline"
+FROM_STYLE: Final[HeadingSource] = "style"
 # Key of `Block.attrs` that keeps the number set apart from a heading.
 NUMBER_ATTR: Final = "number"
 # What separates the cells of a row in the text of a table.
@@ -118,8 +122,8 @@ class Block:
         level: Heading level, for headings.
         section_path: Titles of the enclosing headings, outermost first.
         attrs: Extra extractor attributes, such as ``role``. The heading of a
-            PDF has `HEADING_SOURCE`, which is ``"outline"`` if a bookmark
-            found it and ``"style"`` if its look did. The heading of an HTML
+            PDF has `HEADING_SOURCE`, which is `FROM_OUTLINE` if a bookmark
+            found it and `FROM_STYLE` if its look did. The heading of an HTML
             page does not have it. A heading of a document that numbers its
             headings has `NUMBER_ATTR`, its number set apart from its text.
         key_strict: Comparison key used to diff texts.

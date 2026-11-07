@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from doc_checker.compare.engine import compare_documents
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
+from doc_checker.report.html import render_html
 from doc_checker.report.markdown import render_markdown
 
 if TYPE_CHECKING:
@@ -50,7 +51,8 @@ def write_reports(result: CompareResult, cfg: Config) -> list[Path]:
         cfg: Run configuration, with the output directory and formats.
 
     Returns:
-        The written report files.
+        The written report files: ``report.html``, then ``report.md``,
+        for the formats of the configuration.
 
     Raises:
         ConfigError: If the reports cannot be written.
@@ -58,6 +60,8 @@ def write_reports(result: CompareResult, cfg: Config) -> list[Path]:
     written = []
     try:
         cfg.output.mkdir(parents=True, exist_ok=True)
+        if "html" in cfg.formats:
+            written.append(render_html(result, cfg.output / "report.html"))
         if "md" in cfg.formats:
             written.append(render_markdown(result, cfg.output / "report.md"))
     except OSError as exc:

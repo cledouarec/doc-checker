@@ -1,6 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the Markdown report and the terminal summary."""
 
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -13,12 +14,12 @@ from doc_checker.errors import ConfigError
 from doc_checker.model.document import BlockKind, Link, SourceRef
 from doc_checker.model.findings import DiffSegment
 from doc_checker.pipeline import write_reports
+from doc_checker.report.context import MAX_OCCURRENCES_SHOWN, relative_link
 from doc_checker.report.markdown import (
     md_cell,
     md_cell_code,
     md_code,
     md_text,
-    relative_link,
     render_markdown,
 )
 from doc_checker.report.terminal import render_blocks, render_summary, visible
@@ -72,7 +73,7 @@ def test_markdown_report_sections(
         "## Inputs",
         "## Summary",
         "## Critical (1)",
-        "### Block missing (`block.missing`)",
+        "#### Block missing (`block.missing`)",
         "## Major (1)",
         "<ins>configuraiton</ins>",
         "<del>configuration</del>",
@@ -250,11 +251,11 @@ def test_write_reports_creates_output_dir(
     tmp_path: Path,
     result: CompareResult,
 ) -> None:
-    """Reports are written in a newly created output directory."""
-    cfg = Config(output=tmp_path / "out" / "nested")
-    (path,) = write_reports(result, cfg)
-    assert path == tmp_path / "out" / "nested" / "report.md"
-    assert path.is_file()
+    """Both reports are written in a newly created output directory."""
+    out = tmp_path / "out" / "nested"
+    paths = write_reports(result, Config(output=out))
+    assert paths == [out / "report.html", out / "report.md"]
+    assert all(path.is_file() for path in paths)
 
 
 def test_unwritable_report_is_a_config_error(
@@ -536,3 +537,126 @@ def test_terminal_counts_a_group_once() -> None:
     )
     assert "findings: 1 critical, 0 major, 0 minor, 0 info" in summary
     assert "(6 occurrences)" in summary
+
+
+def test_markdown_sections_by_category(
+    tmp_path: Path,
+    result: CompareResult,
+) -> None:
+    """Each severity has a section per category."""
+    path = render_markdown(result, tmp_path / "report.md")
+    text = path.read_text(encoding="utf-8")
+    assert "## Critical (1)\n\n### Content (1)\n\n#### Block missing" in text
+    assert "## Major (1)\n\n### Text (1)\n\n#### Typo introduced" in text
+
+
+def test_markdown_code_is_a_diff(tmp_path: Path) -> None:
+    """A difference in code is shown as a diff block."""
+    ref = make_document(
+        make_block("pip install example\nexample --version", BlockKind.CODE),
+    )
+    new = make_document(
+        make_block("pip install example\nexample --verbose", BlockKind.CODE),
+    )
+    result = compare_documents(ref, new, Config())
+    path = render_markdown(result, tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert (
+        "```diff\n  pip install example\n- example --version\n"
+        "+ example --verbose\n```"
+    ) in text
+
+
+def _accent_result() -> CompareResult:
+    """Compare six paragraphs that each lose one accent."""
+    texts = [f"Le paragraphe {n} décrit le service." for n in range(6)]
+    ref = make_document(*[make_block(t) for t in texts])
+    new = make_document(*[make_block(t.replace("é", "e")) for t in texts])
+    return compare_documents(ref, new, Config())
+
+
+# A row of the table of occurrences starts with the identifier in code.
+OCCURRENCE_ROW = re.compile(r"^\| `[0-9a-f]{12}` \|", re.MULTILINE)
+
+
+def test_markdown_groups(tmp_path: Path) -> None:
+    """A group tells its occurrences, its pattern and lists them."""
+    path = render_markdown(_accent_result(), tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert "- Occurrences: 6\n- Pattern: é\U00002192e\n" in text
+    assert "<details><summary>6 occurrences</summary>" in text
+    assert len(OCCURRENCE_ROW.findall(text)) == 6
+
+
+def test_markdown_caps_occurrences(tmp_path: Path) -> None:
+    """A group lists a hundred occurrences at most."""
+    block = make_block("Back to the top of the page.")
+    result = compare_documents(
+        make_document(*[block] * 120),
+        make_document(),
+        Config(),
+    )
+    path = render_markdown(result, tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert len(OCCURRENCE_ROW.findall(text)) == MAX_OCCURRENCES_SHOWN
+    assert "and 20 more occurrences" in text
+
+
+def test_markdown_escapes_the_text_of_changed_cells(tmp_path: Path) -> None:
+    """A changed block never forms a link or an emphasis in its cell."""
+    ref = make_document(make_block("Open the *page* for the settings now."))
+    new = make_document(
+        make_block("Open the [x](javascript:alert(1)) for the settings now."),
+    )
+    result = compare_documents(ref, new, Config())
+    path = render_markdown(result, tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert "\\[x\\](javascript:alert(1))" in text
+    assert "[x](javascript" not in text
+    assert "*page*" not in text.replace("\\*page\\*", "")
+
+
+def test_markdown_summary_names_categories_and_severities(
+    tmp_path: Path,
+    result: CompareResult,
+) -> None:
+    """The summary table names its rows and columns as the sections do."""
+    path = render_markdown(result, tmp_path / "report.md")
+    text = path.read_text(encoding="utf-8")
+    assert "| Severity | Content | Text | Total |\n" in text
+    assert "| Critical | 1 | 0 | 1 |\n| Major | 0 | 1 | 1 |\n" in text
+
+
+# A paragraph longer than the pattern of a group may show.
+LONG_TEXT = (
+    "Back to the top of the page, where the contents list every section "
+    "of this guide and of its appendices."
+)
+
+
+def test_markdown_group_of_blocks_shows_their_text(tmp_path: Path) -> None:
+    """A group of missing blocks shows the text of the first one, cut."""
+    result = compare_documents(
+        make_document(*[make_block(LONG_TEXT)] * 6),
+        make_document(),
+        Config(),
+    )
+    path = render_markdown(result, tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert f"- Pattern: {LONG_TEXT[:80]}\U00002026\n" in text
+
+
+def test_markdown_diff_deletes_before_it_adds(tmp_path: Path) -> None:
+    """The lines of the reference come before the new ones in a diff."""
+    code = "pip install example\nexample --version"
+    result = compare_documents(
+        make_document(make_block(code, BlockKind.CODE)),
+        make_document(make_block(code.replace("\n", " "))),
+        Config(),
+    )
+    path = render_markdown(result, tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert (
+        "```diff\n- pip install example\n- example --version\n"
+        "+ pip install example example --version\n```"
+    ) in text

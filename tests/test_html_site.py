@@ -84,13 +84,10 @@ def test_redirect_page(tmp_path: Path) -> None:
     )
     path = _write(tmp_path / "old.html", html)
     page = parse_page(path, "old.html")
-    assert (page.redirect_to, page.redirect_href) == (
-        "guide/a.html",
-        "guide/a.html",
-    )
+    assert page.redirect_href == "guide/a.html"
     away = _write(tmp_path / "away.html", html.replace("guide", "https://x"))
     page = parse_page(away, "away.html")
-    assert (page.redirect_to, page.redirect_href) == (None, None)
+    assert page.redirect_href is None
 
 
 @pytest.mark.parametrize(
@@ -125,7 +122,7 @@ def test_path_sort_key() -> None:
 def test_order_pages_nav_then_path() -> None:
     """Pages follow the navigation, then the path order."""
     pages = [
-        HtmlPage(rel, lxml.html.fromstring("<p>x</p>"), None)
+        HtmlPage(rel, lxml.html.fromstring("<p>x</p>"))
         for rel in ("c.html", "a.html", "index.html", "b.html")
     ]
     ordered = order_pages(pages, mode="auto", nav=["b.html", "a.html"])
