@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Final
 
 from doc_checker.model.document import BlockKind
 from doc_checker.text.normalize import loose_key
+from doc_checker.text.numbers import CAPTION_LABEL
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -68,7 +69,7 @@ _PAGE_NUMBER: Final = re.compile(r"\d+$")
 # A caption starts with its label and the number of the figure or the table,
 # which may have several parts, as in 2.1 or 3-2.
 _CAPTION: Final = re.compile(
-    r"^(?:Figure|Fig\.|Table|Tableau|Listing)\s+\d+(?:[.\-]\d+)*\b",
+    rf"^{CAPTION_LABEL}\s+\d+(?:[.\-]\d+)*\b",
 )
 
 
@@ -249,7 +250,8 @@ def is_caption(text: str) -> bool:
         text: The text of a block.
 
     Returns:
-        Whether it starts with ``Figure``, ``Fig.``, ``Table``, ``Tableau`` or
-        ``Listing``, and then a number such as ``2``, ``2.1`` or ``3-2``.
+        Whether it starts with ``Figure``, ``Fig.``, ``Table``, ``Tableau``,
+        ``Listing``, ``Illustration``, ``Image`` or ``Dessin``, and then a
+        number such as ``2``, ``2.1`` or ``3-2``.
     """
     return _CAPTION.match(text) is not None

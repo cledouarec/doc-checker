@@ -124,7 +124,10 @@ def parse_page(path: Path, rel_path: str) -> HtmlPage:
     invalid = f"cannot parse {rel_path}: empty or invalid HTML"
     if not data.strip():
         raise InputError(invalid)
-    parser = lxml.html.HTMLParser(encoding=_charset(data))
+    # Without huge_tree, libxml2 stops at a text or an attribute of ten
+    # million characters, such as an embedded image, and drops the rest of
+    # the page silently. The walk of the blocks bounds the nesting.
+    parser = lxml.html.HTMLParser(encoding=_charset(data), huge_tree=True)
     try:
         tree = lxml.html.document_fromstring(data, parser=parser)
     except lxml.etree.ParserError, ValueError:
