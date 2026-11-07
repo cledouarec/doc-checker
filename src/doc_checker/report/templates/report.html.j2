@@ -1,0 +1,162 @@
+{% macro segments(side) -%}
+{% for segment in side.segments -%}
+{% if segment.op == "delete" %}<del>{{ segment.text }}</del>
+{%- elif segment.op == "insert" %}<ins>{{ segment.text }}</ins>
+{%- else %}{{ segment.text }}
+{%- endif %}
+{% endfor %}
+{% endmacro %}
+{% macro side_text(side, code) -%}
+{% if side is none %}<p class="absent">&mdash;</p>
+{%- elif code %}<pre class="text">{{ segments(side) }}</pre>
+{%- else %}<div class="text">{{ segments(side) }}</div>
+{%- endif %}
+{% endmacro %}
+{% macro link(side, which) -%}
+{% set found = source(side, which) %}
+{% if found %}<a class="source" href="{{ found[1] }}">{{ found[0] }}</a>
+{%- else %}&mdash;
+{%- endif %}
+{% endmacro %}
+{% macro where(finding) %}<p class="where">Reference: {{ link(finding.ref, "ref") }} &middot; New: {{ link(finding.new, "new") }}</p>{% endmacro %}
+{% macro ident(finding) %}<p class="id">ID: <code>{{ finding.id }}</code></p>{% endmacro %}
+{% macro sides(finding) %}
+<div class="sides">
+{% for which, label, side in (("ref", "Reference", finding.ref), ("new", "New", finding.new)) %}
+<div class="side {{ which }}"><h4>{{ label }}{% if side is not none and side.kind is not none %} <span class="kind">{{ side.kind.value | replace("_", " ") }}</span>{% endif %}</h4>
+{{- side_text(side, is_code(finding)) }}</div>
+{% endfor %}
+</div>
+{%- endmacro %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="{{ policy }}">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>doc-checker report: compare</title>
+<style>{{ css | safe }}</style>
+</head>
+<body>
+<header id="summary">
+<h1>doc-checker report: compare</h1>
+<table class="inputs">
+<thead><tr><td></td><th scope="col">Reference</th><th scope="col">New</th></tr></thead>
+<tbody>
+{% for label, ref_value, new_value in inputs %}
+<tr><th scope="row">{{ label }}</th><td class="quote">{{ ref_value }}</td><td class="quote">{{ new_value }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+<p class="matched">Matched: {{ matched }}% of reference blocks &middot; Moved: {{ moved }}</p>
+<ul class="counts">
+{% for severity, count in counts %}
+<li data-severity="{{ severity.label }}"><span class="count">{{ count }}</span> {{ severity.label }}</li>
+{% endfor %}
+</ul>
+{% if summary %}
+<table class="summary">
+<thead><tr><th scope="col">Severity</th>{% for category in categories %}<th scope="col">{{ category_titles[category] }}</th>{% endfor %}<th scope="col">Total</th></tr></thead>
+<tbody>
+{% for severity, row, row_total in summary %}
+<tr><th scope="row">{{ severity_titles[severity] }}</th>{% for count in row %}<td>{{ count }}</td>{% endfor %}<td>{{ row_total }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="none">No findings.</p>
+{% endif %}
+{% if normalization %}
+<section id="normalization">
+<h2>Normalized differences</h2>
+<table>
+<thead><tr><th scope="col">Normalization</th><th scope="col">Reference</th><th scope="col">New</th></tr></thead>
+<tbody>
+{% for key, ref_count, new_count in normalization %}
+<tr><th scope="row">{{ key }}</th><td>{{ ref_count }}</td><td>{{ new_count }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+{% endif %}
+{% if chrome %}
+<section id="chrome">
+<h2>Removed page chrome</h2>
+<ul>
+{% for text in chrome %}
+<li class="quote">{{ text }}</li>
+{% endfor %}
+</ul>
+</section>
+{% endif %}
+{% if warnings %}
+<section id="warnings">
+<h2>Warnings</h2>
+<ul>
+{% for label, text in warnings %}
+<li>{{ label }}: <span class="quote">{{ text }}</span></li>
+{% endfor %}
+</ul>
+</section>
+{% endif %}
+</header>
+<form id="filters">
+<fieldset>
+<legend>Severity</legend>
+{% for severity in severities %}
+<label><input type="checkbox" name="severity" value="{{ severity.label }}" checked> {{ severity_titles[severity] }}</label>
+{% endfor %}
+</fieldset>
+<label>Category <select name="category">
+<option value="">All categories</option>
+{% for category in categories %}
+<option value="{{ category.value }}">{{ category_titles[category] }}</option>
+{% endfor %}
+</select></label>
+<label>Rule <select name="rule">
+<option value="">All rules</option>
+{% for rule in rules %}
+<option value="{{ rule }}">{{ rule }}</option>
+{% endfor %}
+</select></label>
+<label>Search <input type="search" name="q"></label>
+<p class="shown"><output id="shown">{{ total }}</output> of {{ total }} findings shown</p>
+</form>
+<main id="findings">
+{% for severity, findings in sections %}
+<section class="severity" data-severity="{{ severity.label }}">
+<h2>{{ severity_titles[severity] }} ({{ findings | length }})</h2>
+{% for finding in findings %}
+<article class="finding" id="{{ dom_id(finding.id) }}" data-severity="{{ finding.severity.label }}" data-category="{{ finding.category.value }}" data-rule="{{ finding.rule }}">
+<h3>{{ finding.title }} <code>{{ finding.rule }}</code></h3>
+{% if finding.occurrences %}
+{{ ident(finding) }}
+{% if finding.detail %}
+<p class="detail">{{ finding.detail }}</p>
+{% endif %}
+<details class="occurrences"><summary>{{ finding.occurrences | length }} occurrences</summary>
+<ol>
+{% for item in shown(finding) %}
+<li id="{{ dom_id(item.id) }}">{{ where(item) }}{{ ident(item) }}{{ sides(item) }}</li>
+{% endfor %}
+</ol>
+{% if hidden(finding) %}
+<p class="more">and {{ hidden(finding) }} more occurrences</p>
+{% endif %}
+</details>
+{% else %}
+{{ where(finding) }}
+{{ ident(finding) }}
+{% if finding.detail %}
+<p class="detail">{{ finding.detail }}</p>
+{% endif %}
+{{ sides(finding) }}
+{% endif %}
+</article>
+{% endfor %}
+</section>
+{% endfor %}
+</main>
+<script>{{ script | safe }}</script>
+</body>
+</html>

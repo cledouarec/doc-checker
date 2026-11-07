@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
 type PageOrder = Literal["auto", "nav", "path"]
 
-AVAILABLE_FORMATS: Final = ("md",)
+AVAILABLE_FORMATS: Final = ("html", "md")
+DEFAULT_FORMATS: Final = ("html", "md")
 LANGUAGES: Final = ("auto", "fr", "en")
 PAGE_ORDERS: Final = ("auto", "nav", "path")
 DEFAULT_HTML_INCLUDE: Final = ("**/*.html", "**/*.htm")
@@ -142,7 +143,7 @@ class Config:
 
     lang: str = "auto"
     min_severity: Severity = Severity.INFO
-    formats: tuple[str, ...] = ("md",)
+    formats: tuple[str, ...] = DEFAULT_FORMATS
     output: Path = DEFAULT_OUTPUT
     html: HtmlConfig = field(default_factory=HtmlConfig)
     pdf: PdfConfig = field(default_factory=PdfConfig)
@@ -243,7 +244,7 @@ class _Section:
 
 def _parse_general(section: _Section, base_dir: Path, cwd: Path) -> Config:
     section.check_keys(("lang", "min_severity", "formats", "output"))
-    formats = section.texts("formats", ("md",))
+    formats = section.texts("formats", DEFAULT_FORMATS)
     for name in formats:
         if name not in AVAILABLE_FORMATS:
             expected = ", ".join(AVAILABLE_FORMATS)

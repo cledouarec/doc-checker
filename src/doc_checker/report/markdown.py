@@ -1,45 +1,33 @@
 # Copyright 2026 Christophe Le Douarec
 """Markdown report of a comparison."""
 
-import os
+import difflib
 import re
-import urllib.parse
-from pathlib import Path, PurePath
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
-from jinja2 import Environment, PackageLoader, StrictUndefined
-
-from doc_checker.model.findings import Category, Severity
+from doc_checker.compare.aggregate import shown_pattern
+from doc_checker.report.context import (
+    CATEGORY_TITLES,
+    SEVERITY_TITLES,
+    TEMPLATES,
+    UNKNOWN,
+    ReportContext,
+    is_code,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from doc_checker.compare.engine import CompareResult
-    from doc_checker.model.document import Document
     from doc_checker.model.findings import DiffSegment, Finding, Side
 
 _ABSENT: Final = "\U00002014"
-_UNKNOWN: Final = "-"
-_PERCENT: Final = 100
-_SECTION_TITLES: Final = {
-    Severity.CRITICAL: "Critical",
-    Severity.MAJOR: "Major",
-    Severity.MINOR: "Minor",
-    Severity.INFO: "Info",
-}
 _MARKUP: Final = {
     "delete": ("<del>", "</del>"),
     "insert": ("<ins>", "</ins>"),
     "equal": ("", ""),
 }
-_ENVIRONMENT: Final = Environment(
-    loader=PackageLoader("doc_checker", "report/templates"),
-    autoescape=False,  # ruff: ignore[jinja2-autoescape-false] - Markdown output, texts escaped by md_text, md_code and md_cell
-    undefined=StrictUndefined,
-    trim_blocks=True,
-    lstrip_blocks=True,
-    keep_trailing_newline=True,
-)
 # The characters of HTML and of the inline syntax of Markdown.
 _ESCAPES: Final = str.maketrans(
     {
@@ -59,17 +47,23 @@ _PIPE_RE: Final = re.compile(r"(\\*)\|")
 _BACKSLASH: Final = "\\"
 
 
-def _escape(text: str) -> str:
-    """Return the text safe for a Markdown table cell."""
-    for raw, escaped in (
-        ("&", "&amp;"),
-        ("<", "&lt;"),
-        (">", "&gt;"),
-        ("|", "\\|"),
-        ("\n", "<br>"),
-    ):
-        text = text.replace(raw, escaped)
-    return text
+def _backtick_fence(text: str, minimum: int = 1) -> str:
+    """Return backticks that are more than any run of backticks in a text."""
+    longest = max(map(len, _BACKTICKS_RE.findall(text)), default=0)
+    return "`" * max(longest + 1, minimum)
+
+
+def md_fence(lines: Sequence[str]) -> str:
+    """Return the fence of a block of code in Markdown.
+
+    Args:
+        lines: Lines of the block.
+
+    Returns:
+        Backticks that are more than any run of backticks in the lines, and
+        three at least.
+    """
+    return _backtick_fence("\n".join(lines), minimum=3)
 
 
 def md_text(text: str) -> str:
@@ -109,9 +103,8 @@ def md_code(text: str) -> str:
         `md_cell_code`.
     """
     text = _LINE_BREAK_RE.sub(" ", text)
-    longest = max(map(len, _BACKTICKS_RE.findall(text)), default=0)
-    fence = "`" * (longest + 1)
-    blank = " " if longest else ""
+    fence = _backtick_fence(text)
+    blank = " " if "`" in text else ""
     return f"{fence}{blank}{text}{blank}{fence}"
 
 
@@ -146,143 +139,70 @@ def md_cell(segments: Sequence[DiffSegment]) -> str:
         segments: Unchanged, deleted and inserted pieces of text.
 
     Returns:
-        Escaped text, deletions in ``<del>`` and insertions in ``<ins>``.
+        Escaped text, with a ``<br>`` for each line break, deletions in
+        ``<del>`` and insertions in ``<ins>``.
     """
     parts = []
     for segment in segments:
         opening, closing = _MARKUP[segment.op]
-        parts.append(f"{opening}{_escape(segment.text)}{closing}")
+        lines = _LINE_BREAK_RE.split(segment.text)
+        text = "<br>".join(md_text(line) for line in lines)
+        parts.append(f"{opening}{text}{closing}")
     return "".join(parts)
 
 
-def relative_link(
-    target: Path,
-    fragment: str | None,
-    report_dir: Path,
-) -> str:
-    """Return a link from the report directory to a source page.
+def diff_lines(finding: Finding) -> list[str]:
+    """Return the lines that tell how the code of a finding changed.
 
     Args:
-        target: Source file.
-        fragment: Fragment of the link, if any: an anchor of the source file,
-            or ``page=N`` for a page of a PDF.
-        report_dir: Directory of the report.
+        finding: A finding with a code side.
 
     Returns:
-        A percent encoded relative URL, or a file URI when no relative path
-        exists, such as across Windows drives. The fragment is percent encoded
-        too, but for its equal signs.
+        The lines of both sides, each after a two character prefix: two
+        blanks for a line that both sides have, ``- `` for a line of the
+        reference only and ``+ `` for a line of the new side only. Where
+        lines changed, those of the reference come first. A missing side
+        counts for no line.
     """
-    try:
-        relative = PurePath(os.path.relpath(target, report_dir)).as_posix()
-        link = urllib.parse.quote(relative, safe="/")
-    except ValueError:
-        link = target.resolve().as_uri()
-    if not fragment:
-        return link
-    return f"{link}#{urllib.parse.quote(fragment, safe='=')}"
+    ref = finding.ref.text.splitlines() if finding.ref else []
+    new = finding.new.text.splitlines() if finding.new else []
+    matcher = difflib.SequenceMatcher(None, ref, new, autojunk=False)
+    lines: list[str] = []
+    for tag, ref_start, ref_end, new_start, new_end in matcher.get_opcodes():
+        if tag == "equal":
+            lines += [f"  {line}" for line in ref[ref_start:ref_end]]
+            continue
+        lines += [f"- {line}" for line in ref[ref_start:ref_end]]
+        lines += [f"+ {line}" for line in new[new_start:new_end]]
+    return lines
 
 
-def _optional_text(value: str | None) -> str:
-    """Return a text of a document that may be missing, as a table cell."""
-    return md_text(value) if value else _UNKNOWN
+def _plain(value: str) -> str:
+    """Return a raw value of the inputs table, as text of a cell."""
+    return value if value == UNKNOWN else md_text(value)
 
 
-class _Context:
-    """Values and helpers used by the report template."""
+def _source(
+    context: ReportContext,
+    side: Side | None,
+    which: Literal["ref", "new"],
+) -> str:
+    """Return the Markdown link to the source of a side."""
+    source = context.source(side, which)
+    if source is None:
+        return _ABSENT
+    href, url = source
+    return f"[{md_text(href)}]({url})"
 
-    def __init__(self, result: CompareResult, report_dir: Path) -> None:
-        self.result = result
-        self.report_dir = report_dir
 
-    def link(self, side: Side | None, which: str) -> str:
-        """Return the Markdown link to the source of a side."""
-        if side is None:
-            return _ABSENT
-        doc: Document = self.result.ref if which == "ref" else self.result.new
-        target = doc.resolve(side.source)
-        url = relative_link(target, side.source.fragment, self.report_dir)
-        return f"[{md_text(side.source.href)}]({url})"
+def _cell(side: Side | None) -> str:
+    """Return the table cell of a side."""
+    return _ABSENT if side is None else md_cell(side.segments)
 
-    @staticmethod
-    def cell(side: Side | None) -> str:
-        """Return the table cell of a side."""
-        return _ABSENT if side is None else md_cell(side.segments)
 
-    def inputs(self) -> list[tuple[str, str, str]]:
-        """Return the rows of the inputs table."""
-        ref, new, stats = self.result.ref, self.result.new, self.result.stats
-        return [
-            ("Path", md_cell_code(str(ref.path)), md_cell_code(str(new.path))),
-            ("Format", ref.format, new.format),
-            ("Pages", str(len(ref.parts)), str(len(new.parts))),
-            (
-                "Generator",
-                _optional_text(ref.generator),
-                _optional_text(new.generator),
-            ),
-            ("Language", _optional_text(ref.lang), _optional_text(new.lang)),
-            ("Blocks", str(stats.ref_blocks), str(stats.new_blocks)),
-        ]
-
-    def categories(self) -> list[Category]:
-        """Return the categories that have findings, in a stable order."""
-        present = {finding.category for finding in self.result.findings}
-        return [category for category in Category if category in present]
-
-    def summary(self) -> list[tuple[str, list[int], int]]:
-        """Return one row per severity: label, counts, total."""
-        if not self.result.findings:
-            return []
-        rows = []
-        for severity in sorted(Severity, reverse=True):
-            findings = self.findings_of(severity)
-            counts = [
-                sum(finding.category is category for finding in findings)
-                for category in self.categories()
-            ]
-            rows.append((severity.label, counts, len(findings)))
-        return rows
-
-    def findings_of(self, severity: Severity) -> list[Finding]:
-        """Return the findings of a severity, in document order."""
-        return [f for f in self.result.findings if f.severity is severity]
-
-    def normalization(self) -> list[tuple[str, int, int]]:
-        """Return the normalization counters of both documents."""
-        ref = self.result.ref.normalization
-        new = self.result.new.normalization
-        keys = sorted(
-            key for key in ref.keys() | new.keys() if ref[key] or new[key]
-        )
-        return [(key, ref[key], new[key]) for key in keys]
-
-    def chrome(self) -> list[str]:
-        """Return the texts removed as page chrome, without duplicates."""
-        texts = [*self.result.ref.chrome, *self.result.new.chrome]
-        return list(dict.fromkeys(texts))
-
-    def warnings(self) -> list[tuple[str, str]]:
-        """Return the extraction warnings: document label, text."""
-        ref, new = self.result.ref, self.result.new
-        return [
-            *(("Reference", warning) for warning in ref.warnings),
-            *(("New", warning) for warning in new.warnings),
-        ]
-
-    def sections(self) -> list[tuple[str, list[Finding]]]:
-        """Return the findings grouped by severity, most severe first."""
-        return [
-            (_SECTION_TITLES[severity], findings)
-            for severity in sorted(Severity, reverse=True)
-            if (findings := self.findings_of(severity))
-        ]
-
-    def matched(self) -> str:
-        """Return the share of reference blocks found, in percent."""
-        stats = self.result.stats
-        share = stats.matched / stats.ref_blocks if stats.ref_blocks else 1.0
-        return f"{share * _PERCENT:.1f}"
+def _count_of(categories: Sequence[tuple[object, Sequence[object]]]) -> int:
+    """Return the number of findings in the categories of a severity."""
+    return sum(len(findings) for _, findings in categories)
 
 
 def render_markdown(result: CompareResult, path: Path) -> Path:
@@ -295,20 +215,39 @@ def render_markdown(result: CompareResult, path: Path) -> Path:
     Returns:
         The written file.
     """
-    context = _Context(result, path.parent)
-    text = _ENVIRONMENT.get_template("report.md.j2").render(
-        inputs=context.inputs(),
+    context = ReportContext(result, path.parent)
+    inputs = [
+        (label, md_cell_code(ref), md_cell_code(new))
+        if label == "Path"
+        else (label, _plain(ref), _plain(new))
+        for label, ref, new in context.inputs()
+    ]
+    text = TEMPLATES.get_template("report.md.j2").render(
+        inputs=inputs,
         matched=context.matched(),
         moved=result.stats.moved,
         categories=context.categories(),
-        summary=context.summary(),
+        summary=[
+            (SEVERITY_TITLES[severity], counts, total)
+            for severity, counts, total in context.summary()
+        ],
         normalization=context.normalization(),
         chrome=context.chrome(),
         warnings=context.warnings(),
-        sections=context.sections(),
-        link=context.link,
-        cell=context.cell,
+        sections=[
+            (SEVERITY_TITLES[severity], _count_of(categories), categories)
+            for severity, categories in context.sections()
+        ],
+        category_titles=CATEGORY_TITLES,
+        context=context,
+        is_code=is_code,
+        diff_lines=diff_lines,
+        md_fence=md_fence,
+        md_code=md_code,
         md_text=md_text,
+        shown_pattern=shown_pattern,
+        link=lambda side, which: _source(context, side, which),
+        cell=_cell,
     )
     path.write_text(text, encoding="utf-8")
     return path

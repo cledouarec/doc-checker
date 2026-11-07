@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from doc_checker.compare.align import PairKind
 from doc_checker.model.findings import DiffSegment, Side
+from doc_checker.text.normalize import truncate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -20,8 +21,6 @@ EXCERPT_MAX_CHARS: Final = 300
 MATCHED: Final = frozenset(
     {PairKind.EQUAL, PairKind.MODIFIED, PairKind.SPLIT, PairKind.MERGE},
 )
-
-_ELLIPSIS: Final = "\U00002026"
 
 type SegmentOp = Literal["equal", "delete", "insert"]
 
@@ -50,21 +49,6 @@ class Draft:
     pattern: str | None = None
 
 
-def truncate(text: str, limit: int = EXCERPT_MAX_CHARS) -> str:
-    """Return the text cut to a number of characters.
-
-    Args:
-        text: Any text.
-        limit: Most characters kept.
-
-    Returns:
-        The text, or its start followed by an ellipsis if it is longer.
-    """
-    if len(text) <= limit:
-        return text
-    return text[:limit] + _ELLIPSIS
-
-
 def whole(
     blocks: Sequence[Block],
     op: SegmentOp,
@@ -80,8 +64,8 @@ def whole(
 
     Returns:
         A side at the first block, of its kind, whose one segment is the
-        joined text, truncated.
+        joined text, cut to `EXCERPT_MAX_CHARS` characters.
     """
     text = separator.join(block.text for block in blocks)
-    segments = (DiffSegment(op, truncate(text)),)
+    segments = (DiffSegment(op, truncate(text, EXCERPT_MAX_CHARS)),)
     return Side(blocks[0].source, segments, blocks[0].kind)

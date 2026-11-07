@@ -15,7 +15,7 @@
 {% if not summary %}
 No findings.
 {% else %}
-| Severity |{% for category in categories %} {{ category }} |{% endfor %} Total |
+| Severity |{% for category in categories %} {{ category_titles[category] }} |{% endfor %} Total |
 |---|{% for category in categories %}---|{% endfor %}---|
 {% for label, counts, total in summary %}
 | {{ label }} |{% for count in counts %} {{ count }} |{% endfor %} {{ total }} |
@@ -47,12 +47,35 @@ No findings.
 - {{ label }}: {{ md_text(text) }}
 {% endfor %}
 {% endif %}
-{% for title, findings in sections %}
+{% for title, total, categories in sections %}
 
-## {{ title }} ({{ findings | length }})
+## {{ title }} ({{ total }})
+{% for category, findings in categories %}
+
+### {{ category_titles[category] }} ({{ findings | length }})
 {% for finding in findings %}
 
-### {{ finding.title }} (`{{ finding.rule }}`)
+#### {{ finding.title }} (`{{ finding.rule }}`)
+{% if finding.occurrences %}
+
+- Occurrences: {{ finding.occurrences | length }}
+- Pattern: {{ md_text(shown_pattern(finding)) }}
+- ID: `{{ finding.id }}`
+
+<details><summary>{{ finding.occurrences | length }} occurrences</summary>
+
+| ID | Reference | New |
+|---|---|---|
+{% for item in context.shown(finding) %}
+| {{ md_code(item.id) }} | {{ link(item.ref, "ref") }}<br>{{ cell(item.ref) }} | {{ link(item.new, "new") }}<br>{{ cell(item.new) }} |
+{% endfor %}
+{% if context.hidden(finding) %}
+
+and {{ context.hidden(finding) }} more occurrences
+{% endif %}
+
+</details>
+{% else %}
 
 - Reference: {{ link(finding.ref, "ref") }}
 - New: {{ link(finding.new, "new") }}
@@ -61,9 +84,22 @@ No findings.
 
 {{ md_text(finding.detail) }}
 {% endif %}
+{% if is_code(finding) %}
+{% set lines = diff_lines(finding) %}
+{% set fence = md_fence(lines) %}
+
+{{ fence }}diff
+{% for line in lines %}
+{{ line }}
+{% endfor %}
+{{ fence }}
+{% else %}
 
 | Reference | New |
 |---|---|
 | {{ cell(finding.ref) }} | {{ cell(finding.new) }} |
+{% endif %}
+{% endif %}
+{% endfor %}
 {% endfor %}
 {% endfor %}

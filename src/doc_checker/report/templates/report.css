@@ -1,0 +1,278 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --bg: #ffffff;
+  --panel: #f6f8fa;
+  --border: #d1d9e0;
+  --del-fg: #82071e;
+  --del-bg: #ffebe9;
+  --ins-fg: #116329;
+  --ins-bg: #dafbe1;
+  --critical: #cf222e;
+  --major: #bc4c00;
+  --minor: #9a6700;
+  --info: #0969da;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --bg: #0d1117;
+    --panel: #151b23;
+    --border: #3d444d;
+    --del-fg: #ffa198;
+    --del-bg: #490202;
+    --ins-fg: #7ee787;
+    --ins-bg: #04260f;
+    --critical: #f85149;
+    --major: #db6d28;
+    --minor: #d29922;
+    --info: #4493f8;
+  }
+}
+
+[hidden] {
+  display: none !important;
+}
+
+[data-severity="critical"] {
+  --accent: var(--critical);
+}
+
+[data-severity="major"] {
+  --accent: var(--major);
+}
+
+[data-severity="minor"] {
+  --accent: var(--minor);
+}
+
+[data-severity="info"] {
+  --accent: var(--info);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  max-width: 90rem;
+  margin: 0 auto;
+  padding: 0 1.5rem 3rem;
+  color: var(--fg);
+  background: var(--bg);
+  font: 0.95rem/1.5 system-ui, sans-serif;
+}
+
+code,
+pre,
+.kind {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+}
+
+h1 {
+  margin: 1rem 0 0.5rem;
+  font-size: 1.5rem;
+}
+
+h2 {
+  font-size: 1.2rem;
+}
+
+table {
+  margin: 0.5rem 0 1rem;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+td {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.matched,
+.none,
+.shown,
+.where,
+.id,
+.more,
+.absent,
+.side h4 {
+  color: var(--muted);
+}
+
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.counts li {
+  padding: 0.1rem 0.75rem;
+  border: 1px solid var(--accent);
+  border-radius: 1rem;
+}
+
+.count {
+  font-weight: 700;
+}
+
+#filters {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  margin: 1rem 0;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+#filters fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+#filters legend {
+  float: left;
+  margin-right: 0.75rem;
+  padding: 0;
+  font-weight: 600;
+}
+
+#filters fieldset label {
+  margin-right: 0.75rem;
+}
+
+#filters .shown {
+  margin: 0 0 0 auto;
+}
+
+section.severity > h2 {
+  margin: 1.5rem 0 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 2px solid var(--accent);
+}
+
+article.finding {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 12em;
+  margin: 0.75rem 0;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+}
+
+article.finding h3 {
+  margin: 0.25rem 0;
+  font-size: 1rem;
+}
+
+article.finding h3 code {
+  margin-left: 0.5rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.where,
+.id,
+.detail {
+  margin: 0.25rem 0;
+}
+
+.where,
+.id {
+  font-size: 0.9em;
+}
+
+.sides {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.side h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+.kind {
+  margin-left: 0.25rem;
+  font-weight: 400;
+}
+
+.text {
+  white-space: pre-wrap;
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.absent {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+}
+
+del {
+  color: var(--del-fg);
+  background: var(--del-bg);
+  text-decoration: line-through;
+}
+
+ins {
+  color: var(--ins-fg);
+  background: var(--ins-bg);
+  text-decoration: underline;
+}
+
+.detail,
+a.source,
+.quote {
+  unicode-bidi: isolate;
+}
+
+details.occurrences summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+details.occurrences ol {
+  margin: 0.5rem 0;
+  padding-left: 2rem;
+}
+
+details.occurrences li {
+  margin: 0.75rem 0;
+}
+
+.more {
+  font-style: italic;
+}
+
+@media (max-width: 48rem) {
+  .sides {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

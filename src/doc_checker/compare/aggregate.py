@@ -11,9 +11,10 @@ import difflib
 from collections import Counter
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.compare.drafts import ARROW, truncate
+from doc_checker.compare.drafts import ARROW
 from doc_checker.compare.textdiff import without_letter_hyphens
 from doc_checker.model.findings import Finding, group_id
+from doc_checker.text.normalize import truncate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
