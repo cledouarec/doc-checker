@@ -12,6 +12,7 @@ without any PDF, for the tests of the steps that work on them.
 
 import html
 import io
+import math
 import re
 from dataclasses import dataclass
 from functools import partial
@@ -24,7 +25,8 @@ from fpdf.fonts import TextStyle
 from PIL import Image as PILImage
 from PIL import ImageDraw
 from pypdf import PdfReader, PdfWriter
-from reportlab.lib.enums import TA_JUSTIFY
+from reportlab.lib.colors import HexColor
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -53,10 +55,20 @@ from doc_checker.extract.pdf.reader import PdfChar, PdfPageText
 from doc_checker.extract.pdf.segments import Segment
 from tests.builders import (
     DocSpec,
+    Figure,
     Section,
+    figure_file,
     link_text,
     section_numbers,
     smart_typography,
+)
+from tests.image_builders import (
+    FIGURE_SIZE,
+    drawing,
+    label_positions,
+    labels,
+    logo,
+    shapes,
 )
 
 if TYPE_CHECKING:
@@ -158,6 +170,107 @@ _NOTE = ParagraphStyle(
     fontSize=11,
     leading=14,
 )
+_CAPTION = ParagraphStyle(
+    "caption",
+    fontName="Times-Italic",
+    fontSize=10,
+    leading=12,
+    alignment=TA_CENTER,
+    spaceBefore=4,
+    spaceAfter=8,
+)
+
+
+class _VectorFigure(Flowable):
+    """A figure drawn with paths, in the page or in a form."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        flipped: bool = False,
+        form: bool = False,
+    ) -> None:
+        super().__init__()
+        self.name = name
+        self.flipped = flipped
+        self.form = form
+        self.width, self.height = FIGURE_SIZE
+
+    @override
+    def wrap(
+        self,
+        availWidth: float,
+        availHeight: float,
+    ) -> tuple[float, float]:
+        return self.width, self.height
+
+    def _shapes(self, canvas: Canvas) -> None:
+        for shape in shapes(flipped=self.flipped):
+            x0, y0, x1, y1 = shape.box
+            canvas.setFillColor(HexColor(shape.fill))
+            box = (x0, self.height - y1, x1, self.height - y0)
+            if shape.kind == "rect":
+                canvas.rect(*box[:2], x1 - x0, y1 - y0, stroke=0, fill=1)
+            else:
+                canvas.ellipse(*box, stroke=0, fill=1)
+        canvas.setFillColor(HexColor("#000000"))
+        canvas.setFont("Helvetica", 11)
+        for label, (x, y) in zip(
+            labels(self.name),
+            label_positions(flipped=self.flipped),
+            strict=True,
+        ):
+            canvas.drawString(x, self.height - y, label)
+
+    @override
+    def draw(self) -> None:
+        canvas = self.canv
+        if not self.form:
+            self._shapes(canvas)
+            return
+        key = f"figure-{self.name}"
+        canvas.beginForm(key)
+        self._shapes(canvas)
+        canvas.endForm()
+        canvas.doForm(key)
+
+
+def _figure_flowables(
+    figure: Figure,
+    k: int,
+    *,
+    forms: bool,
+    reencode: bool,
+) -> list[Flowable]:
+    """Return the flowables of a figure: its picture and its caption."""
+    flowables: list[Flowable] = []
+    if figure.defect != "dropped":
+        suffix, data = figure_file(figure)
+        if suffix == "svg":
+            other = figure.defect == "other"
+            name = f"{figure.name}-other" if other else figure.name
+            flowables.append(_VectorFigure(name, flipped=other, form=forms))
+        else:
+            if reencode and suffix == "png":
+                buffer = io.BytesIO()
+                PILImage.open(io.BytesIO(data)).convert("RGB").save(
+                    buffer,
+                    "JPEG",
+                    quality=95,
+                )
+                data = buffer.getvalue()
+            width, height = PILImage.open(io.BytesIO(data)).size
+            flowables.append(
+                Image(
+                    io.BytesIO(data),
+                    width=100 * mm,
+                    height=100 * mm * height / width,
+                ),
+            )
+    caption = html.escape(f"Figure {k}: {figure.caption}", quote=False)
+    flowables.append(Paragraph(caption, _CAPTION))
+    return flowables
 
 
 class _Heading(Paragraph):
@@ -180,6 +293,7 @@ class _Document(BaseDocTemplate):
         outline: bool,
         outline_depth: int | None,
         toc: bool,
+        logo_on_pages: bool,
     ) -> None:
         super().__init__(
             str(path),
@@ -196,6 +310,7 @@ class _Document(BaseDocTemplate):
         self.outline = outline
         self.outline_depth = outline_depth
         self.toc = toc
+        self.logo_on_pages = logo_on_pages
         self.chapter = ""
         body = Frame(
             self.leftMargin,
@@ -235,6 +350,14 @@ class _Document(BaseDocTemplate):
         if self.artifacts:
             canvas.addLiteral("EMC")
         canvas.restoreState()
+        if self.logo_on_pages:
+            canvas.drawImage(
+                ImageReader(logo()),
+                _PAGE_MARGIN,
+                _H - 12 * mm,
+                width=60,
+                height=20,
+            )
 
     @override
     def beforeDocument(self) -> None:
@@ -264,12 +387,15 @@ def _title_markup(text: str, lang: str) -> str:
     return html.escape(pdf_typography(text, lang), quote=False)
 
 
-def _section_flowables(
+def _section_flowables(  # ruff: ignore[too-many-arguments] - one keyword per figure option
     section: Section,
     lang: str,
     *,
     number: str | None = None,
     chapter: int | None = None,
+    figure_numbers: dict[str, int] | None = None,
+    forms: bool = False,
+    reencode: bool = False,
 ) -> list[Flowable]:
     style = _H1 if section.level == 1 else _H2
     title = _title_markup(section.title, lang)
@@ -283,6 +409,13 @@ def _section_flowables(
         Paragraph(_body_markup(text, lang), _BODY)
         for text in section.paragraphs
     ]
+    for figure in section.figures:
+        flowables += _figure_flowables(
+            figure,
+            (figure_numbers or {}).get(figure.name, 0),
+            forms=forms,
+            reencode=reencode,
+        )
     if section.bullets:
         items = [
             ListItem(Paragraph(_body_markup(text, lang), _BODY))
@@ -326,6 +459,9 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
     numbered: bool = False,
     chapter_labels: bool = False,
     outline_depth: int | None = None,
+    figure_forms: bool = False,
+    logo: bool = False,
+    reencode: bool = False,
 ) -> Path:
     """Write the documentation as an A4 PDF made with reportlab.
 
@@ -346,11 +482,21 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
             ``Chapter N`` line, with no bookmark.
         outline_depth: The deepest title level that gets a bookmark, with
             1 for the chapters, or ``None`` for a bookmark on every title.
+        figure_forms: Whether each vector figure is drawn in a form.
+        logo: Whether each page has the logo at the top left.
+        reencode: Whether each PNG figure is written as a JPEG of quality 95.
 
     Returns:
         The PDF file.
     """
     numbers = section_numbers(spec) if numbered else {}
+    figure_numbers = {
+        figure.name: k
+        for k, figure in enumerate(
+            (f for section in spec.sections for f in section.figures),
+            1,
+        )
+    }
     chapters = 0
     story: list[Flowable] = []
     if toc:
@@ -370,6 +516,9 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
             chapter=chapters
             if chapter_labels and section.level == 1
             else None,
+            figure_numbers=figure_numbers,
+            forms=figure_forms,
+            reencode=reencode,
         )
     if scanned_page:
         story += [NextPageTemplate("scan"), PageBreak(), _scan_flowable()]
@@ -380,6 +529,7 @@ def build_reportlab_pdf(  # ruff: ignore[too-many-arguments] - one keyword per P
         outline=outline,
         outline_depth=outline_depth,
         toc=toc,
+        logo_on_pages=logo,
     )
     document.multiBuild(story)
     return out
@@ -449,6 +599,25 @@ def _write_text(pdf: FPDF, text: str, align: str) -> None:
     )
 
 
+def _write_figure(pdf: _TwoColumns, figure: Figure) -> None:
+    """Write a figure: its picture, then its caption."""
+    if figure.defect != "dropped":
+        suffix, data = figure_file(figure)
+        if suffix == "svg":
+            ratio = FIGURE_SIZE[1] / FIGURE_SIZE[0]
+        else:
+            width, height = PILImage.open(io.BytesIO(data)).size
+            ratio = height / width
+        pdf.ensure_room(pdf.col_w * ratio + 12)
+        alt = None if figure.defect == "noalt" else figure.alt
+        pdf.image(io.BytesIO(data), w=pdf.col_w, alt_text=alt)
+        pdf.set_x(pdf.l_margin)
+    pdf.set_font("times", "I", 10)
+    _write_text(pdf, figure.caption, "C")
+    pdf.ln(2.5)
+    pdf.set_font("times", size=12)
+
+
 def _write_section(pdf: _TwoColumns, section: Section) -> None:
     if section.heading_as_text:
         pdf.set_font("times", size=12)
@@ -457,6 +626,8 @@ def _write_section(pdf: _TwoColumns, section: Section) -> None:
     for text in map(link_text, section.paragraphs):
         _write_text(pdf, soft_hyphenate(text), "J")
         pdf.ln(2.5)
+    for figure in section.figures:
+        _write_figure(pdf, figure)
     for text in map(link_text, section.bullets):
         _write_text(pdf, "\U00002013 " + soft_hyphenate(text), "L")
         pdf.ln(1.5)
@@ -529,6 +700,75 @@ def build_fpdf2_pdf(spec: DocSpec, out: Path) -> Path:
             pdf.start_section(section.title, level=section.level - 1)
         _write_section(pdf, section)
     pdf.output(out)
+    return out
+
+
+def build_images_pdf(
+    out: Path,
+    *,
+    pages: int,
+    image_size: tuple[int, int] = (480, 320),
+) -> Path:
+    """Write a PDF with a line of text and an image on each page.
+
+    Args:
+        out: The PDF file to write.
+        pages: The number of pages.
+        image_size: Width and height of the images, in pixels, which are
+            drawn in points.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    for number in range(1, pages + 1):
+        canvas.setFont("Helvetica", 11)
+        canvas.drawString(72, _H - 72, f"Text of page {number}")
+        picture = ImageReader(drawing(f"page {number}", image_size))
+        canvas.drawImage(
+            picture,
+            72,
+            _H - 100 - image_size[1],
+            width=image_size[0],
+            height=image_size[1],
+        )
+        canvas.showPage()
+    canvas.save()
+    return out
+
+
+def build_dense_paths_pdf(
+    out: Path,
+    *,
+    paths: int,
+    pitch: float = 10.0,
+) -> Path:
+    """Write a page of many small filled squares, none touching another.
+
+    Args:
+        out: The PDF file to write.
+        paths: The number of squares of 2 by 2 points, 50 on each row.
+        pitch: The distance between the squares of a row, and between rows.
+
+    Returns:
+        The PDF file.
+    """
+    height = 40 + pitch * math.ceil(paths / 50)
+    canvas = Canvas(str(out), pagesize=(600, height))
+    canvas.setFont("Helvetica", 11)
+    canvas.drawString(10, height - 20, "Dense paths")
+    for index in range(paths):
+        row, column = divmod(index, 50)
+        canvas.rect(
+            10 + column * pitch,
+            height - 40 - row * pitch - 2,
+            2,
+            2,
+            stroke=0,
+            fill=1,
+        )
+    canvas.showPage()
+    canvas.save()
     return out
 
 

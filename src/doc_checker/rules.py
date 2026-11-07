@@ -32,6 +32,7 @@ _CONTENT = Category.CONTENT
 _TEXT = Category.TEXT
 _STRUCTURE = Category.STRUCTURE
 _LINK = Category.LINK
+_IMAGE = Category.IMAGE
 _SPECS: Final = (
     RuleSpec(
         "section.missing",
@@ -137,6 +138,24 @@ _SPECS: Final = (
         Severity.MAJOR,
         "Link target changed",
     ),
+    RuleSpec("image.missing", _IMAGE, Severity.CRITICAL, "Image missing"),
+    RuleSpec("image.added", _IMAGE, Severity.MINOR, "Image added"),
+    RuleSpec("image.replaced", _IMAGE, Severity.MAJOR, "Image replaced"),
+    RuleSpec("image.degraded", _IMAGE, Severity.MAJOR, "Image degraded"),
+    RuleSpec("image.reencoded", _IMAGE, Severity.INFO, "Image re-encoded"),
+    RuleSpec(
+        "image.rasterized",
+        _IMAGE,
+        Severity.MINOR,
+        "Figure rasterized",
+    ),
+    RuleSpec(
+        "image.vectorized",
+        _IMAGE,
+        Severity.INFO,
+        "Figure vectorized",
+    ),
+    RuleSpec("image.alt_lost", _IMAGE, Severity.MINOR, "Alt text lost"),
 )
 
 RULES: Final[Mapping[str, RuleSpec]] = MappingProxyType(

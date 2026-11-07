@@ -7,7 +7,11 @@ from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Literal, Self
 
 if TYPE_CHECKING:
-    from doc_checker.model.document import BlockKind, SourceRef
+    from doc_checker.model.document import (
+        BlockKind,
+        ImageRef,
+        SourceRef,
+    )
 
 _ID_SEPARATOR = "\x1f"
 _ID_DIGEST_SIZE = 6
@@ -73,11 +77,13 @@ class Side:
         source: Where the first block of the side comes from.
         segments: The text, cut into unchanged, deleted and inserted pieces.
         kind: Kind of the first block of the side, if known.
+        image: Image of the first block of the side, if it is an image.
     """
 
     source: SourceRef
     segments: tuple[DiffSegment, ...]
     kind: BlockKind | None = None
+    image: ImageRef | None = None
 
     @property
     def text(self) -> str:
