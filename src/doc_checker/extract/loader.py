@@ -67,5 +67,5 @@ def load_document(path: Path, cfg: Config) -> Document:
         The normalized document.
     """
     if detect_format(path) == "pdf":
-        return load_pdf(path, cfg.pdf, lang=cfg.lang)
+        return load_pdf(path, cfg.pdf, lang=cfg.lang, images=cfg.images)
     return load_html(path, cfg.html, lang=cfg.lang, images=cfg.images)

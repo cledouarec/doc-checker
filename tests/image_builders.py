@@ -161,6 +161,162 @@ def bomb_png(width: int, height: int) -> bytes:
     )
 
 
+def jpeg_announcing(width: int, height: int) -> bytes:
+    """Forge a JPEG of the setup drawing whose frame header announces a size.
+
+    Args:
+        width: Announced width.
+        height: Announced height.
+
+    Returns:
+        The bytes of a JPEG of 400 by 250 pixels, of quality 90, whose SOF0
+        segment announces this size.
+    """
+    data = encode(drawing("setup"), "JPEG", quality=90)
+    start = data.index(b"\xff\xc0") + 5  # Length and precision come first.
+    size = struct.pack(">HH", height, width)
+    return data[:start] + size + data[start + len(size) :]
+
+
+def jpx_announcing(width: int, height: int) -> bytes:
+    """Forge a JPEG 2000 codestream whose SIZ marker announces a size.
+
+    Args:
+        width: Announced width.
+        height: Announced height.
+
+    Returns:
+        The bytes of a codestream of the setup drawing, whose ``Xsiz`` and
+        ``Ysiz`` announce this size, with no offset.
+    """
+    data = encode(drawing("setup"), "JPEG2000", no_jp2=True)
+    start = 8  # After SOC, SIZ, Lsiz and Rsiz.
+    size = struct.pack(">II", width, height)
+    return data[:start] + size + data[start + len(size) :]
+
+
+def jpx_of_components(count: int) -> bytes:
+    """Forge a JPEG 2000 codestream whose SIZ marker announces components.
+
+    Args:
+        count: Announced number of components, 3 or more.
+
+    Returns:
+        The bytes of a codestream of the setup drawing, of 400 by 250
+        pixels, whose ``Csiz`` announces `count` components, the ones added
+        sampled as the first.
+    """
+    data = encode(drawing("setup"), "JPEG2000", no_jp2=True)
+    length = int.from_bytes(data[4:6])  # Lsiz, after SOC and SIZ.
+    first = data[42:45]  # Ssiz, XRsiz and YRsiz of the first component.
+    siz = data[6:40] + struct.pack(">H", count) + data[42:51]
+    siz += first * (count - 3)
+    rest = data[4 + length :]
+    return data[:4] + struct.pack(">H", len(siz) + 2) + siz + rest
+
+
+def jpeg_of_components(count: int) -> bytes:
+    """Forge a JPEG whose frame header announces components.
+
+    Args:
+        count: Announced number of components, 3 or more.
+
+    Returns:
+        The bytes of a JPEG of the setup drawing, of 400 by 250 pixels and
+        quality 90, whose SOF0 segment announces `count` components, the
+        ones added sampled and quantized as the last.
+    """
+    data = encode(drawing("setup"), "JPEG", quality=90)
+    start = data.index(b"\xff\xc0") + 2  # The length of the frame header.
+    end = start + int.from_bytes(data[start : start + 2])
+    last = data[end - 3 : end]  # Identifier, sampling and table.
+    added = b"".join(
+        bytes([last[0] + number]) + last[1:] for number in range(1, count - 2)
+    )
+    frame = data[start + 2 : start + 7] + bytes([count])
+    frame += data[start + 8 : end] + added
+    return (
+        data[:start] + struct.pack(">H", len(frame) + 2) + frame + data[end:]
+    )
+
+
+def cmyk_encoded(fmt: Literal["JPEG", "JPEG2000"]) -> bytes:
+    """Encode the setup drawing in CMYK, in four components.
+
+    Args:
+        fmt: ``JPEG``, of quality 90, or ``JPEG2000``, a bare codestream.
+
+    Returns:
+        The encoded bytes.
+    """
+    cmyk = drawing("setup").convert("CMYK")
+    buffer = io.BytesIO()
+    if fmt == "JPEG":
+        cmyk.save(buffer, fmt, quality=90)
+    else:
+        # The encoder takes no CMYK: the four bands go in as RGBA.
+        Image.merge("RGBA", cmyk.split()).save(buffer, fmt, no_jp2=True)
+    return buffer.getvalue()
+
+
+PREDICTOR_COLUMNS = 16384  # Bytes of a row of the decoy, after its tag byte.
+
+
+def jpeg_behind_a_predictor(width: int, height: int) -> bytes:
+    """Forge bytes that hold one JPEG, and another once a predictor runs.
+
+    The bytes are a JPEG of the setup drawing of 400 by 250 pixels, whose
+    APP15 segment holds a second JPEG that announces a size. Run through a
+    PNG predictor of `PREDICTOR_COLUMNS` columns, which drops the tag byte
+    that starts each row, they start with the second JPEG instead: a first
+    row of zeros that ends with 0xFF, then 0xD8 as the tag of the next row.
+
+    Args:
+        width: Announced width of the hidden JPEG.
+        height: Announced height of the hidden JPEG.
+
+    Returns:
+        The bytes, before the predictor runs.
+    """
+    hidden = jpeg_announcing(width, height)
+    app15 = b"\xff\xef" + struct.pack(">H", len(hidden) + 2) + hidden
+    first_row = bytes(PREDICTOR_COLUMNS - 1) + b"\xff"
+    return (
+        b"\x00"
+        + first_row
+        + b"\xd8"
+        + app15
+        + encode(
+            drawing("setup"),
+            "JPEG",
+            quality=90,
+        )[2:]
+    )
+
+
+def ccitt_group4(image: Image.Image) -> bytes:
+    """Encode a picture as one strip of CCITT Group 4, black on white.
+
+    Args:
+        image: The picture, made bilevel.
+
+    Returns:
+        The bytes of the strip, as a PDF stream holds them.
+    """
+    bilevel = image.convert("1")
+    buffer = io.BytesIO()
+    bilevel.save(
+        buffer,
+        "TIFF",
+        compression="group4",
+        strip_size=1 << 30,
+    )
+    with Image.open(buffer) as tiff:
+        offset = tiff.tag_v2[273][0]  # StripOffsets.
+        length = tiff.tag_v2[279][0]  # StripByteCounts.
+    return buffer.getvalue()[offset : offset + length]
+
+
 FIGURE_SIZE = (300, 200)
 _LABEL_AT = ((20, 50), (210, 50))
 

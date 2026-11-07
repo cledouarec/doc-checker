@@ -1,7 +1,11 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for reading the characters, bookmarks and catalog of PDF files."""
 
+import base64
+import binascii
 import re
+import time
+import zlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,6 +19,7 @@ from pypdf.generic import (
 )
 from reportlab.lib import pdfencrypt
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 
@@ -32,10 +37,25 @@ from doc_checker.extract.pdf.reader import (
     read_page,
 )
 from doc_checker.extract.pdf.segments import build_segments
-from tests.builders import SAMPLE_EN, SAMPLE_FR
+from doc_checker.images.pixels import CANNOT_DECODE, TOO_LARGE
+from tests.builders import FIGURES_EN, SAMPLE_EN, SAMPLE_FR
+from tests.image_builders import (
+    PREDICTOR_COLUMNS,
+    ccitt_group4,
+    cmyk_encoded,
+    drawing,
+    encode,
+    jpeg_announcing,
+    jpeg_behind_a_predictor,
+    jpeg_of_components,
+    jpx_announcing,
+    jpx_of_components,
+)
 from tests.pdf_builders import (
     build_fpdf2_pdf,
+    build_image_stream_pdf,
     build_lines_pdf,
+    build_oversized_image_pdf,
     build_raw_pdf,
     build_reportlab_pdf,
     build_single_page_pdf,
@@ -46,7 +66,12 @@ from tests.pdf_builders import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from doc_checker.extract.pdf.reader import PdfPageText
+    from doc_checker.extract.pdf.reader import PdfImage, PdfPageText
+    from doc_checker.model.document import ImageRef
+
+_JPEG = encode(drawing("setup"), "JPEG", quality=90)
+_PIXELS = drawing("setup").tobytes()  # 400 by 250 RGB pixels.
+_HUGE_JPEG = jpeg_announcing(12_000, 12_000)
 
 
 @pytest.fixture(scope="module")
@@ -690,3 +715,615 @@ def test_read_catalog_with_an_unpaired_surrogate(tmp_path: Path) -> None:
     writer.write(path)
     with open_pdf(path) as pdf:
         assert read_catalog(pdf) == PdfCatalog("\U0000fffdf", tagged=False)
+
+
+def _all_images(path: Path) -> list[PdfImage]:
+    """Read the images of every page of a PDF."""
+    with open_pdf(path) as pdf:
+        return [
+            image
+            for index in range(len(pdf))
+            for image in read_page(pdf, index).images
+        ]
+
+
+def test_page_images_are_read(tmp_path: Path) -> None:
+    """Each image object gives its pixels, its format and its resolution."""
+    images = [
+        image
+        for image in _all_images(
+            build_reportlab_pdf(FIGURES_EN, tmp_path / "a.pdf"),
+        )
+        if not image.ref.vector
+    ]
+    assert [(i.ref.format, i.ref.width, i.ref.height) for i in images] == [
+        ("flate", 400, 250),
+        ("jpeg", 400, 250),
+        ("flate", 400, 250),
+    ]
+    setup, dashboard, _ = images
+    assert setup.ref.readable
+    sources = [image.ref.source for image in images]
+    assert [s.index for s in sources if s is not None] == [0, 0, 0]
+    assert dashboard.ref.quality == 90
+    assert setup.x1 - setup.x0 == pytest.approx(100 * mm, abs=0.5)
+    assert setup.ref.dpi == pytest.approx(400 / (100 / 25.4), rel=0.02)
+
+
+def test_images_can_be_skipped(tmp_path: Path) -> None:
+    """Without images, no image object is decoded."""
+    path = build_reportlab_pdf(FIGURES_EN, tmp_path / "a.pdf")
+    with open_pdf(path) as pdf:
+        assert all(
+            not read_page(pdf, index, images=False).images
+            for index in range(len(pdf))
+        )
+
+
+def test_image_in_a_form_has_its_box_on_the_page(tmp_path: Path) -> None:
+    """An image drawn in a scaled form has the box and resolution it shows."""
+    path = tmp_path / "form.pdf"
+    canvas = Canvas(str(path), pagesize=A4)
+    canvas.beginForm("figure")
+    canvas.drawImage(ImageReader(drawing("setup")), 0, 0, 200, 125)
+    canvas.endForm()
+    canvas.translate(100, 300)
+    canvas.scale(2, 2)
+    canvas.doForm("figure")
+    canvas.save()
+    (image,) = _all_images(path)
+    box = (image.x0, image.x1, image.bottom, image.top)
+    assert box == pytest.approx((100, 500, 300, 550), abs=0.01)
+    assert image.ref.shown == pytest.approx((400, 250), abs=0.01)
+    assert image.ref.dpi == pytest.approx(72.0)
+
+
+@pytest.mark.parametrize("angle", [90, 180, 270])
+def test_image_on_a_turned_page_turns_upright(
+    tmp_path: Path,
+    angle: int,
+) -> None:
+    """The box of an image turns upright as the text of its page does."""
+    path = tmp_path / "turned.pdf"
+    width, height = A4
+    origins = {90: (width, 0), 180: (width, height), 270: (0, height)}
+    canvas = Canvas(str(path), pagesize=A4)
+    canvas.translate(*origins[angle])
+    canvas.rotate(angle)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, width - 72, "The text above the image.")
+    # The image is 200 by 125 points, 28 points right of the text and its
+    # top 18 points under the baseline.
+    canvas.drawImage(ImageReader(drawing("setup")), 100, width - 215, 200, 125)
+    canvas.save()
+    with open_pdf(path) as pdf:
+        page = read_page(pdf, 0)
+    (image,) = page.images
+    first = page.chars[0]
+    box = (image.x0 - first.x0, image.x1, image.bottom, image.top)
+    expected = (28, image.x0 + 200, first.baseline - 143, first.baseline - 18)
+    assert box == pytest.approx(expected, abs=0.5)
+    assert image.ref.dpi == pytest.approx(144.0)
+
+
+@pytest.mark.parametrize(
+    ("header", "image_format"),
+    [(False, "flate"), (True, "jpeg")],
+)
+def test_image_beyond_the_pixel_limit_is_not_decoded(
+    tmp_path: Path,
+    header: bool,  # ruff: ignore[boolean-type-hint-positional-argument] - pytest parameter
+    image_format: str,
+) -> None:
+    """An image whose dictionary or header has too many pixels is refused."""
+    path = build_oversized_image_pdf(tmp_path / "large.pdf", header=header)
+    (image,) = _all_images(path)
+    assert (image.ref.problem, image.ref.readable, image.ref.source) == (
+        TOO_LARGE,
+        False,
+        None,
+    )
+    assert image.ref.format == image_format
+
+
+_RGB = "/ColorSpace /DeviceRGB /BitsPerComponent 8"
+# The predictor of the decoy, a PNG one, of one byte a pixel.
+_DECOY_ROWS = (
+    f"{_RGB} /DecodeParms [<< /Predictor 12 /Colors 1 /BitsPerComponent 8"
+    f" /Columns {PREDICTOR_COLUMNS} >> null]"
+)
+# Rows of RGB pixels, each after a tag byte, as pdflatex and fpdf2 write.
+_PNG_ROWS = (
+    f"{_RGB} /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8"
+    " /Columns 400 >>"
+)
+_CMYK = "/ColorSpace /DeviceCMYK /BitsPerComponent 8"
+_GROUP_4 = (
+    "/ColorSpace /DeviceGray /BitsPerComponent 1"
+    " /DecodeParms << /K -1 /Columns 400 /Rows 250 /BlackIs1 false >>"
+)
+_JPX = jpx_announcing(400, 250)
+
+
+def _stream_image(
+    tmp_path: Path,
+    data: bytes,
+    filters: str,
+    entries: str = _RGB,
+) -> ImageRef:
+    """Read the image of a page whose stream and filters are given."""
+    path = build_image_stream_pdf(
+        tmp_path / "s.pdf",
+        data,
+        filters=filters,
+        entries=entries,
+    )
+    (image,) = _all_images(path)
+    return image.ref
+
+
+def _run_length_literals(data: bytes) -> bytes:
+    """Encode bytes as RunLength runs of one literal byte each."""
+    runs = bytearray(2 * len(data))
+    runs[1::2] = data
+    return bytes(runs) + b"\x80"
+
+
+@pytest.mark.parametrize(
+    ("data", "filters", "entries", "problem"),
+    [
+        pytest.param(
+            b"\x00" * 16 + _HUGE_JPEG,
+            "/DCTDecode",
+            _RGB,
+            TOO_LARGE,
+            id="bytes-before-soi",
+        ),
+        pytest.param(
+            _HUGE_JPEG,
+            "/DCT",
+            _RGB,
+            TOO_LARGE,
+            id="abbreviated-dct",
+        ),
+        pytest.param(
+            zlib.compress(_HUGE_JPEG),
+            "[/FlateDecode /DCTDecode]",
+            _RGB,
+            TOO_LARGE,
+            id="wrapped-huge-sof",
+        ),
+        pytest.param(
+            base64.a85encode(_HUGE_JPEG) + b"~>",
+            "[/A85 /DCT]",
+            _RGB,
+            TOO_LARGE,
+            id="ascii85-huge-sof",
+        ),
+        pytest.param(
+            jpeg_announcing(800, 500),
+            "/DCTDecode",
+            _RGB,
+            TOO_LARGE,
+            id="sof-above-the-dictionary",
+        ),
+        pytest.param(
+            jpx_announcing(20_000, 20_000),
+            "/JPXDecode",
+            _RGB,
+            TOO_LARGE,
+            id="huge-siz",
+        ),
+        pytest.param(
+            zlib.compress(jpx_announcing(20_000, 20_000)),
+            "[/FlateDecode /JPXDecode]",
+            _RGB,
+            TOO_LARGE,
+            id="wrapped-huge-siz",
+        ),
+        pytest.param(
+            jpx_of_components(16),
+            "/JPXDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="jpx-of-16-components",
+        ),
+        pytest.param(
+            jpeg_of_components(5),
+            "/DCTDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="jpeg-of-5-components",
+        ),
+        pytest.param(
+            b"no frame",
+            "/DCTDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="no-sof",
+        ),
+        pytest.param(
+            b"no codestream",
+            "/JPXDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="no-siz",
+        ),
+        pytest.param(
+            zlib.compress(_JPEG + bytes(4 << 20)),
+            "[/FlateDecode /DCTDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="inflates-past-any-jpeg",
+        ),
+        pytest.param(
+            zlib.compress(jpeg_behind_a_predictor(20_000, 20_000)),
+            "[/FlateDecode /DCTDecode]",
+            _DECOY_ROWS,
+            TOO_LARGE,
+            id="jpeg-behind-a-predictor",
+        ),
+        pytest.param(
+            zlib.compress(zlib.compress(_PIXELS) + bytes(8 << 20)),
+            "[/FlateDecode /FlateDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="flate-in-flate",
+        ),
+        pytest.param(
+            b"\x80\x0b\x60\x50\x22\x0c\x0c\x85\x01",
+            "[/LZWDecode /DCTDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="lzw-wrapped-jpeg",
+        ),
+        pytest.param(
+            b"\x80\x0b\x60\x50\x22\x0c\x0c\x85\x01",
+            "/LZWDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="lzw",
+        ),
+        pytest.param(
+            base64.a85encode(zlib.compress(_JPEG)) + b"~>",
+            "[/A85 /Fl /DCT]",
+            _RGB,
+            CANNOT_DECODE,
+            id="three-filters",
+        ),
+        pytest.param(
+            binascii.hexlify(_JPX) + b">",
+            "[/AHx /JPXDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="ascii-hex-jpx",
+        ),
+        pytest.param(
+            base64.a85encode(_PIXELS) + b"~>",
+            "/ASCII85Decode",
+            _RGB,
+            CANNOT_DECODE,
+            id="ascii85-alone",
+        ),
+        pytest.param(
+            b"\xff\xd8" + b"\xff" * 100_000 + b"\x00",
+            "/DCTDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="run-of-ff",
+        ),
+        pytest.param(
+            zlib.compress(b"\xff\xd8" + b"\xff" * 64_000 + b"\x00"),
+            "[/FlateDecode /DCTDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="wrapped-run-of-ff",
+        ),
+        pytest.param(
+            zlib.compress(b"\xff\xd8" + b"\xff\xd0" * 500_000),
+            "[/FlateDecode /DCTDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="restart-markers-before-the-frame",
+        ),
+        pytest.param(
+            b"{" + base64.a85encode(_JPEG) + b"~>",
+            "[/ASCII85Decode /DCTDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="ascii85-out-of-alphabet",
+        ),
+        pytest.param(
+            b"!!z!!!" + base64.a85encode(_JPEG) + b"~>",
+            "[/ASCII85Decode /DCTDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="ascii85-z-inside-a-group",
+        ),
+        pytest.param(
+            bytes(range(256)) * 20,
+            "/FlateDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="corrupt-flate",
+        ),
+        pytest.param(
+            zlib.compress(_PIXELS)[:200],
+            "/FlateDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="truncated-flate",
+        ),
+        pytest.param(
+            _JPEG[: len(_JPEG) // 3],
+            "/DCTDecode",
+            _RGB,
+            CANNOT_DECODE,
+            id="truncated-jpeg",
+        ),
+        pytest.param(
+            zlib.compress(_PIXELS),
+            "[/DCTDecode /FlateDecode]",
+            _RGB,
+            CANNOT_DECODE,
+            id="codec-before-a-filter",
+        ),
+    ],
+)
+def test_unsound_image_streams_are_refused(
+    tmp_path: Path,
+    data: bytes,
+    filters: str,
+    entries: str,
+    problem: str,
+) -> None:
+    """A stream that announces too many pixels, or lacks some, is refused."""
+    ref = _stream_image(tmp_path, data, filters, entries)
+    assert (ref.problem, ref.readable, ref.source) == (problem, False, None)
+
+
+@pytest.mark.parametrize(
+    ("data", "filters", "entries", "image_format"),
+    [
+        pytest.param(_PIXELS, "", _RGB, "raw", id="raw"),
+        pytest.param(
+            zlib.compress(_PIXELS),
+            "/FlateDecode",
+            _RGB,
+            "flate",
+            id="flate",
+        ),
+        pytest.param(
+            zlib.compress(
+                b"".join(
+                    b"\x00" + _PIXELS[row : row + 1200]
+                    for row in range(0, len(_PIXELS), 1200)
+                ),
+            ),
+            "/Fl",
+            _PNG_ROWS,
+            "flate",
+            id="flate-with-png-predictor",
+        ),
+        pytest.param(
+            _run_length_literals(_PIXELS),
+            "/RunLengthDecode",
+            _RGB,
+            "runlength",
+            id="run-length-literals",
+        ),
+        pytest.param(
+            base64.a85encode(zlib.compress(_PIXELS)) + b"~>",
+            "[/ASCII85Decode /FlateDecode]",
+            _RGB,
+            "flate",
+            id="ascii85-flate",
+        ),
+        pytest.param(
+            binascii.hexlify(zlib.compress(_PIXELS), b" ", 32) + b">",
+            "[/AHx /Fl]",
+            _RGB,
+            "flate",
+            id="ascii-hex-flate",
+        ),
+        pytest.param(_JPEG, "/DCT", _RGB, "jpeg", id="dct"),
+        pytest.param(
+            _JPEG,
+            "/DCTDecode",
+            _PNG_ROWS,
+            "jpeg",
+            id="dct-with-ignored-predictor",
+        ),
+        pytest.param(
+            b"\x00" * 16 + _JPEG,
+            "/DCTDecode",
+            _RGB,
+            "jpeg",
+            id="bytes-before-soi",
+        ),
+        pytest.param(
+            cmyk_encoded("JPEG"),
+            "/DCTDecode",
+            _CMYK,
+            "jpeg",
+            id="cmyk-jpeg",
+        ),
+        pytest.param(_JPX, "/JPXDecode", _RGB, "jpx", id="jpx"),
+        pytest.param(
+            cmyk_encoded("JPEG2000"),
+            "/JPXDecode",
+            _CMYK,
+            "jpx",
+            id="cmyk-jpx",
+        ),
+        pytest.param(
+            ccitt_group4(drawing("setup")),
+            "/CCITTFaxDecode",
+            _GROUP_4,
+            "ccitt",
+            id="ccitt",
+        ),
+        pytest.param(
+            base64.a85encode(_JPEG) + b"~>",
+            "[/ASCII85Decode /DCTDecode]",
+            _RGB,
+            "jpeg",
+            id="ascii85-jpeg",
+        ),
+        pytest.param(
+            base64.a85encode(_JPEG, wrapcol=72) + b"\n~>",
+            "[/ASCII85Decode /DCTDecode]",
+            f"{_RGB} /DecodeParms [<< /Predictor 2 >> null]",
+            "jpeg",
+            id="ascii85-jpeg-with-ignored-predictor",
+        ),
+        pytest.param(
+            binascii.hexlify(_JPEG) + b">",
+            "[/AHx /DCT]",
+            _RGB,
+            "jpeg",
+            id="ascii-hex-jpeg",
+        ),
+        pytest.param(
+            zlib.compress(_JPEG),
+            "[/Fl /DCTDecode]",
+            _RGB,
+            "jpeg",
+            id="flate-jpeg",
+        ),
+        pytest.param(
+            base64.a85encode(_JPX) + b"~>",
+            "[/A85 /JPXDecode]",
+            _RGB,
+            "jpx",
+            id="ascii85-jpx",
+        ),
+        pytest.param(
+            zlib.compress(_JPX),
+            "[/FlateDecode /JPXDecode]",
+            _RGB,
+            "jpx",
+            id="flate-jpx",
+        ),
+    ],
+)
+def test_sound_image_streams_are_read(
+    tmp_path: Path,
+    data: bytes,
+    filters: str,
+    entries: str,
+    image_format: str,
+) -> None:
+    """Each chain of filters that generators write is read when sound."""
+    ref = _stream_image(tmp_path, data, filters, entries)
+    assert (ref.format, ref.width, ref.height, ref.problem) == (
+        image_format,
+        400,
+        250,
+        None,
+    )
+    assert ref.quality == (90 if image_format == "jpeg" else None)
+
+
+def test_a_run_of_ff_is_read_in_linear_time(tmp_path: Path) -> None:
+    """A frame header sought past 100,000 bytes 0xFF takes little time."""
+    data = b"\xff\xd8" + b"\xff" * 100_000 + b"\x00"
+    start = time.perf_counter()
+    ref = _stream_image(tmp_path, data, "/DCTDecode")
+    assert time.perf_counter() - start < 2.0
+    assert ref.problem == CANNOT_DECODE
+
+
+@pytest.mark.parametrize(
+    ("data", "problem"),
+    [(_JPEG, None), (_HUGE_JPEG, TOO_LARGE)],
+)
+def test_inline_wrapped_jpegs_are_checked(
+    tmp_path: Path,
+    data: bytes,
+    problem: str | None,
+) -> None:
+    """An inline JPEG in an ASCIIHex layer is read, or refused, as others."""
+    content = (
+        "q 200 0 0 125 72 600 cm"
+        " BI /W 400 /H 250 /CS /RGB /BPC 8 /F [/AHx /DCT] ID\n"
+        f"{binascii.hexlify(data, b'\n', 64).decode()}>\nEI Q"
+    )
+    path = build_single_page_pdf(
+        tmp_path / "inline.pdf",
+        content,
+        page="/MediaBox [0 0 595 842]",
+    )
+    (image,) = _all_images(path)
+    assert (image.ref.format, image.ref.problem) == ("jpeg", problem)
+
+
+@pytest.mark.parametrize(
+    ("padding", "expected"),
+    [
+        (1_000_000, (True, 400, 250, 90, None)),
+        (17_000_000, (False, None, None, None, CANNOT_DECODE)),
+    ],
+)
+def test_an_ascii_wrapped_jpeg_is_read_up_to_16_mb(
+    tmp_path: Path,
+    padding: int,
+    expected: tuple[bool, int | None, int | None, int | None, str | None],
+) -> None:
+    """A JPEG in ASCII85 is read up to 16 MB of stream, and refused past."""
+    text = base64.a85encode(_JPEG) + b" " * padding + b"~>"
+    ref = _stream_image(tmp_path, text, "[/ASCII85Decode /DCTDecode]")
+    assert (
+        ref.readable,
+        ref.width,
+        ref.height,
+        ref.quality,
+        ref.problem,
+    ) == expected
+
+
+@pytest.mark.parametrize("stop", [b"\x00", b"\x0c"])
+@pytest.mark.parametrize(
+    ("padding", "problem"),
+    [(0, TOO_LARGE), (17_000_000, CANNOT_DECODE)],
+)
+def test_a_jpeg_after_an_ascii85_layer_ended_at_once_is_refused(
+    tmp_path: Path,
+    stop: bytes,
+    padding: int,
+    problem: str,
+) -> None:
+    """PDFium decodes the raw stream past an empty layer: it is checked."""
+    layer = stop + base64.a85encode(_JPEG) + b"~>"
+    path = build_image_stream_pdf(
+        tmp_path / "s.pdf",
+        layer + _HUGE_JPEG + b" " * padding,
+        filters="[/A85 /DCT]",
+    )
+    start = time.perf_counter()
+    (image,) = _all_images(path)
+    assert time.perf_counter() - start < 1.0
+    assert (image.ref.problem, image.ref.readable) == (problem, False)
+
+
+def test_an_ascii_wrapped_jpeg_drawn_on_many_pages_is_read_quickly(
+    tmp_path: Path,
+) -> None:
+    """A 16 MB stream of few bytes behind a long head, on 20 pages."""
+    head = b"\xff\xd8" + b"\xff" * 1_010_000 + b"\xe0\x00\x02"
+    text = base64.a85encode(head + b"\xff\xe0\x00\x02" * 5000)
+    window = 1 << 14
+    text += b" " * (-len(text) % window)
+    groups = (15_900_000 - len(text)) // window
+    text += (b"!!!!!" + b" " * (window - 5)) * groups + b"~>"
+    path = build_image_stream_pdf(
+        tmp_path / "s.pdf",
+        text,
+        filters="[/A85 /DCT]",
+        pages=20,
+    )
+    start = time.perf_counter()
+    images = _all_images(path)
+    assert time.perf_counter() - start < 10.0
+    assert {image.ref.problem for image in images} == {CANNOT_DECODE}
+    assert len(images) == 20
