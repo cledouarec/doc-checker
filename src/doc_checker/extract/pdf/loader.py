@@ -1,23 +1,28 @@
 # Copyright 2026 Christophe Le Douarec
 """Load a PDF file into a document.
 
-The pages are read one at a time, and only the line segments of each page are
-kept. The running headers, footers and page numbers are removed, the segments
-of each page are ordered into lines, and the lines are grouped into blocks
-across page and column breaks. Then the text of each block is joined, and the
-block gets its kind: contents or index, code, heading, list item, caption or
-paragraph.
+The pages are read one at a time, and only the line segments and the images of
+each page are kept. The running headers, footers and page numbers are removed,
+the segments of each page are ordered into lines, and the lines are grouped
+into blocks across page and column breaks. Then the text of each block is
+joined, and the block gets its kind: contents or index, code, heading, list
+item, caption or paragraph. The images repeated on many pages are removed, and
+each other image becomes a block, before the first block that starts under its
+top.
 """
 
 import re
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
+from itertools import islice
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.errors import InputError
 from doc_checker.extract.common import (
     assign_section_paths,
+    image_warnings,
     normalized_block,
+    repeated_images,
     strip_caption_numbers,
     strip_heading_numbers,
 )
@@ -33,6 +38,7 @@ from doc_checker.extract.pdf.joining import code_text, prose_text, vocabulary
 from doc_checker.extract.pdf.kinds import is_caption, toc_pages
 from doc_checker.extract.pdf.layout import page_lines
 from doc_checker.extract.pdf.reader import (
+    MAX_PAGE_FIGURES,
     open_pdf,
     read_bookmarks,
     read_metadata,
@@ -41,6 +47,7 @@ from doc_checker.extract.pdf.reader import (
 from doc_checker.extract.pdf.segments import body_size, build_segments
 from doc_checker.model.document import (
     HEADING_SOURCE,
+    Block,
     BlockKind,
     Document,
     SourceRef,
@@ -57,9 +64,14 @@ if TYPE_CHECKING:
     from doc_checker.config import PdfConfig
     from doc_checker.extract.pdf.blocks import DraftBlock
     from doc_checker.extract.pdf.catalog import PdfCatalog
-    from doc_checker.extract.pdf.reader import Bookmark, PdfPageText
+    from doc_checker.extract.pdf.layout import Line
+    from doc_checker.extract.pdf.reader import (
+        Bookmark,
+        PdfImage,
+        PdfPageText,
+    )
     from doc_checker.extract.pdf.segments import Segment
-    from doc_checker.model.document import Block, HeadingSource
+    from doc_checker.model.document import HeadingSource
 
 SCANNED_MIN_COVERAGE: Final = 0.5  # Smallest image share of a scanned page.
 SCANNED_LABELS_MAX: Final = 10  # Most page labels that a warning lists.
@@ -67,6 +79,7 @@ LANG_SAMPLE_BLOCKS: Final = 200  # Blocks whose text tells the language.
 
 _DIGITS: Final = re.compile(r"\d+")
 _MORE_LABELS: Final = f", {ELLIPSIS}"  # Ends a list of labels that goes on.
+_IMAGE_CHROME: Final = "image_chrome"  # Images removed as page chrome.
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +94,10 @@ class _Page:
             character.
         angled: Number of characters left out because they do not follow the
             direction of the page.
+        images: The raster images and the vector figures of the page,
+            unless they were not read.
+        unrendered: Number of vector figures not rendered because they come
+            after the first `MAX_PAGE_FIGURES` of the page.
     """
 
     label: str
@@ -88,6 +105,25 @@ class _Page:
     image_coverage: float
     segments: tuple[Segment, ...]
     angled: int
+    images: tuple[PdfImage, ...]
+    unrendered: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _PlacedImage:
+    """An image block, and where its image lies.
+
+    Attributes:
+        page: Position of the page of the image, from 0.
+        top: Top edge of the image on its page turned upright, in points.
+        x0: Left edge of the image.
+        block: The image block.
+    """
+
+    page: int
+    top: float
+    x0: float
+    block: Block
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,39 +155,45 @@ def _read_page(
     pdf: pdfium.PdfDocument,
     index: int,
     path: Path,
+    *,
+    images: bool,
 ) -> PdfPageText:
-    """Read the characters of a page.
+    """Read the characters and the images of a page.
 
     Args:
         pdf: The document, opened by `open_pdf`.
         index: Position of the page, from 0.
         path: The PDF file, which the error names.
+        images: Whether the images are read.
 
     Returns:
-        The characters of the page, as `read_page` returns them.
+        The characters and the images of the page, as `read_page` returns
+        them.
 
     Raises:
         InputError: If the page cannot be read.
     """
     try:
-        return read_page(pdf, index)
+        return read_page(pdf, index, images=images)
     except InputError as exc:
         msg = f"cannot read {path}: {exc}"
         raise InputError(msg) from None
 
 
-def _read(path: Path, counter: Counter[str]) -> _PdfFile:
+def _read(path: Path, counter: Counter[str], *, images: bool) -> _PdfFile:
     """Read the catalog, the outline, the metadata and the pages of a PDF.
 
-    The pages are read one at a time, and each one keeps its segments only,
-    not its characters.
+    The pages are read one at a time, and each one keeps its segments and
+    its images only, not its characters.
 
     Args:
         path: The PDF file.
         counter: The counts of the normalizations, in which `artifact` goes
             up by the characters dropped as artifacts, `unicode_map` by the
-            characters without Unicode mapping, and `angled_text` by the
-            characters left out for their angle.
+            characters without Unicode mapping, `angled_text` by the
+            characters left out for their angle, and `figure_text` by the
+            characters left out as drawn in a vector figure.
+        images: Whether the images are read.
 
     Returns:
         What is read from the file.
@@ -162,10 +204,11 @@ def _read(path: Path, counter: Counter[str]) -> _PdfFile:
         title, generator = read_metadata(pdf)
         pages = []
         for index in range(len(pdf)):
-            page = _read_page(pdf, index, path)
+            page = _read_page(pdf, index, path, images=images)
             _count(counter, "artifact", page.artifacts)
             _count(counter, "unicode_map", page.unmapped)
             _count(counter, "angled_text", page.angled)
+            _count(counter, "figure_text", page.figure_chars)
             segments = tuple(build_segments(page))
             pages.append(
                 _Page(
@@ -174,6 +217,8 @@ def _read(path: Path, counter: Counter[str]) -> _PdfFile:
                     page.image_coverage,
                     segments,
                     page.angled,
+                    page.images,
+                    page.unrendered,
                 ),
             )
     return _PdfFile(catalog, bookmarks, title, generator, tuple(pages))
@@ -343,12 +388,99 @@ def _kind(
     return BlockKind.PARAGRAPH, text
 
 
+def _placed_images(
+    pdf: _PdfFile,
+    *,
+    file: str,
+    share: float,
+    counter: Counter[str],
+) -> list[_PlacedImage]:
+    """Make the image blocks of a document, without its image chrome.
+
+    An image whose content comes back on enough pages, as `repeated_images`
+    tells with the share of the pages, is chrome, such as a logo: it is
+    removed.
+
+    Args:
+        pdf: What is read from the file.
+        file: The name of the PDF file, which the blocks point to.
+        share: Least share of the pages on which an image is chrome.
+        counter: The counts of the normalizations, in which `image_chrome`
+            goes up by one for each image removed.
+
+    Returns:
+        The image blocks that are kept, with where their images lie, by
+        page, then from the top of the page down, then from left to right.
+    """
+    per_page = [
+        [
+            Block(
+                kind=BlockKind.IMAGE,
+                text="",
+                raw_text="",
+                source=SourceRef(file, page=index + 1),
+                image=image.ref,
+            )
+            for image in page.images
+        ]
+        for index, page in enumerate(pdf.pages)
+    ]
+    chrome = repeated_images(per_page, share=share)
+    kept = [
+        _PlacedImage(index, image.top, image.x0, block)
+        for index, (page, blocks) in enumerate(
+            zip(pdf.pages, per_page, strict=True),
+        )
+        for image, block in zip(page.images, blocks, strict=True)
+        if image.ref.digest not in chrome
+    ]
+    found = sum(len(page.images) for page in pdf.pages)
+    _count(counter, _IMAGE_CHROME, found - len(kept))
+    return sorted(kept, key=lambda image: (image.page, -image.top, image.x0))
+
+
+def _with_images(
+    blocks: Sequence[Block],
+    starts: Sequence[Line],
+    images: Sequence[_PlacedImage],
+) -> list[Block]:
+    """Put each image block before the first block that starts under it.
+
+    An image goes before the first block whose first line is on a later page,
+    or on its page with its baseline under the top of the image. The images
+    that no block starts under follow the last block.
+
+    Args:
+        blocks: The blocks of text, in reading order.
+        starts: The first line of each block, in the same order.
+        images: The image blocks, as `_placed_images` sorts them.
+
+    Returns:
+        All the blocks, in reading order.
+    """
+    pending = deque(images)
+    placed: list[Block] = []
+    for block, start in zip(blocks, starts, strict=True):
+        while pending and (
+            pending[0].page < start.page
+            or (
+                pending[0].page == start.page
+                and pending[0].top > start.baseline
+            )
+        ):
+            placed.append(pending.popleft().block)
+        placed.append(block)
+    placed.extend(image.block for image in pending)
+    return placed
+
+
 def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
     drafts: Sequence[DraftBlock],
     texts: Sequence[str],
     *,
     levels: Mapping[int, tuple[int, HeadingSource]],
     kinds: Mapping[int, BlockKind],
+    images: Sequence[_PlacedImage],
     file: str,
     counter: Counter[str],
 ) -> list[Block]:
@@ -361,11 +493,14 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
             its block.
         kinds: The kind of each contents or index page, by position of the
             page.
+        images: The image blocks, as `_placed_images` sorts them.
         file: The name of the PDF file, which the blocks point to.
         counter: The counts of the normalizations.
 
     Returns:
-        The blocks, each located on the page of its first line.
+        The blocks, each located on the page of its first line, and the image
+        blocks among them, each before the first block that starts under its
+        image.
     """
     blocks = []
     for index, (draft, text) in enumerate(zip(drafts, texts, strict=True)):
@@ -388,6 +523,7 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
                 attrs={HEADING_SOURCE: levels[index][1]} if heading else None,
             ),
         )
+    blocks = _with_images(blocks, [draft.lines[0] for draft in drafts], images)
     blocks = strip_heading_numbers(blocks, counter)
     blocks = strip_caption_numbers(blocks, counter)
     assign_section_paths(blocks)
@@ -456,7 +592,31 @@ def _angled_warnings(pdf: _PdfFile) -> list[str]:
     return [f"{len(labels)} page(s) with text at an angle, left out: {listed}"]
 
 
-def load_pdf(path: Path, cfg: PdfConfig, *, lang: str) -> Document:
+def _figure_warnings(pdf: _PdfFile) -> list[str]:
+    """Warn about the pages with more vector figures than are rendered.
+
+    Args:
+        pdf: What is read from the file.
+
+    Returns:
+        One warning for each page whose figures after the first
+        `MAX_PAGE_FIGURES` were not rendered, in page order.
+    """
+    return [
+        f"page {page.label}: {page.unrendered} vector figure(s) not rendered,"
+        f" beyond the first {MAX_PAGE_FIGURES}"
+        for page in pdf.pages
+        if page.unrendered
+    ]
+
+
+def load_pdf(
+    path: Path,
+    cfg: PdfConfig,
+    *,
+    lang: str,
+    images: bool = True,
+) -> Document:
     """Load a PDF file.
 
     A file that cannot be read, that a user password protects, or that has a
@@ -466,15 +626,17 @@ def load_pdf(path: Path, cfg: PdfConfig, *, lang: str) -> Document:
         path: The PDF file.
         cfg: PDF extraction settings.
         lang: Language requested by the user, or ``"auto"``.
+        images: Whether the raster images give blocks and are read.
 
     Returns:
         The document, its blocks in reading order. Its chrome lists the texts
         removed as running headers, footers and page numbers, and its
         warnings the pages that are probably scanned, then those whose text
-        at an angle was left out.
+        at an angle was left out, then those with more vector figures than
+        are rendered, then the images that could not be read.
     """
     counter: Counter[str] = Counter()
-    pdf = _read(path, counter)
+    pdf = _read(path, counter, images=images)
     body = body_size(page.segments for page in pdf.pages)
     kept, chrome = _strip_chrome(pdf, body=body, cfg=cfg, counter=counter)
     kinds, drafts = _drafts(kept, body=body, counter=counter)
@@ -485,10 +647,21 @@ def load_pdf(path: Path, cfg: PdfConfig, *, lang: str) -> Document:
         texts,
         levels=levels,
         kinds=kinds,
+        images=_placed_images(
+            pdf,
+            file=path.name,
+            share=cfg.repeat_share,
+            counter=counter,
+        ),
         file=path.name,
         counter=counter,
     )
-    sample = " ".join(block.text for block in blocks[:LANG_SAMPLE_BLOCKS])
+    sample = " ".join(
+        islice(
+            (b.text for b in blocks if b.kind is not BlockKind.IMAGE),
+            LANG_SAMPLE_BLOCKS,
+        ),
+    )
     declared = declared_language(pdf.catalog.lang)
     return Document(
         path=path,
@@ -501,6 +674,11 @@ def load_pdf(path: Path, cfg: PdfConfig, *, lang: str) -> Document:
         normalization=counter,
         chrome=chrome,
         chrome_keys=frozenset(),
-        warnings=[*_scanned_warnings(pdf, kept), *_angled_warnings(pdf)],
+        warnings=[
+            *_scanned_warnings(pdf, kept),
+            *_angled_warnings(pdf),
+            *_figure_warnings(pdf),
+            *image_warnings(blocks),
+        ],
         tagged=pdf.catalog.tagged,
     )

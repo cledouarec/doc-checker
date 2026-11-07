@@ -36,6 +36,7 @@ from doc_checker.images.pixels import (
     OUTSIDE,
     TOO_LARGE,
     UnreadableImage,
+    read_image_file,
 )
 from doc_checker.images.refs import content_digest, raster_ref, unreadable_ref
 from doc_checker.images.svg import (
@@ -336,37 +337,6 @@ def _data_url_ref(raw: RawImage, url: str, start: int) -> ImageRef:
     )
 
 
-def _read_file(file: Path) -> bytes:
-    """Read an image file, its size checked before it is read.
-
-    Args:
-        file: The resolved file, under the root of the site.
-
-    Returns:
-        Its bytes.
-
-    Raises:
-        UnreadableImage: `NOT_FOUND` if it is not a file or cannot be read,
-            `TOO_LARGE` beyond `MAX_FILE_BYTES`.
-    """
-    try:
-        size = file.stat().st_size if file.is_file() else None
-    except OSError:
-        size = None
-    if size is None:
-        raise UnreadableImage(NOT_FOUND)
-    if size > MAX_FILE_BYTES:
-        raise UnreadableImage(TOO_LARGE)
-    try:
-        with file.open("rb") as stream:
-            data = stream.read(MAX_FILE_BYTES + 1)
-    except OSError:
-        raise UnreadableImage(NOT_FOUND) from None
-    if len(data) > MAX_FILE_BYTES:
-        raise UnreadableImage(TOO_LARGE)
-    return data
-
-
 @dataclass(frozen=True, slots=True)
 class ImageResolver:
     """Read the images of the pages of a site.
@@ -467,7 +437,7 @@ class ImageResolver:
             return _unreadable(raw, printable(target), problem)
         try:
             file = self._site_file(path)
-            data = _read_file(file)
+            data = read_image_file(file, MAX_FILE_BYTES)
         except UnreadableImage as error:
             return _unreadable(raw, path, error.reason)
         if _format(path) == _SVG_FORMAT or _looks_like_svg(data):

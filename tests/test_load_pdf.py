@@ -3,6 +3,7 @@
 
 import re
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,14 +14,19 @@ from doc_checker.config import Config, PdfConfig
 from doc_checker.errors import InputError
 from doc_checker.extract import detect_format, load_document
 from doc_checker.extract.pdf import load_pdf
-from doc_checker.model.document import HEADING_SOURCE, BlockKind
-from tests.builders import SAMPLE_EN, SAMPLE_FR
+from doc_checker.images.pixels import TOO_LARGE
+from doc_checker.model.document import HEADING_SOURCE, NUMBER_ATTR, BlockKind
+from tests.builders import FIGURES_EN, SAMPLE_EN, SAMPLE_FR
 from tests.pdf_builders import (
     build_fpdf2_pdf,
+    build_images_pdf,
     build_listing_pdf,
+    build_ornaments_pdf,
+    build_oversized_image_pdf,
     build_raw_pdf,
     build_reportlab_pdf,
     build_scanned_pdf,
+    build_shared_resources_pdf,
     build_turned_pdf,
 )
 
@@ -171,7 +177,14 @@ def test_scanned_page_and_artifacts(pdfs: dict[str, Path]) -> None:
     """A page of images is reported, and artifacts are no chrome."""
     doc = _load(pdfs["scan"])
     assert doc.warnings == ["1 page(s) without text, probably scanned: 10"]
-    assert all(b.source.page != 10 for b in doc.blocks)
+    assert all(
+        b.source.page != 10
+        for b in doc.blocks
+        if b.kind is not BlockKind.IMAGE
+    )
+    assert [b.kind for b in doc.blocks if b.source.page == 10] == [
+        BlockKind.IMAGE,
+    ]
     assert (doc.chrome, doc.normalization["artifact"] > 0) == ([], True)
     assert "Draft" not in {b.text for b in doc.blocks}
 
@@ -180,6 +193,8 @@ def test_fully_scanned_pdf(tmp_path: Path) -> None:
     """A PDF without text has no block and lists its first pages."""
     doc = _load(build_scanned_pdf(tmp_path / "scan.pdf", pages=12))
     assert (doc.blocks, doc.lang) == ([], None)
+    # The same scan on every page is chrome.
+    assert doc.normalization["image_chrome"] == 12
     assert doc.warnings == [
         (
             "12 page(s) without text, probably scanned: "
@@ -453,3 +468,137 @@ def test_numbers_and_chapter_labels_leave_headings(tmp_path: Path) -> None:
     assert "Chapter 1" not in {b.text for b in doc.blocks}
     # Three chapter labels, then nine heading numbers.
     assert doc.normalization["heading_number"] == 12
+
+
+def test_image_blocks_take_their_place(tmp_path: Path) -> None:
+    """An image comes after the text above it and before its caption."""
+    doc = load_pdf(
+        build_reportlab_pdf(FIGURES_EN, tmp_path / "a.pdf"),
+        PdfConfig(),
+        lang="en",
+    )
+    kinds = [b.kind for b in doc.blocks]
+    first = kinds.index(BlockKind.IMAGE)
+    assert doc.blocks[first - 1].text.startswith("The installer downloads")
+    assert (kinds[first + 1], doc.blocks[first + 1].text) == (
+        BlockKind.CAPTION,
+        "Steps of the installer",
+    )
+    assert doc.blocks[first].section_path == (
+        "Getting started",
+        "Installation",
+    )
+
+
+def test_logo_on_every_page_is_chrome(tmp_path: Path) -> None:
+    """A logo drawn on each page is chrome, and counted."""
+    doc = load_pdf(
+        build_reportlab_pdf(FIGURES_EN, tmp_path / "a.pdf", logo=True),
+        PdfConfig(),
+        lang="en",
+    )
+    pages = len(doc.parts)
+    assert (
+        sum(b.image is not None and not b.image.vector for b in doc.blocks)
+        == 3
+    )
+    assert doc.normalization["image_chrome"] == pages
+
+
+def test_pdf_with_hundreds_of_images_loads_quickly(tmp_path: Path) -> None:
+    """Three hundred pages with an image each load in bounded time."""
+    path = build_images_pdf(tmp_path / "many.pdf", pages=300)
+    start = time.perf_counter()
+    doc = load_pdf(path, PdfConfig(), lang="en")
+    assert time.perf_counter() - start < 30.0
+    assert sum(b.kind is BlockKind.IMAGE for b in doc.blocks) == 300
+
+
+def test_no_images_still_finds_scanned_pages(pdfs: dict[str, Path]) -> None:
+    """Without images, no block is an image, and scans are still reported."""
+    doc = load_document(pdfs["scan"], Config(images=False))
+    assert BlockKind.IMAGE not in {b.kind for b in doc.blocks}
+    assert doc.warnings == ["1 page(s) without text, probably scanned: 10"]
+
+
+def test_unreadable_image_is_a_warning(tmp_path: Path) -> None:
+    """An image whose pixels cannot be read is kept, with a warning."""
+    doc = _load(build_oversized_image_pdf(tmp_path / "large.pdf"))
+    images = [b.image for b in doc.blocks if b.image is not None]
+    assert [image.problem for image in images] == [TOO_LARGE]
+    assert doc.warnings == ["1 image(s) could not be read: page 1 image 1"]
+
+
+def _text(doc: Document) -> list[tuple[object, ...]]:
+    """Return what is compared of the blocks of text of a document."""
+    return [
+        (b.kind, b.text, b.level, b.attrs, b.section_path, b.source)
+        for b in doc.blocks
+        if b.kind is not BlockKind.IMAGE
+    ]
+
+
+def _text_counts(doc: Document) -> dict[str, int]:
+    """Return the normalization counts of a document, but of its images."""
+    return {
+        key: count
+        for key, count in doc.normalization.items()
+        if key != "image_chrome"
+    }
+
+
+@pytest.mark.parametrize("layout", ["ornaments", "figures"])
+def test_text_does_not_depend_on_the_images(
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    """Reading the images or not leaves the text and its counts the same."""
+    if layout == "ornaments":
+        path = build_ornaments_pdf(tmp_path / "o.pdf")
+    else:
+        path = build_reportlab_pdf(
+            FIGURES_EN,
+            tmp_path / "f.pdf",
+            chapter_labels=True,
+        )
+    read = load_document(path, Config())
+    skipped = load_document(path, Config(images=False))
+    assert BlockKind.IMAGE in {b.kind for b in read.blocks}
+    assert _text(read) == _text(skipped)
+    assert _text_counts(read) == _text_counts(skipped)
+
+
+def test_chapter_label_folds_past_an_ornament(tmp_path: Path) -> None:
+    """An image between a chapter label and its title stays before it."""
+    doc = _load(build_ornaments_pdf(tmp_path / "o.pdf"))
+    headings = [
+        (b.text, b.attrs.get(NUMBER_ATTR))
+        for b in doc.blocks
+        if b.kind is BlockKind.HEADING
+    ]
+    assert headings == [
+        ("Introduction", "Chapter 1"),
+        ("Usage", "Chapter 2"),
+        ("Reference", "Chapter 3"),
+        ("Appendix", "Chapter 4"),
+    ]
+    assert [b.kind for b in doc.blocks[:2]] == [
+        BlockKind.IMAGE,
+        BlockKind.HEADING,
+    ]
+    assert doc.normalization["heading_number"] == 4
+
+
+def test_pages_sharing_many_xobjects_load_quickly(tmp_path: Path) -> None:
+    """A thousand pages that share 5,000 XObjects load in bounded time."""
+    path = build_shared_resources_pdf(
+        tmp_path / "shared.pdf",
+        pages=1000,
+        xobjects=5000,
+    )
+    start = time.perf_counter()
+    doc = load_pdf(path, PdfConfig(), lang="en")
+    # About 3 s on a slow machine; a lookup of the XObjects of every page
+    # took 32 s on a desktop.
+    assert time.perf_counter() - start < 20.0
+    assert (doc.normalization["image_chrome"], doc.warnings) == (1000, [])
