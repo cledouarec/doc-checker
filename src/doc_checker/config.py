@@ -134,6 +134,7 @@ class Config:
         min_severity: Findings below this severity are not reported.
         formats: Report formats to write.
         output: Directory where the reports are written.
+        images: Whether the images are extracted and compared.
         html: HTML extraction settings.
         pdf: PDF extraction and comparison settings.
         compare: Comparison thresholds.
@@ -145,6 +146,7 @@ class Config:
     min_severity: Severity = Severity.INFO
     formats: tuple[str, ...] = DEFAULT_FORMATS
     output: Path = DEFAULT_OUTPUT
+    images: bool = True
     html: HtmlConfig = field(default_factory=HtmlConfig)
     pdf: PdfConfig = field(default_factory=PdfConfig)
     compare: CompareThresholds = field(default_factory=CompareThresholds)
@@ -164,6 +166,7 @@ class CliOverrides:
     exclude: tuple[str, ...] = ()
     disable: tuple[str, ...] = ()
     ignore_moves: bool = False
+    no_images: bool = False
 
 
 class _Section:
@@ -243,7 +246,9 @@ class _Section:
 
 
 def _parse_general(section: _Section, base_dir: Path, cwd: Path) -> Config:
-    section.check_keys(("lang", "min_severity", "formats", "output"))
+    section.check_keys(
+        ("lang", "min_severity", "formats", "output", "images"),
+    )
     formats = section.texts("formats", DEFAULT_FORMATS)
     for name in formats:
         if name not in AVAILABLE_FORMATS:
@@ -261,6 +266,7 @@ def _parse_general(section: _Section, base_dir: Path, cwd: Path) -> Config:
         min_severity=section.severity("min_severity", Severity.INFO),
         formats=formats,
         output=output,
+        images=section.flag("images", default=True),
     )
 
 
@@ -478,6 +484,8 @@ def apply_overrides(cfg: Config, overrides: CliOverrides) -> Config:
         rules=cfg.ignore.rules + overrides.disable + moved,
     )
     changes: dict[str, object] = {"html": html, "ignore": ignore}
+    if overrides.no_images:
+        changes["images"] = False
     for name in ("lang", "min_severity", "formats", "output"):
         value = getattr(overrides, name)
         if value is not None:

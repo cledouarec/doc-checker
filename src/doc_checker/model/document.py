@@ -110,6 +110,78 @@ class Link:
         return f"{self.page}#{self.fragment}" if self.fragment else self.page
 
 
+@dataclass(frozen=True, slots=True)
+class PixelSource:
+    """Where the pixels of an image are read again, on demand.
+
+    Attributes:
+        file: Image file of an HTML site, already checked to be under it.
+        data: Bytes of an image written in a data URL.
+        page: Page of a PDF image or figure, from 0.
+        index: Position of a PDF image among the image objects of its page,
+            in the order of ``get_objects(filter=[IMAGE], max_depth=2)``.
+        box: Left, bottom, right and top of a PDF vector figure, in the
+            coordinates of PDFium for its page, to render it again.
+    """
+
+    file: Path | None = None
+    data: bytes | None = field(default=None, repr=False)
+    page: int | None = None
+    index: int | None = None
+    box: tuple[float, float, float, float] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ImageRef:
+    """An image of a document, or a vector figure of a PDF.
+
+    Attributes:
+        name: Site relative path of an HTML image file, normalized URL of
+            an external image, or "" (PDF image, data URL, inline SVG).
+        format: Lower case encoding: png, jpeg, gif, webp, bmp, tiff, svg,
+            jpx, jbig2, ccitt, flate, raw, vector (a PDF figure), or "".
+        digest: Content digest, 32 hexadecimal characters.
+        width: Width in pixels, if the pixels were read.
+        height: Height in pixels, if the pixels were read.
+        shown: Displayed width and height: CSS pixels of the HTML
+            attributes, or points of the box of a PDF image.
+        dpi: Effective resolution of a PDF raster image.
+        alt: Alternative text; None when absent, "" when decorative.
+        vector: Whether the image is a drawing (SVG, PDF figure).
+        phash: Perceptual hash, 64 bits, if the pixels were read.
+        dhash: Difference hash, 64 bits, if the pixels were read.
+        quality: Estimated JPEG quality, for a JPEG.
+        alpha: Whether the image uses transparency; None when unknown.
+        size: Size of the encoded image, in bytes.
+        texts: Texts of an SVG, in document order.
+        source: Where the pixels are read again; None without pixels.
+        problem: Why the pixels cannot be read, such as "too large".
+    """
+
+    name: str
+    format: str
+    digest: str
+    width: int | None = None
+    height: int | None = None
+    shown: tuple[float, float] | None = None
+    dpi: float | None = None
+    alt: str | None = None
+    vector: bool = False
+    phash: int | None = None
+    dhash: int | None = None
+    quality: int | None = None
+    alpha: bool | None = None
+    size: int | None = None
+    texts: tuple[str, ...] = ()
+    source: PixelSource | None = None
+    problem: str | None = None
+
+    @property
+    def readable(self) -> bool:
+        """Whether the pixels were read: the image has its hashes."""
+        return self.phash is not None
+
+
 @dataclass(slots=True)
 class Block:
     """A unit of content: heading, paragraph, list item, table, code...
@@ -131,6 +203,7 @@ class Block:
             align blocks.
         links: Links of the block, in document order.
         anchors: Identifiers that designate the block, in document order.
+        image: The image of an `IMAGE` block.
     """
 
     kind: BlockKind
@@ -144,6 +217,7 @@ class Block:
     key_loose: str = ""
     links: tuple[Link, ...] = ()
     anchors: tuple[str, ...] = ()
+    image: ImageRef | None = None
 
 
 def carry_anchors(
