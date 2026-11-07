@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING
 
+import lxml.etree
 import lxml.html
 import pytest
 
@@ -14,7 +15,13 @@ from doc_checker.extract.html.ordering import (
     path_sort_key,
     resolve_href,
 )
-from doc_checker.extract.html.site import HtmlPage, discover_pages, parse_page
+from doc_checker.extract.html.site import (
+    HtmlPage,
+    discover_pages,
+    drops_cdata,
+    keep_cdata,
+    parse_page,
+)
 from tests.builders import make_block
 
 if TYPE_CHECKING:
@@ -74,6 +81,34 @@ def test_parse_empty_page_raises(tmp_path: Path) -> None:
     path = _write(tmp_path / "a.html", b"")
     with pytest.raises(InputError, match=r"cannot parse a\.html"):
         parse_page(path, "a.html")
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b"<p><![CDATA[x]]></p>", b"<p><!--[CDATA[x]]--></p>"),
+        (
+            b"<![CDATA[a > b\n]]> and <![CDATA[c]]>",
+            b"<!--[CDATA[a > b\n]]--> and <!--[CDATA[c]]-->",
+        ),
+        (b"<p>a ]]> b</p>", b"<p>a ]]> b</p>"),
+        (b"<![CDATA[a]]><![CDATA[b", b"<!--[CDATA[a]]--><![CDATA[b"),
+        (
+            b"<!-- <![CDATA[a]]> --><![CDATA[b]]>",
+            b"<!-- <![CDATA[a]]> --><!--[CDATA[b]]-->",
+        ),
+        (b"<!-- <![CDATA[a]]>", b"<!-- <![CDATA[a]]>"),
+    ],
+    ids=["one", "several", "none", "unclosed", "commented", "open-comment"],
+)
+def test_keep_cdata(data: bytes, expected: bytes) -> None:
+    """Each CDATA section outside a comment becomes a comment."""
+    assert keep_cdata(data) == expected
+
+
+def test_drops_cdata_before_libxml2_2_14() -> None:
+    """The HTML parser of libxml2 drops a CDATA section before 2.14 only."""
+    assert drops_cdata() is (lxml.etree.LIBXML_VERSION < (2, 14))
 
 
 def test_redirect_page(tmp_path: Path) -> None:

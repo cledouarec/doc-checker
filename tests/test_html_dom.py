@@ -1,6 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for generator profiles and DOM to block conversion."""
 
+from collections import Counter
 from typing import TYPE_CHECKING
 
 import lxml.html
@@ -8,12 +9,14 @@ import pytest
 
 from doc_checker.errors import ConfigError
 from doc_checker.extract.html.dom import blocks_from_root, strip_elements
+from doc_checker.extract.html.images import best_source
 from doc_checker.extract.html.profiles import (
     GLOBAL_STRIP,
     content_root,
     detect_profile,
     get_profile,
 )
+from doc_checker.model.document import BlockKind
 
 if TYPE_CHECKING:
     from lxml.html import HtmlElement
@@ -247,3 +250,117 @@ def test_link_texts_of_blocks_are_printable() -> None:
     )
     (block,) = blocks_from_root(root.body)
     assert block.links == (("a b", "a.html"),)
+
+
+def test_images_follow_their_text_and_precede_captions() -> None:
+    """An image of a paragraph follows it, a figure precedes its caption."""
+    root = _root(
+        '<p>See <img src="a.png" alt="A"> here.</p>'
+        '<figure id="f"><img src="b.png" srcset="b1.png 1x, b2.png 2x">'
+        "<figcaption>Caption</figcaption></figure>",
+    )
+    blocks = blocks_from_root(root.body)
+    assert [(b.kind, b.text) for b in blocks] == [
+        (BlockKind.PARAGRAPH, "See here."),
+        (BlockKind.IMAGE, ""),
+        (BlockKind.IMAGE, ""),
+        (BlockKind.CAPTION, "Caption"),
+    ]
+    first, second = blocks[1].image, blocks[2].image
+    assert first is not None
+    assert second is not None
+    assert (first.src, first.alt, second.src, second.alt) == (
+        "a.png",
+        "A",
+        "b2.png",
+        None,
+    )
+    assert blocks[2].ids == ("f",)
+
+
+def test_inline_svg_is_an_image_not_text() -> None:
+    """The texts of an inline SVG never reach a paragraph."""
+    root = _root(
+        "<p>Before the drawing.</p>"
+        '<svg viewBox="0 0 300 200"><text>Label</text></svg>'
+        "<p>After the drawing.</p>",
+    )
+    blocks = blocks_from_root(root.body)
+    assert [b.kind for b in blocks] == [
+        BlockKind.PARAGRAPH,
+        BlockKind.IMAGE,
+        BlockKind.PARAGRAPH,
+    ]
+    image = blocks[1].image
+    assert image is not None
+    assert image.svg is not None
+    assert image.svg.texts == ("Label",)
+
+
+def test_icons_are_counted_not_kept() -> None:
+    """Icons of a theme or emoji images give no image block."""
+    counter: Counter[str] = Counter()
+    root = _root(
+        '<p>Note <svg viewBox="0 0 24 24"><path d="M0 0"/></svg> and '
+        '<img class="twemoji" src="e.svg" alt=":)"> here.</p>',
+    )
+    blocks = blocks_from_root(root.body, counter=counter)
+    assert [b.kind for b in blocks] == [BlockKind.PARAGRAPH]
+    assert counter["icon"] == 2
+
+
+def test_images_can_be_left_out() -> None:
+    """Without images, the identifiers of a figure go to its caption."""
+    root = _root(
+        '<figure id="f"><img src="b.png"><figcaption>Caption</figcaption>'
+        "</figure>",
+    )
+    (caption,) = blocks_from_root(root.body, images=False)
+    assert (caption.kind, caption.ids) == (BlockKind.CAPTION, ("f",))
+
+
+def test_alt_falls_back_on_the_aria_label() -> None:
+    """Pandoc writes the alternative text as an ARIA label."""
+    root = _root('<p><img role="img" aria-label="Chart" src="c.png"></p>')
+    (image,) = blocks_from_root(root.body)
+    assert image.image is not None
+    assert image.image.alt == "Chart"
+
+
+@pytest.mark.parametrize(
+    ("src", "srcset", "expected"),
+    [
+        ("a.png", None, "a.png"),
+        ("a.png", "a-400.png 400w, a-800.png 800w", "a-800.png"),
+        (None, "a.png, a@2x.png 2x", "a@2x.png"),
+        (" a.png ", "  ", "a.png"),
+        (None, None, None),
+    ],
+)
+def test_best_source(
+    src: str | None,
+    srcset: str | None,
+    expected: str | None,
+) -> None:
+    """The largest candidate of a source set wins."""
+    assert best_source(src, srcset) == expected
+
+
+def test_images_of_formulas_are_not_figures() -> None:
+    """Formulas drawn by KaTeX, MathJax or as pictures give no image."""
+    counter: Counter[str] = Counter()
+    root = _root(
+        '<p>Inline <span class="math inline"><img class="math inline" '
+        'src="https://latex.example/x.png" alt="x^2"></span> and '
+        '<span class="katex"><svg viewBox="0 0 400000 1080">'
+        '<path d="M0 0"/></svg></span> formulas.</p>'
+        '<mjx-container class="MathJax" display="true">'
+        '<svg viewBox="0 -750 5000 1000"><path d="M0 0"/></svg>'
+        "</mjx-container><p>After the formulas.</p>",
+    )
+    blocks = blocks_from_root(root.body, counter=counter)
+    assert [b.kind for b in blocks] == [
+        BlockKind.PARAGRAPH,
+        BlockKind.PARAGRAPH,
+    ]
+    assert counter["icon"] == 0

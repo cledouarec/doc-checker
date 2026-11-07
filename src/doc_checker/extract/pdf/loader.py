@@ -18,6 +18,7 @@ from doc_checker.errors import InputError
 from doc_checker.extract.common import (
     assign_section_paths,
     normalized_block,
+    strip_caption_numbers,
     strip_heading_numbers,
 )
 from doc_checker.extract.pdf.blocks import (
@@ -388,6 +389,7 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
             ),
         )
     blocks = strip_heading_numbers(blocks, counter)
+    blocks = strip_caption_numbers(blocks, counter)
     assign_section_paths(blocks)
     return blocks
 

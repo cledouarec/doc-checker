@@ -36,14 +36,36 @@ _URL_EDGES: Final = "".join(chr(code) for code in range(0x21))
 _URL_BREAKS: Final = re.compile(r"[\t\n\r]")
 
 
-def _cleaned(href: str) -> str:
-    """Return a link target as a browser reads it."""
+def clean_href(href: str) -> str:
+    """Return a link target as a browser reads it.
+
+    Args:
+        href: Target as written in the page, such as an ``href`` or the
+            source of an image.
+
+    Returns:
+        The target without the controls and spaces at either end, then
+        without its tabs and line breaks.
+    """
     return _URL_BREAKS.sub("", href.strip(_URL_EDGES))
 
 
 def _is_external(href: str) -> bool:
     """Return whether a cleaned link target has a scheme or a host."""
     return href.startswith(_SCHEME_RELATIVE) or bool(SCHEME.match(href))
+
+
+def is_external(href: str) -> bool:
+    """Return whether a target, as a browser reads it, has a scheme or a host.
+
+    Args:
+        href: Target as written in the page.
+
+    Returns:
+        Whether it has a scheme, such as ``https:`` or ``data:``, or starts
+        with ``//``.
+    """
+    return _is_external(clean_href(href))
 
 
 def _web_url(href: str) -> str:
@@ -83,7 +105,7 @@ def normalize_url(href: str) -> str | None:
         scheme, the scheme in lower case and the rest as written. A target
         without a scheme is kept.
     """
-    href = _cleaned(href)
+    href = clean_href(href)
     if href.startswith(_SCHEME_RELATIVE):
         return _web_url(href)
     match = SCHEME.match(href)
@@ -116,6 +138,29 @@ def _without_base(href: str, base: str) -> str:
     if href == stem or href.startswith((f"{stem}?", f"{stem}#")):
         return "/" + href.removeprefix(stem)
     return href
+
+
+def site_path(href: str, page: str, base: str) -> str | None:
+    """Return the site relative path of an internal target, as a link's.
+
+    The target is cleaned as a browser does, loses the base of the site if
+    it is an absolute path that has it, then is resolved against its page,
+    as `resolve_href` does.
+
+    Args:
+        href: Target as written in the page, such as the source of an image.
+        page: Site relative path of the page that holds it.
+        base: Base of the absolute links of the site, as `site_base` gives
+            it.
+
+    Returns:
+        The POSIX path, relative to the site root; ``None`` for an external
+        target, a target without a path, or one that goes above the root.
+    """
+    cleaned = clean_href(href)
+    if _is_external(cleaned):
+        return None
+    return resolve_href(_without_base(cleaned, base), page)
 
 
 def page_exists(pages: frozenset[str], root: Path) -> Callable[[str], bool]:
@@ -161,7 +206,7 @@ def site_base(hrefs: Iterable[str], exists: Callable[[str], bool]) -> str:
     # one page count once.
     paths = dict.fromkeys(
         urllib.parse.urlsplit(href).path
-        for href in map(_cleaned, hrefs)
+        for href in map(clean_href, hrefs)
         if href.startswith("/") and not href.startswith(_SCHEME_RELATIVE)
     )
     # The targets of the paths as written, counted, are those of ``""``.
@@ -265,7 +310,7 @@ class LinkResolver:
             href = self.redirects.get(page)
             if href is None:
                 break
-            target, anchor = _internal(_cleaned(href), page, self.base)
+            target, anchor = _internal(clean_href(href), page, self.base)
             if target is None:
                 break
             page, fragment = target, fragment or anchor
@@ -273,7 +318,7 @@ class LinkResolver:
 
     def link(self, text: str, href: str, page: str) -> Link | None:
         """Return a resolved link, or ``None`` for a link to leave out."""
-        cleaned = _cleaned(href)
+        cleaned = clean_href(href)
         if not cleaned or cleaned == "#":
             return None
         text, shown = printable(text), printable(href)

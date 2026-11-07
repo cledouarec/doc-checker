@@ -16,8 +16,12 @@ MAX_FILE_BYTES: Final = 50_000_000
 # reads it with its JPEG opener and has no opener of its own for it.
 ALLOWED_FORMATS: Final = ("PNG", "JPEG", "GIF", "WEBP", "BMP", "ICO", "TIFF")
 ALPHA_OPAQUE: Final = 250
+# Why the pixels of an image are not read: the `problem` of its `ImageRef`.
 TOO_LARGE: Final = "too large"
 CANNOT_DECODE: Final = "cannot decode"
+NOT_FOUND: Final = "not found"
+OUTSIDE: Final = "outside the site"
+EXTERNAL: Final = "external"  # Never fetched, compared by its URL.
 LOSSLESS_FORMATS: Final = frozenset(
     {"png", "gif", "bmp", "tiff", "flate", "raw", "ccitt", "jbig2"},
 )

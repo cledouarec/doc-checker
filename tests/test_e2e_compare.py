@@ -12,6 +12,7 @@ from doc_checker.config import DEFAULT_HTML_EXCLUDE, Config, HtmlConfig
 from doc_checker.model.findings import Finding, Severity
 from doc_checker.pipeline import run_compare
 from tests.builders import (
+    FIGURES_EN,
     SAMPLE_EN,
     SAMPLE_FR,
     DocSpec,
@@ -464,3 +465,12 @@ def test_accents_lost_everywhere_are_one_finding(tmp_path: Path) -> None:
     (group,) = [f for f in findings if f.severity >= MI]
     assert (group.rule, group.severity) == ("text.accent_lost", MA)
     assert len(group.occurrences) >= GROUP_MIN_OCCURRENCES
+
+
+def test_numbered_captions_against_plain_ones(tmp_path: Path) -> None:
+    """Captions numbered by Sphinx compare with plain ones."""
+    ref = build_sphinx_like(FIGURES_EN, tmp_path / "ref", numbered=True)
+    new = build_mkdocs_like(FIGURES_EN, tmp_path / "new")
+    result = run_compare(ref, new, Config(images=False))
+    assert result.ref.normalization["caption_number"] == 4
+    assert [f.rule for f in result.findings if f.severity >= MI] == []
