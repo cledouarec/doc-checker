@@ -159,7 +159,7 @@ def extract(
     "formats",
     metavar="LIST",
     callback=_split_formats,
-    help="Comma separated report formats: md.",
+    help=f"Comma separated report formats: {', '.join(AVAILABLE_FORMATS)}.",
 )
 @click.option(
     "--min-severity",

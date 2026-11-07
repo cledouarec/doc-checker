@@ -34,10 +34,15 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.compare.drafts import ARROW, MATCHED, Draft, truncate
+from doc_checker.compare.drafts import (
+    ARROW,
+    EXCERPT_MAX_CHARS,
+    MATCHED,
+    Draft,
+)
 from doc_checker.model.document import BlockKind
 from doc_checker.model.findings import DiffSegment, Side
-from doc_checker.text.normalize import loose_key
+from doc_checker.text.normalize import loose_key, truncate
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -162,7 +167,8 @@ def _section_heads(blocks: Sequence[Block]) -> list[int]:
 
 def _side(block: Block, op: SegmentOp, text: str) -> Side:
     """Return a side at a block, that shows one text."""
-    return Side(block.source, (DiffSegment(op, truncate(text)),), block.kind)
+    segment = DiffSegment(op, truncate(text, EXCERPT_MAX_CHARS))
+    return Side(block.source, (segment,), block.kind)
 
 
 class _Linker:

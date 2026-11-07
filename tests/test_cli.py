@@ -1,8 +1,10 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the command line interface."""
 
+import re
 from typing import TYPE_CHECKING
 
+import lxml.html
 from click.testing import CliRunner
 
 from doc_checker import __version__
@@ -22,6 +24,9 @@ from tests.pdf_builders import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+# A URI scheme, such as http: or file:, that opens a link.
+SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 
 
 def test_main_without_arguments_shows_help() -> None:
@@ -99,16 +104,55 @@ def test_extract_bad_config_exits_2(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
-def test_compare_writes_markdown_report(tmp_path: Path) -> None:
-    """The compare command writes the report and prints a summary."""
+def test_compare_writes_both_reports(tmp_path: Path) -> None:
+    """The comparison writes the HTML and the Markdown reports."""
     ref = build_sphinx_like(SAMPLE_EN, tmp_path / "ref")
     new = build_mkdocs_like(SAMPLE_EN, tmp_path / "new")
     out = tmp_path / "out"
     args = ["compare", str(ref), str(new), "-o", str(out)]
     result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
+    assert (out / "report.html").is_file()
     assert (out / "report.md").is_file()
-    assert "findings:" in result.output
+    assert "report.html" in result.output
+
+
+def test_compare_html_report_references_no_external_resource(
+    tmp_path: Path,
+) -> None:
+    """The HTML report loads nothing and links to no other site."""
+    ref = build_sphinx_like(SAMPLE_EN, tmp_path / "ref")
+    new = build_mkdocs_like(
+        replace_text(SAMPLE_EN, "100 requests", "10 requests"),
+        tmp_path / "new",
+    )
+    out = tmp_path / "out"
+    args = ["compare", str(ref), str(new), "-o", str(out)]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 0, result.output
+    html = (out / "report.html").read_text(encoding="utf-8")
+    tree = lxml.html.document_fromstring(html)
+    assert not tree.xpath("//link | //@src")
+    hrefs = tree.xpath("//@href")
+    assert hrefs
+    assert not [
+        href
+        for href in hrefs
+        if SCHEME_RE.match(href) or href.startswith("//")
+    ]
+    style = tree.findtext(".//style")
+    assert "url(" not in style
+    assert "@import" not in style
+
+
+def test_compare_markdown_only(tmp_path: Path) -> None:
+    """The format option chooses the reports."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "s")
+    out = tmp_path / "out"
+    args = ["compare", str(site), str(site), "-o", str(out), "--format", "md"]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 0, result.output
+    assert not (out / "report.html").exists()
 
 
 def test_compare_mixed_formats_exits_3(tmp_path: Path) -> None:

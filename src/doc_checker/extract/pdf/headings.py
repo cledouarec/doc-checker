@@ -6,44 +6,36 @@ that a bookmark points to is a heading, as deep as the bookmark. The outline
 may stop short, as the bookmarks of LaTeX often stop at the chapters, so the
 styles complete it: a block set like a marked heading, or smaller than all of
 them, is a heading too. Without an outline, the headings are told by how they
-look: a short block that is set
-larger than the body text, or in bold, is a heading, and the more its style
-stands out, the higher its level. The number that starts a title, such as
-``1.2.3``, tells the level better than the style does.
+look: a short block that is set larger than the body text, or in bold, is a
+heading, and the more its style stands out, the higher its level. The number
+that starts a title, such as ``1.2.3`` or ``A.1``, tells the level better
+than the style does.
 """
 
-import re
 from bisect import bisect_left, bisect_right
 from collections import Counter
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final
 
 from doc_checker.extract.pdf.chrome import HEADING_MIN_SIZE, title_key
+from doc_checker.model.document import FROM_OUTLINE, FROM_STYLE
 from doc_checker.text.lexicon import is_admonition_title
+from doc_checker.text.numbers import HEADING_NUMBER
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from doc_checker.extract.pdf.blocks import DraftBlock
     from doc_checker.extract.pdf.reader import Bookmark
+    from doc_checker.model.document import HeadingSource
 
 HEADING_MAX_LINES: Final = 3  # Most lines of a heading.
 HEADING_MAX_WORDS: Final = 15  # Most words of a heading.
 MAX_LEVEL: Final = 6  # Deepest level of a heading, as in HTML.
 
-# The number of a title: one number, or several around dots, which a dot may
-# follow, and then blanks and the title itself.
-_NUMBERING: Final = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\S")
 # A text that ends with one of these is a sentence, not a heading.
 _SENTENCE_ENDS: Final = (".", ",", ";", ":")
-
-# Matches a number of at least two parts, such as ``2.1``, at the start of a
-# title.
-_SUB_NUMBER: Final = re.compile(r"^\d+(?:\.\d+)+\.?\s+\S")
 # How far two sizes may differ, in points, for one style.
 STYLE_TOLERANCE: Final = 0.5
-
-# What found a heading: a bookmark, or the look of the block.
-type HeadingSource = Literal["outline", "style"]
 
 # The style of a text: its size in points, and whether it is bold.
 type _Style = tuple[float, bool]
@@ -183,6 +175,21 @@ def _style_order(style: _Style) -> tuple[float, bool]:
     return -size, not bold
 
 
+def _number_parts(text: str) -> int:
+    """Return the count of the parts of the number that starts a title.
+
+    Args:
+        text: The text of a title.
+
+    Returns:
+        The count of the parts of the `HEADING_NUMBER` at the start of the
+        text, such as 3 for ``3.1.4`` and 2 for ``A.1``, or 0 if there is no
+        such number.
+    """
+    match = HEADING_NUMBER.match(text)
+    return match[1].count(".") + 1 if match else 0
+
+
 def _level(text: str, rank: int) -> int:
     """Return the level of a heading, from its number or else its rank.
 
@@ -191,12 +198,11 @@ def _level(text: str, rank: int) -> int:
         rank: The rank of its style among the styles of the headings, from 1.
 
     Returns:
-        The count of the parts of the number that `_NUMBERING` finds at the
-        start of the text, such as 3 for ``3.1.4``, or the rank if there is no
-        such number. At most `MAX_LEVEL`.
+        The count of the parts of the number at the start of the text, as
+        `_number_parts` gives it, or the rank if there is no such number. At
+        most `MAX_LEVEL`.
     """
-    match = _NUMBERING.match(text)
-    return min(match[1].count(".") + 1 if match else rank, MAX_LEVEL)
+    return min(_number_parts(text) or rank, MAX_LEVEL)
 
 
 def style_levels(
@@ -266,10 +272,11 @@ def heading_levels(
     - Otherwise it is a heading if its size is at least `HEADING_MIN_SIZE`
       body sizes and smaller than the smallest marked heading by more than
       `STYLE_TOLERANCE`, or if its text starts with a number of two parts or
-      more, such as ``2.1``. The count of the parts of that number is its
-      level; without a number, the level is that of the deepest marked
-      heading plus the rank of its style, from 1, among the styles of the
-      blocks promoted this way, large before small and bold first.
+      more, such as ``2.1`` or ``A.1``. The count of the parts of that
+      number is its level; without a number, the level is that of the
+      deepest marked heading plus the rank of its style, from 1, among the
+      styles of the blocks promoted this way, large before small and bold
+      first.
 
     No level exceeds `MAX_LEVEL`.
 
@@ -285,7 +292,7 @@ def heading_levels(
     marked = bookmark_levels(blocks, texts, bookmarks) if bookmarks else {}
     if not marked:
         return {
-            index: (level, "style")
+            index: (level, FROM_STYLE)
             for index, level in style_levels(blocks, texts, body=body).items()
         }
     styles: dict[int, _Style] = {
@@ -295,7 +302,7 @@ def heading_levels(
     smallest = min(size for size, _ in styles.values())
     deepest = max(marked.values())
     levels: dict[int, tuple[int, HeadingSource]] = {
-        index: (level, "outline") for index, level in marked.items()
+        index: (level, FROM_OUTLINE) for index, level in marked.items()
     }
     same: dict[int, int] = {}
     others: dict[int, _Style] = {}
@@ -314,14 +321,16 @@ def heading_levels(
             same[index] = min(counts, key=lambda lv: (-counts[lv], lv))
         elif (
             HEADING_MIN_SIZE * body <= first.size < smallest - STYLE_TOLERANCE
-            or _SUB_NUMBER.match(text)
+            or _number_parts(text) > 1
         ):
             others[index] = style
     ordered = sorted(set(others.values()), key=_style_order)
     ranks = {style: rank for rank, style in enumerate(ordered, start=1)}
-    levels.update((index, (level, "style")) for index, level in same.items())
     levels.update(
-        (index, (_level(texts[index], deepest + ranks[style]), "style"))
+        (index, (level, FROM_STYLE)) for index, level in same.items()
+    )
+    levels.update(
+        (index, (_level(texts[index], deepest + ranks[style]), FROM_STYLE))
         for index, style in others.items()
     )
     return levels

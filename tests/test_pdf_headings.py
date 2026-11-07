@@ -321,6 +321,8 @@ def test_ranks_are_capped_at_six_levels() -> None:
         ("1.2.3 Details", 3),
         ("1.2.3. Details", 3),
         ("1.2.3.4.5.6.7 Details", 6),
+        ("A.1.2 Details", 3),
+        ("B.4 Tables", 2),
         ("1.2", 2),
         ("1.Overview", 2),
         ("2) Overview", 2),
@@ -362,6 +364,19 @@ def test_a_partial_outline_is_completed_by_the_styles() -> None:
         1: (2, "style"),
         3: (1, "style"),
         4: (2, "style"),
+    }
+
+
+def test_an_appendix_number_completes_the_outline() -> None:
+    """A title numbered as a section of an appendix is a heading."""
+    blocks = [
+        _block("Appendices", size=20.0, bold=True),
+        _block("A.1 Glossary", page=1, bold=True),
+        _block("Body text of the appendix.", page=1),
+    ]
+    assert _levels(blocks, Bookmark(0, "Appendices", 0)) == {
+        0: (1, "outline"),
+        1: (2, "style"),
     }
 
 

@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, Final
 import click
 
 from doc_checker.model.findings import Severity
-from doc_checker.text.normalize import BIDI_CLASS, CONTROL_CLASS
+from doc_checker.report.context import UNKNOWN, matched_percent
+from doc_checker.text.normalize import BIDI_CLASS, CONTROL_CLASS, truncate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -17,17 +18,14 @@ if TYPE_CHECKING:
     from doc_checker.model.document import Block, Document, Link
 
 _MAX_TEXT: Final = 200
-_NO_GENERATOR: Final = "-"
 _LINK_KIND: Final = "link"
 _MISSING: Final = " (missing)"
-_ELLIPSIS: Final = "\U00002026"
 _REPLACEMENT: Final = "\U0000fffd"
 # What `printable` blanks out, but the tab and the line feed.
 _HIDDEN_RE: Final = re.compile(f"[{CONTROL_CLASS}{BIDI_CLASS}]")
 _NEWLINE_MARK: Final = " \U000023ce "
 _TOP_CRITICAL: Final = 5
 _QUOTE_CHARS: Final = 60
-_PERCENT: Final = 100
 _STYLES: Final[dict[Severity, dict[str, Any]]] = {
     Severity.CRITICAL: {"fg": "red", "bold": True},
     Severity.MAJOR: {"fg": "yellow"},
@@ -58,8 +56,7 @@ def _one_line(text: str) -> str:
 
 def _shorten(text: str, limit: int) -> str:
     """Return the text on one line, cut to ``limit`` characters."""
-    text = visible(text).replace("\n", _NEWLINE_MARK)
-    return text if len(text) <= limit else text[:limit] + _ELLIPSIS
+    return truncate(visible(text).replace("\n", _NEWLINE_MARK), limit)
 
 
 def _link_line(link: Link) -> str:
@@ -98,7 +95,7 @@ def render_blocks(doc: Document) -> str:
     """
     header = (
         f"{_one_line(str(doc.path))}: {doc.format}, {len(doc.parts)} page(s), "
-        f"generator {_one_line(doc.generator or _NO_GENERATOR)}, "
+        f"generator {_one_line(doc.generator or UNKNOWN)}, "
         f"lang {_one_line(str(doc.lang))}"
     )
     if doc.tagged is not None:
@@ -117,7 +114,7 @@ def _styled(severity: Severity, text: str) -> str:
 
 def _described(doc: Document) -> str:
     """Return the path, the page count and the generator of a document."""
-    generator = _one_line(doc.generator or _NO_GENERATOR)
+    generator = _one_line(doc.generator or UNKNOWN)
     return f"{_one_line(str(doc.path))} ({len(doc.parts)} pages, {generator})"
 
 
@@ -136,7 +133,6 @@ def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
         shows its line breaks as marks.
     """
     ref, new, stats = result.ref, result.new, result.stats
-    share = stats.matched / stats.ref_blocks if stats.ref_blocks else 1.0
     counts = ", ".join(
         f"{sum(f.severity is severity for f in result.findings)} "
         f"{_styled(severity, severity.label)}"
@@ -146,7 +142,7 @@ def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
         f"compare  ref={_described(ref)}  new={_described(new)}",
         (
             f"blocks {stats.ref_blocks} <-> {stats.new_blocks} | "
-            f"matched {share * _PERCENT:.1f}% | moved {stats.moved}"
+            f"matched {matched_percent(stats)}% | moved {stats.moved}"
         ),
         f"findings: {counts}",
     ]

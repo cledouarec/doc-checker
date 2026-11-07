@@ -43,15 +43,13 @@ class HtmlPage:
     Attributes:
         rel_path: POSIX path of the page, relative to the site root.
         tree: Parsed document.
-        redirect_to: Target page when the page only redirects elsewhere in
-            the site, before the base of the site is known.
-        redirect_href: URL of that redirection as written in the page, set
-            when ``redirect_to`` is.
+        redirect_href: URL of the redirection as written in the page, when
+            the page only redirects to a page of the site; the loader
+            resolves it once the base of the site is known.
     """
 
     rel_path: str
     tree: HtmlElement
-    redirect_to: str | None
     redirect_href: str | None = None
 
 
@@ -132,5 +130,6 @@ def parse_page(path: Path, rel_path: str) -> HtmlPage:
     except lxml.etree.ParserError, ValueError:
         raise InputError(invalid) from None
     url = _refresh_url(tree)
-    target = None if url is None else resolve_href(url, rel_path)
-    return HtmlPage(rel_path, tree, target, None if target is None else url)
+    if url is None or resolve_href(url, rel_path) is None:
+        return HtmlPage(rel_path, tree)
+    return HtmlPage(rel_path, tree, url)

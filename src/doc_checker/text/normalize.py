@@ -48,14 +48,14 @@ _SINGLE_QUOTE_RE: Final = re.compile(
 )
 _DOUBLE_QUOTE_RE: Final = re.compile(r"[\U0000201c-\U0000201f\xab\xbb]")
 _DASH_RE: Final = re.compile(r"[\U00002010-\U00002015\U00002212]")
-_ELLIPSIS_RE: Final = re.compile(r"\U00002026")
+# What ends a text that was cut.
+ELLIPSIS: Final = "\U00002026"
+_ELLIPSIS_RE: Final = re.compile(ELLIPSIS)
 _WHITESPACE_RE: Final = re.compile(r"[ \t\r\n\f\v]+")
 _NON_WORD_RE: Final = re.compile(r"[^\w\s]")
 _UNPRINTABLE_RE: Final = re.compile(
     f"[{LAYOUT_CLASS}{CONTROL_CLASS}{BIDI_CLASS}]",
 )
-_CUT_MARK: Final = "\U00002026"
-
 _COMBINING_MARK: Final = "Mn"
 
 
@@ -177,6 +177,21 @@ def loose_key(strict: str) -> str:
     return " ".join(text.split())
 
 
+def truncate(text: str, limit: int) -> str:
+    """Return a text cut to a number of characters.
+
+    Args:
+        text: Any text.
+        limit: Most characters kept.
+
+    Returns:
+        The text, or its start followed by `ELLIPSIS` if it is longer.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit] + ELLIPSIS
+
+
 def printable(text: str, *, limit: int | None = None) -> str:
     """Return a text of a document that is safe to show on one line.
 
@@ -194,6 +209,4 @@ def printable(text: str, *, limit: int | None = None) -> str:
         than `limit`, it is cut there and ends with an ellipsis.
     """
     text = " ".join(_UNPRINTABLE_RE.sub(" ", text).split())
-    if limit is not None and len(text) > limit:
-        return text[:limit] + _CUT_MARK
-    return text
+    return text if limit is None else truncate(text, limit)

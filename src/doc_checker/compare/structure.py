@@ -29,7 +29,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.compare.drafts import ARROW, MATCHED, Draft, whole
-from doc_checker.model.document import HEADING_SOURCE, BlockKind
+from doc_checker.model.document import FROM_OUTLINE, HEADING_SOURCE, BlockKind
 from doc_checker.model.findings import Severity
 
 if TYPE_CHECKING:
@@ -48,7 +48,6 @@ _LOST: Final = (
     (BlockKind.TABLE, "structure.table_lost"),
     (BlockKind.CODE, "structure.code_lost"),
 )
-_OUTLINE: Final = "outline"
 _PDF_NOTE: Final = "; PDF kinds are inferred from the layout"
 
 
@@ -56,7 +55,7 @@ def _from_outline(block: Block) -> bool:
     """Return whether a block is a heading that a PDF outline gives."""
     return (
         block.kind is BlockKind.HEADING
-        and block.attrs.get(HEADING_SOURCE) == _OUTLINE
+        and block.attrs.get(HEADING_SOURCE) == FROM_OUTLINE
     )
 
 
