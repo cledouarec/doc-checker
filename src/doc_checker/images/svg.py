@@ -65,7 +65,7 @@ def _squash(text: str | None) -> str:
     return " ".join(plain.split())
 
 
-def _local(name: str) -> str:
+def local_name(name: str) -> str:
     """Take the lower case local name of an element or attribute name.
 
     Args:
@@ -113,7 +113,7 @@ def _is_script(node: etree._Element) -> bool:
     Returns:
         Whether the node is a script element.
     """
-    return _is_element(node) and _local(node.tag) == "script"
+    return _is_element(node) and local_name(node.tag) == "script"
 
 
 def _attributes(node: etree._Element) -> list[tuple[str, str]]:
@@ -128,7 +128,7 @@ def _attributes(node: etree._Element) -> list[tuple[str, str]]:
     """
     pairs = []
     for key, value in node.attrib.items():
-        name = _local(str(key))
+        name = local_name(str(key))
         full = str(key).lower()
         if (
             name.startswith("on")
@@ -147,7 +147,7 @@ def _lines(node: etree._Element, out: list[str]) -> None:
         node: Element.
         out: Lines written so far.
     """
-    out.append(f"<{_local(node.tag)}")
+    out.append(f"<{local_name(node.tag)}")
     out.extend(f"@{name}={value}" for name, value in _attributes(node))
     pending = node.text or ""
     for child in node:
@@ -205,7 +205,7 @@ def _texts(root: etree._Element) -> tuple[str, ...]:
     found: list[str] = []
 
     def visit(node: etree._Element) -> None:
-        if _local(node.tag) == "text":
+        if local_name(node.tag) == "text":
             parts: list[str] = []
             _flow(node, parts)
             text = _squash("".join(parts))
@@ -231,7 +231,7 @@ def _attribute(node: etree._Element, name: str) -> str | None:
         The value, or `None`.
     """
     for key, value in node.attrib.items():
-        if _local(str(key)) == name:
+        if local_name(str(key)) == name:
             return str(value)
     return None
 
@@ -316,7 +316,7 @@ def parse_svg(data: bytes) -> SvgIdentity:
         root = etree.fromstring(data, parser)
     except (etree.XMLSyntaxError, ValueError) as error:
         raise UnreadableImage(CANNOT_DECODE) from error
-    if _local(root.tag) != "svg":
+    if local_name(root.tag) != "svg":
         raise UnreadableImage(CANNOT_DECODE)
     return svg_identity(root)
 

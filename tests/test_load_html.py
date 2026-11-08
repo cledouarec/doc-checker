@@ -433,3 +433,72 @@ def test_load_document_passes_the_images_option(tmp_path: Path) -> None:
     doc = load_document(site, dataclasses.replace(Config(), images=False))
     assert _images(doc) == []
     assert len(_images(load_document(site, Config()))) == 4
+
+
+def test_page_facts_are_read_only_for_the_audit(tmp_path: Path) -> None:
+    """The audit gets the facts of each page; other runs get none."""
+    site = build_sphinx_like(SAMPLE_EN, tmp_path / "site", split="chapters")
+    assert load_html(site, HtmlConfig(), lang="auto").html_pages == ()
+    doc = load_html(site, HtmlConfig(), lang="auto", audit=True)
+    pages = {page.file: page for page in doc.html_pages}
+    assert list(pages) == doc.parts
+    index = pages["index.html"]
+    assert (index.lang, index.title) == ("en", "Example - Example")
+    chapters = {"getting-started.html", "user-guide.html", "reference.html"}
+    assert chapters <= index.links_to
+    assert "index.html" not in index.links_to
+    assert "installation" in pages["getting-started.html"].ids
+
+
+def test_page_links_follow_the_base_and_the_redirections(
+    tmp_path: Path,
+) -> None:
+    """Absolute links under the site base and redirections lead home."""
+    site = tmp_path / "site"
+    (site / "guide").mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<html><body><main><h1>Home</h1><p>Read the "
+        '<a href="/docs/guide/">guide</a> or the '
+        '<a href="old.html">old guide</a>.</p></main></body></html>',
+        encoding="utf-8",
+    )
+    (site / "old.html").write_text(
+        '<html><head><meta http-equiv="refresh" '
+        'content="0; url=guide/index.html"></head></html>',
+        encoding="utf-8",
+    )
+    (site / "guide" / "index.html").write_text(
+        "<html><body><main><h1>Guide</h1><p>Back "
+        '<a href="/docs/">home</a>.</p></main></body></html>',
+        encoding="utf-8",
+    )
+    doc = load_html(site, HtmlConfig(), lang="auto", audit=True)
+    pages = {page.file: page.links_to for page in doc.html_pages}
+    assert pages == {
+        "index.html": frozenset({"guide/index.html"}),
+        "guide/index.html": frozenset({"index.html"}),
+    }
+
+
+def test_links_to_leaves_out_external_mail_and_fragments(
+    tmp_path: Path,
+) -> None:
+    """Only the internal pages other than itself count, anchors dropped."""
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text(
+        "<html><body><main><h1>Home</h1><p>"
+        '<a href="https://example.com/a">ext</a>'
+        '<a href="mailto:a@example.com">mail</a>'
+        '<a href="#top">top</a><a href="other.html#part">other</a>'
+        '<svg width="300" height="200"><sodipodi:namedview/>'
+        '<rect width="9" height="9"/></svg></p></main></body></html>',
+        encoding="utf-8",
+    )
+    (site / "other.html").write_text(
+        "<html><body><main><h1>Other</h1></main></body></html>",
+        encoding="utf-8",
+    )
+    doc = load_html(site, HtmlConfig(), lang="auto", audit=True)
+    pages = {page.file: page.links_to for page in doc.html_pages}
+    assert pages["index.html"] == frozenset({"other.html"})

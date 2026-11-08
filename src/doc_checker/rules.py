@@ -33,6 +33,7 @@ _TEXT = Category.TEXT
 _STRUCTURE = Category.STRUCTURE
 _LINK = Category.LINK
 _IMAGE = Category.IMAGE
+_A11Y = Category.ACCESSIBILITY
 _SPECS: Final = (
     RuleSpec(
         "section.missing",
@@ -156,6 +157,198 @@ _SPECS: Final = (
         "Figure vectorized",
     ),
     RuleSpec("image.alt_lost", _IMAGE, Severity.MINOR, "Alt text lost"),
+    RuleSpec(
+        "image.low_dpi",
+        _IMAGE,
+        Severity.MINOR,
+        "Low image resolution",
+    ),
+    RuleSpec(
+        "image.upscaled",
+        _IMAGE,
+        Severity.MINOR,
+        "Image shown larger than its size",
+    ),
+    RuleSpec(
+        "image.blurry",
+        _IMAGE,
+        Severity.MINOR,
+        "Blurry image",
+    ),
+    RuleSpec(
+        "image.jpeg_quality",
+        _IMAGE,
+        Severity.MINOR,
+        "Low JPEG quality",
+    ),
+    RuleSpec(
+        "image.blocky",
+        _IMAGE,
+        Severity.MINOR,
+        "JPEG blocks visible",
+    ),
+    RuleSpec(
+        "image.pixelated",
+        _IMAGE,
+        Severity.MINOR,
+        "Pixelated image",
+    ),
+    RuleSpec(
+        "image.heavy",
+        _IMAGE,
+        Severity.MINOR,
+        "Heavy image file",
+    ),
+    RuleSpec(
+        "image.photo_png",
+        _IMAGE,
+        Severity.INFO,
+        "Photo stored as PNG",
+    ),
+    RuleSpec(
+        "image.broken",
+        _IMAGE,
+        Severity.MAJOR,
+        "Image cannot be shown",
+    ),
+    RuleSpec(
+        "structure.heading_skipped",
+        _STRUCTURE,
+        Severity.MINOR,
+        "Heading level skipped",
+    ),
+    RuleSpec(
+        "structure.empty_section",
+        _STRUCTURE,
+        Severity.MINOR,
+        "Empty section",
+    ),
+    RuleSpec(
+        "structure.duplicate_heading",
+        _STRUCTURE,
+        Severity.MINOR,
+        "Identical sibling headings",
+    ),
+    RuleSpec(
+        "structure.unresolved_reference",
+        _STRUCTURE,
+        Severity.MAJOR,
+        "Unresolved reference",
+    ),
+    RuleSpec(
+        "structure.figure_caption",
+        _STRUCTURE,
+        Severity.INFO,
+        "Figure without caption",
+    ),
+    RuleSpec(
+        "structure.table_caption",
+        _STRUCTURE,
+        Severity.INFO,
+        "Table without caption",
+    ),
+    RuleSpec(
+        "structure.orphan_page",
+        _STRUCTURE,
+        Severity.MINOR,
+        "Orphan page",
+    ),
+    RuleSpec(
+        "link.page_missing",
+        _LINK,
+        Severity.MAJOR,
+        "Link to a missing page",
+    ),
+    RuleSpec(
+        "link.anchor_missing",
+        _LINK,
+        Severity.MAJOR,
+        "Link to a missing anchor",
+    ),
+    RuleSpec(
+        "link.file_missing",
+        _LINK,
+        Severity.MAJOR,
+        "Link to a missing file",
+    ),
+    RuleSpec(
+        "link.destination_invalid",
+        _LINK,
+        Severity.MAJOR,
+        "Link destination invalid",
+    ),
+    RuleSpec(
+        "a11y.alt_missing",
+        _A11Y,
+        Severity.MAJOR,
+        "Alt text missing",
+    ),
+    RuleSpec(
+        "a11y.alt_filename",
+        _A11Y,
+        Severity.MINOR,
+        "Alt text is a file name",
+    ),
+    RuleSpec(
+        "a11y.svg_title",
+        _A11Y,
+        Severity.MINOR,
+        "SVG without title",
+    ),
+    RuleSpec(
+        "a11y.lang_missing",
+        _A11Y,
+        Severity.MAJOR,
+        "Language not declared",
+    ),
+    RuleSpec(
+        "a11y.lang_mismatch",
+        _A11Y,
+        Severity.MINOR,
+        "Declared language differs from the text",
+    ),
+    RuleSpec(
+        "a11y.table_headers",
+        _A11Y,
+        Severity.MINOR,
+        "Table without headers",
+    ),
+    RuleSpec(
+        "a11y.pdf_untagged",
+        _A11Y,
+        Severity.MAJOR,
+        "PDF not tagged",
+    ),
+    RuleSpec(
+        "a11y.title_missing",
+        _A11Y,
+        Severity.MINOR,
+        "Title missing",
+    ),
+    RuleSpec(
+        "a11y.unmapped_chars",
+        _A11Y,
+        Severity.MINOR,
+        "Characters without Unicode mapping",
+    ),
+    RuleSpec(
+        "a11y.scanned_page",
+        _A11Y,
+        Severity.MAJOR,
+        "Scanned page",
+    ),
+    RuleSpec(
+        "a11y.link_empty",
+        _A11Y,
+        Severity.MAJOR,
+        "Link without text",
+    ),
+    RuleSpec(
+        "a11y.link_text",
+        _A11Y,
+        Severity.MINOR,
+        "Link text says nothing",
+    ),
 )
 
 RULES: Final[Mapping[str, RuleSpec]] = MappingProxyType(

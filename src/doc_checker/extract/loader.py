@@ -53,7 +53,12 @@ def detect_format(path: Path) -> Literal["html", "pdf"]:
     raise InputError(msg)
 
 
-def load_document(path: Path, cfg: Config) -> Document:
+def load_document(
+    path: Path,
+    cfg: Config,
+    *,
+    audit: bool = False,
+) -> Document:
     """Load a documentation build.
 
     An input that cannot be read, or that is neither HTML nor PDF, raises an
@@ -62,10 +67,17 @@ def load_document(path: Path, cfg: Config) -> Document:
     Args:
         path: File or directory given by the user.
         cfg: Run configuration.
+        audit: Whether to read the facts that only the audit uses.
 
     Returns:
         The normalized document.
     """
     if detect_format(path) == "pdf":
         return load_pdf(path, cfg.pdf, lang=cfg.lang, images=cfg.images)
-    return load_html(path, cfg.html, lang=cfg.lang, images=cfg.images)
+    return load_html(
+        path,
+        cfg.html,
+        lang=cfg.lang,
+        images=cfg.images,
+        audit=audit,
+    )

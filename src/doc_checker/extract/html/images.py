@@ -42,6 +42,7 @@ from doc_checker.images.refs import content_digest, raster_ref, unreadable_ref
 from doc_checker.images.svg import (
     ICON_CLASSES,
     is_icon,
+    local_name,
     parse_svg,
     svg_identity,
 )
@@ -67,6 +68,8 @@ _SVG_STARTS: Final = (b"<?xml", b"<svg")
 _SNIFF_BYTES: Final = 1024  # Head of a file in which an SVG start is sought.
 _BASE64: Final = "base64"
 _ALT_ATTRIBUTES: Final = ("alt", "aria-label")
+_DECORATIVE_ROLES: Final = frozenset({"presentation", "none"})
+_TITLE: Final = "title"
 # A data URL, once cleaned as a browser reads it.
 _DATA_URL: Final = re.compile(r"data:", re.IGNORECASE)
 # The URL of a srcset candidate: a run without ASCII whitespace, which
@@ -85,7 +88,10 @@ class RawImage:
     Attributes:
         src: Source of an ``img``, as `best_source` chooses it.
         alt: Printable alternative text: the ``alt`` attribute, else the
-            ``aria-label`` one; ``None`` without either.
+            ``aria-label`` one; ``None`` without either. An ``img`` with
+            the ``presentation`` or ``none`` role has an empty one. An
+            inline SVG has its ``aria-label``, else the text of its first
+            ``title`` child, else ``None``.
         shown: Width and height of the ``img`` attributes, when both are
             integers, or the size of an inline SVG.
         svg: Identity of an inline SVG.
@@ -174,12 +180,28 @@ def _is_emoji(element: HtmlElement) -> bool:
     return False
 
 
+def first_role(element: HtmlElement) -> str:
+    """Return the first token of the ``role`` of an element, in lower case."""
+    return next(iter((element.get("role") or "").lower().split()), "")
+
+
 def _alt(element: HtmlElement) -> str | None:
     """Return the printable alternative text of an image, if it has one."""
     for name in _ALT_ATTRIBUTES:
         value = element.get(name)
         if value is not None:
             return printable(value)
+    return None
+
+
+def _svg_alt(element: HtmlElement) -> str | None:
+    """Return the label of an inline SVG, else its title, if it has one."""
+    label = printable(element.get("aria-label") or "")
+    if label:
+        return label
+    for child in element:
+        if isinstance(child.tag, str) and local_name(child.tag) == _TITLE:
+            return printable("".join(child.itertext())) or None
     return None
 
 
@@ -210,12 +232,20 @@ def raw_image(element: HtmlElement) -> RawImage | None:
         shown = None
         if identity.width is not None and identity.height is not None:
             shown = (identity.width, identity.height)
-        return RawImage(src=None, alt=None, shown=shown, svg=identity)
+        return RawImage(
+            src=None,
+            alt=_svg_alt(element),
+            shown=shown,
+            svg=identity,
+        )
     if _is_emoji(element):
         return None
+    alt = _alt(element)
+    if first_role(element) in _DECORATIVE_ROLES:
+        alt = ""
     return RawImage(
         src=best_source(element.get("src"), element.get("srcset")),
-        alt=_alt(element),
+        alt=alt,
         shown=_shown(element),
         svg=None,
     )
