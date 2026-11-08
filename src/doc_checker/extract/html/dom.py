@@ -139,7 +139,7 @@ def _collapse(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip(" ")
 
 
-def _in_svg(element: HtmlElement) -> bool:
+def in_svg(element: HtmlElement) -> bool:
     """Return whether an ``svg`` element holds an element."""
     return next(element.iterancestors(_SVG), None) is not None
 
@@ -172,7 +172,7 @@ def _raw_text(element: HtmlElement) -> str:
     return "".join(parts)
 
 
-def _in_formula(element: HtmlElement) -> bool:
+def in_formula(element: HtmlElement) -> bool:
     """Return whether an element is, or is in, a formula."""
     for node in (element, *element.iterancestors()):
         classes = (node.get("class") or "").lower().split()
@@ -189,7 +189,7 @@ def _images_in(parts: Iterable[HtmlElement]) -> Iterator[HtmlElement]:
     """
     for part in parts:
         for node in part.iter(*_IMAGE_TAGS):
-            if not _in_svg(node) and not _in_formula(node):
+            if not in_svg(node) and not in_formula(node):
                 yield node
 
 
@@ -236,7 +236,7 @@ def _links(parts: Iterable[HtmlElement]) -> tuple[tuple[str, str], ...]:
     for part in parts:
         for anchor in part.iter("a"):
             href = anchor.get("href")
-            if href is None or _in_svg(anchor):
+            if href is None or in_svg(anchor):
                 continue
             text = printable(_raw_text(anchor))
             if text:
@@ -491,7 +491,7 @@ class _Walker:
 
         The drawing of a formula is no image.
         """
-        if self.images and not _in_formula(element):
+        if self.images and not in_formula(element):
             self.add_image(element, (element,))
         else:
             self.hold((element,))

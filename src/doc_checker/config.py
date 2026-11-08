@@ -2,6 +2,7 @@
 """Configuration: TOML files and command line overrides."""
 
 import fnmatch
+import math
 import re
 import tomllib
 from dataclasses import dataclass, field, replace
@@ -19,6 +20,8 @@ type PageOrder = Literal["auto", "nav", "path"]
 
 AVAILABLE_FORMATS: Final = ("html", "md")
 DEFAULT_FORMATS: Final = ("html", "md")
+AVAILABLE_CHECKS: Final = ("images", "structure", "a11y")
+PROFILES: Final = ("screen", "print")
 LANGUAGES: Final = ("auto", "fr", "en")
 PAGE_ORDERS: Final = ("auto", "nav", "path")
 DEFAULT_HTML_INCLUDE: Final = ("**/*.html", "**/*.htm")
@@ -38,6 +41,7 @@ DEFAULT_OUTPUT: Final = Path("doc-checker-report")
 CONFIG_FILE: Final = "doc-checker.toml"
 PYPROJECT_FILE: Final = "pyproject.toml"
 MOVED_RULE: Final = "block.moved"
+MAX_JPEG_QUALITY: Final = 100
 
 _SECTIONS: Final = (
     "general",
@@ -111,6 +115,55 @@ class CompareThresholds:
 
 
 @dataclass(frozen=True, slots=True)
+class AuditThresholds:
+    """Thresholds used by the audit.
+
+    Attributes:
+        dpi_major: Effective resolution below which an image is a major
+            finding on screen.
+        dpi_minor: Effective resolution below which an image is a minor
+            finding on screen.
+        print_dpi_major: Same as ``dpi_major`` for the print profile.
+        print_dpi_minor: Same as ``dpi_minor`` for the print profile.
+        heavy_minor: Size in bytes above which an image is heavy.
+        heavy_major: Size in bytes above which an image is very heavy.
+        jpeg_quality_minor: Estimated JPEG quality below which it is minor.
+        jpeg_quality_major: Estimated JPEG quality below which it is major.
+        upscale: Enlargement ratio above which an image is upscaled.
+        blur: Sharpness ratio below which an image is blurred.
+        blockiness: Block artefact ratio above which an image is blocky.
+        unmapped_major: Share of the characters of a PDF without Unicode
+            mapping that is a major finding.
+    """
+
+    dpi_major: float = 96.0
+    dpi_minor: float = 150.0
+    print_dpi_major: float = 150.0
+    print_dpi_minor: float = 300.0
+    heavy_minor: int = 1_000_000
+    heavy_major: int = 3_000_000
+    jpeg_quality_minor: int = 50
+    jpeg_quality_major: int = 25
+    upscale: float = 1.1
+    blur: float = 0.10
+    blockiness: float = 2.0
+    unmapped_major: float = 0.01
+
+    def dpi(self, profile: str) -> tuple[float, float]:
+        """Return the major and minor resolution limits of a profile.
+
+        Args:
+            profile: ``"screen"`` or ``"print"``.
+
+        Returns:
+            The ``(major, minor)`` limits in dots per inch.
+        """
+        if profile == "print":
+            return (self.print_dpi_major, self.print_dpi_minor)
+        return (self.dpi_major, self.dpi_minor)
+
+
+@dataclass(frozen=True, slots=True)
 class IgnoreConfig:
     """What to leave out of the reports.
 
@@ -138,6 +191,9 @@ class Config:
         html: HTML extraction settings.
         pdf: PDF extraction and comparison settings.
         compare: Comparison thresholds.
+        checks: Audit check families to run.
+        profile: Audit profile, ``"screen"`` or ``"print"``.
+        audit: Audit thresholds.
         ignore: What to leave out of the reports.
         severity: Severity overrides by rule identifier.
     """
@@ -150,6 +206,9 @@ class Config:
     html: HtmlConfig = field(default_factory=HtmlConfig)
     pdf: PdfConfig = field(default_factory=PdfConfig)
     compare: CompareThresholds = field(default_factory=CompareThresholds)
+    checks: tuple[str, ...] = AVAILABLE_CHECKS
+    profile: str = "screen"
+    audit: AuditThresholds = field(default_factory=AuditThresholds)
     ignore: IgnoreConfig = field(default_factory=IgnoreConfig)
     severity: Mapping[str, Severity] = field(default_factory=dict)
 
@@ -167,6 +226,8 @@ class CliOverrides:
     disable: tuple[str, ...] = ()
     ignore_moves: bool = False
     no_images: bool = False
+    checks: tuple[str, ...] | None = None
+    profile: str | None = None
 
 
 class _Section:
@@ -230,6 +291,26 @@ class _Section:
             raise self.error(key, f"must be in ]0, {upper:g}]")
         return float(value)
 
+    def positive(self, key: str, default: float) -> float:
+        """Return a number above 0."""
+        value = self.data.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise self.error(key, "expected a number")
+        if not math.isfinite(value):
+            raise self.error(key, "expected a finite number")
+        if value <= 0:
+            raise self.error(key, "must be above 0")
+        return float(value)
+
+    def count(self, key: str, default: int) -> int:
+        """Return an integer above 0."""
+        value = self.data.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise self.error(key, "expected an integer")
+        if value <= 0:
+            raise self.error(key, "must be above 0")
+        return value
+
     def flag(self, key: str, *, default: bool) -> bool:
         """Return a boolean value."""
         value = self.data.get(key, default)
@@ -245,9 +326,31 @@ class _Section:
             raise self.error(key, str(exc)) from None
 
 
+def _parse_checks(section: _Section) -> tuple[str, ...]:
+    key = "checks"
+    checks = section.texts("checks", AVAILABLE_CHECKS)
+    for name in checks:
+        if name not in AVAILABLE_CHECKS:
+            expected = ", ".join(AVAILABLE_CHECKS)
+            msg = f"unknown check {name!r} (expected: {expected})"
+            raise section.error(key, msg)
+    if not checks:
+        msg = "expected at least one check"
+        raise section.error(key, msg)
+    return tuple(dict.fromkeys(checks))
+
+
 def _parse_general(section: _Section, base_dir: Path, cwd: Path) -> Config:
     section.check_keys(
-        ("lang", "min_severity", "formats", "output", "images"),
+        (
+            "lang",
+            "min_severity",
+            "formats",
+            "output",
+            "images",
+            "checks",
+            "profile",
+        ),
     )
     formats = section.texts("formats", DEFAULT_FORMATS)
     for name in formats:
@@ -256,6 +359,7 @@ def _parse_general(section: _Section, base_dir: Path, cwd: Path) -> Config:
             msg = f"unknown format {name!r} (expected: {expected})"
             msg_0 = "formats"
             raise section.error(msg_0, msg)
+    checks = _parse_checks(section)
     output = (
         base_dir / section.text("output", "")
         if "output" in section.data
@@ -267,6 +371,8 @@ def _parse_general(section: _Section, base_dir: Path, cwd: Path) -> Config:
         formats=formats,
         output=output,
         images=section.flag("images", default=True),
+        checks=checks,
+        profile=section.choice("profile", "screen", PROFILES),
     )
 
 
@@ -307,17 +413,73 @@ def _parse_pdf(section: _Section) -> PdfConfig:
     )
 
 
-def _parse_thresholds(section: _Section) -> CompareThresholds:
-    section.check_keys(("compare",))
-    compare = _Section(
-        section.data.get("compare", {}),
-        f"{section.prefix}.compare",
-        section.source,
+def _parse_audit(section: _Section) -> AuditThresholds:
+    defaults = AuditThresholds()
+    default_unmapped = defaults.unmapped_major
+    section.check_keys(AuditThresholds.__slots__)
+    values = AuditThresholds(
+        dpi_major=section.positive("dpi_major", defaults.dpi_major),
+        dpi_minor=section.positive("dpi_minor", defaults.dpi_minor),
+        print_dpi_major=section.positive(
+            "print_dpi_major",
+            defaults.print_dpi_major,
+        ),
+        print_dpi_minor=section.positive(
+            "print_dpi_minor",
+            defaults.print_dpi_minor,
+        ),
+        heavy_minor=section.count("heavy_minor", defaults.heavy_minor),
+        heavy_major=section.count("heavy_major", defaults.heavy_major),
+        jpeg_quality_minor=section.count(
+            "jpeg_quality_minor",
+            defaults.jpeg_quality_minor,
+        ),
+        jpeg_quality_major=section.count(
+            "jpeg_quality_major",
+            defaults.jpeg_quality_major,
+        ),
+        upscale=section.positive("upscale", defaults.upscale),
+        blur=section.ratio("blur", defaults.blur),
+        blockiness=section.positive("blockiness", defaults.blockiness),
+        unmapped_major=section.ratio("unmapped_major", default_unmapped),
     )
+    for key in ("jpeg_quality_minor", "jpeg_quality_major"):
+        if getattr(values, key) > MAX_JPEG_QUALITY:
+            raise section.error(key, "must be in [1, 100]")
+    for key in ("upscale", "blockiness"):
+        if getattr(values, key) <= 1:
+            raise section.error(key, "must be above 1")
+    for low, high in (
+        ("dpi_major", "dpi_minor"),
+        ("print_dpi_major", "print_dpi_minor"),
+        ("heavy_minor", "heavy_major"),
+        ("jpeg_quality_major", "jpeg_quality_minor"),
+    ):
+        if getattr(values, low) >= getattr(values, high):
+            raise section.error(low, f"must be below {high}")
+    return values
+
+
+def _parse_thresholds(
+    section: _Section,
+) -> tuple[CompareThresholds, AuditThresholds]:
+    section.check_keys(("compare", "audit"))
+
+    def table(name: str) -> _Section:
+        return _Section(
+            section.data.get(name, {}),
+            f"{section.prefix}.{name}",
+            section.source,
+        )
+
+    compare = table("compare")
     compare.check_keys(("match", "moved_match"))
-    return CompareThresholds(
-        match=compare.ratio("match", 0.6),
-        moved_match=compare.ratio("moved_match", 0.8),
+    return (
+        CompareThresholds(
+            match=compare.ratio("match", 0.6),
+            moved_match=compare.ratio("moved_match", 0.8),
+        ),
+        _parse_audit(table("audit")),
     )
 
 
@@ -393,11 +555,13 @@ def config_from_mapping(
         return _Section(data.get(name, {}), name, source)
 
     general = _parse_general(section("general"), source.parent, cwd)
+    compare, audit = _parse_thresholds(section("thresholds"))
     return replace(
         general,
         html=_parse_html(section("html")),
         pdf=_parse_pdf(section("pdf")),
-        compare=_parse_thresholds(section("thresholds")),
+        compare=compare,
+        audit=audit,
         ignore=_parse_ignore(section("ignore")),
         severity=_parse_severity(section("severity")),
     )
@@ -486,7 +650,14 @@ def apply_overrides(cfg: Config, overrides: CliOverrides) -> Config:
     changes: dict[str, object] = {"html": html, "ignore": ignore}
     if overrides.no_images:
         changes["images"] = False
-    for name in ("lang", "min_severity", "formats", "output"):
+    for name in (
+        "lang",
+        "min_severity",
+        "formats",
+        "output",
+        "checks",
+        "profile",
+    ):
         value = getattr(overrides, name)
         if value is not None:
             changes[name] = value

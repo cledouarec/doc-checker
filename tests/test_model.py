@@ -15,13 +15,15 @@ from doc_checker.model.document import (
     carry_anchors,
 )
 from doc_checker.model.findings import (
+    Category,
     DiffSegment,
     Severity,
     Side,
     finding_id,
 )
+from doc_checker.report.context import CATEGORY_TITLES
 from doc_checker.rules import RULES, get_rule
-from tests.builders import make_block
+from tests.builders import make_block, make_document
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -158,7 +160,7 @@ def test_missing_content_rules_are_critical() -> None:
 
 def test_rule_registry_is_consistent() -> None:
     """Every rule is registered under its own identifier."""
-    assert len(RULES) == 37
+    assert len(RULES) == 69
     assert all(spec.id == key for key, spec in RULES.items())
 
 
@@ -197,3 +199,29 @@ def test_text_blocks_and_sides_have_no_image() -> None:
     block = make_block("Some text here for the block.")
     assert block.image is None
     assert Side(block.source, ()).image is None
+
+
+def test_documents_have_no_audit_facts_by_default() -> None:
+    """A document starts without the facts that only the audit reads."""
+    doc = make_document(make_block("Some text here for the block."))
+    facts = (doc.title, doc.outline, doc.html_pages, doc.pdf_pages, doc.tags)
+    assert facts == (None, (), (), (), None)
+
+
+def test_a_side_can_mark_part_of_its_text() -> None:
+    """A marked segment belongs to the text of its side."""
+    side = Side(
+        SourceRef("a.html"),
+        (
+            DiffSegment("equal", "See "),
+            DiffSegment("mark", "??"),
+            DiffSegment("equal", " now"),
+        ),
+    )
+    assert side.text == "See ?? now"
+
+
+def test_accessibility_is_the_last_category() -> None:
+    """The new category comes last and has its report title."""
+    assert list(Category)[-1] is Category.ACCESSIBILITY
+    assert CATEGORY_TITLES[Category.ACCESSIBILITY] == "Accessibility"

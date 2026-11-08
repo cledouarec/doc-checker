@@ -31,6 +31,13 @@ from doc_checker.extract.html.dom import (
     prune_deep,
     strip_elements,
 )
+from doc_checker.extract.html.facts import (
+    ContentSpots,
+    content_spots,
+    page_hrefs,
+    page_ids,
+    page_title,
+)
 from doc_checker.extract.html.images import ImageResolver
 from doc_checker.extract.html.links import (
     LinkResolver,
@@ -56,11 +63,15 @@ from doc_checker.model.document import (
     SourceRef,
     carry_anchors,
 )
+from doc_checker.model.facts import HtmlPageFacts
 from doc_checker.text.lang import AUTO, declared_language, resolve_language
+from doc_checker.text.normalize import printable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from lxml.html import HtmlElement
 
     from doc_checker.config import HtmlConfig
     from doc_checker.extract.html.dom import RawBlock
@@ -123,6 +134,32 @@ def _ordered_pages(
     return order_pages(pages, mode=cfg.page_order, nav=nav), profiles
 
 
+def _scope(
+    page: HtmlPage,
+    profile: Profile,
+    cfg: HtmlConfig,
+) -> tuple[HtmlElement, tuple[str, ...]]:
+    """Return the root of the content of a page, and what is removed in it."""
+    root = content_root(page.tree, profile, cfg.content_selector)
+    selectors = (*GLOBAL_STRIP, *profile.strip, *cfg.strip_selectors)
+    if root.tag == "body":
+        selectors = (*selectors, *_BODY_CHROME)
+    return root, selectors
+
+
+def _spots(
+    page: HtmlPage,
+    profile: Profile,
+    cfg: HtmlConfig,
+) -> ContentSpots:
+    """Return the places of the content that the audit points at.
+
+    It is read before the chrome of the page is removed.
+    """
+    root, selectors = _scope(page, profile, cfg)
+    return content_spots(root, selectors)
+
+
 def _raw_blocks(
     page: HtmlPage,
     profile: Profile,
@@ -132,10 +169,7 @@ def _raw_blocks(
     counter: Counter[str],
 ) -> list[RawBlock]:
     """Return the raw blocks of the content of a page."""
-    root = content_root(page.tree, profile, cfg.content_selector)
-    selectors = (*GLOBAL_STRIP, *profile.strip, *cfg.strip_selectors)
-    if root.tag == "body":
-        selectors = (*selectors, *_BODY_CHROME)
+    root, selectors = _scope(page, profile, cfg)
     strip_elements(root, selectors)
     return blocks_from_root(root, images=images, counter=counter)
 
@@ -321,6 +355,77 @@ def _without_chrome(
     return blocks, _Chrome(chrome, chrome_keys, chrome_images)
 
 
+class _PageRead(NamedTuple):
+    """What the audit reads of a page before its content is pruned.
+
+    Attributes:
+        ids: Identifiers of the whole page.
+        hrefs: Targets of the links of the whole page.
+        lang: Printable ``lang`` of the page, if it has one.
+        title: Printable title of the head, if any.
+    """
+
+    ids: frozenset[str]
+    hrefs: tuple[str, ...]
+    lang: str | None
+    title: str | None
+
+
+def _read_page(page: HtmlPage) -> _PageRead:
+    """Return what the audit reads of the whole of a page."""
+    lang = page.tree.get("lang")
+    return _PageRead(
+        page_ids(page.tree),
+        page_hrefs(page.tree),
+        None if lang is None else printable(lang),
+        page_title(page.tree),
+    )
+
+
+def _page_facts(
+    ordered: Sequence[HtmlPage],
+    read: Sequence[_PageRead],
+    spots: Sequence[ContentSpots],
+    resolve: LinkResolver,
+) -> tuple[HtmlPageFacts, ...]:
+    """Return the facts of each page, the targets of its links resolved."""
+    facts = []
+    for page, seen, found in zip(ordered, read, spots, strict=True):
+        hrefs = dict.fromkeys(href.partition("#")[0] for href in seen.hrefs)
+        links = (resolve.link("", href, page.rel_path) for href in hrefs)
+        targets = {
+            link.page
+            for link in links
+            if link is not None
+            and link.url is None
+            and link.page is not None
+            and link.page != page.rel_path
+        }
+        facts.append(
+            HtmlPageFacts(
+                file=page.rel_path,
+                lang=seen.lang,
+                title=seen.title,
+                ids=seen.ids,
+                links_to=frozenset(targets),
+                empty_links=found.empty_links,
+                unresolved=found.unresolved,
+                bare_tables=found.bare_tables,
+            ),
+        )
+    return tuple(facts)
+
+
+def _sample(blocks: Sequence[Block]) -> str:
+    """Return the text of the first blocks, in which the language is read."""
+    return " ".join(
+        islice(
+            (block.text for block in blocks if not _is_image(block)),
+            _LANG_SAMPLE_BLOCKS,
+        ),
+    )
+
+
 def _generator(
     ordered: Sequence[HtmlPage],
     profiles: dict[str, Profile],
@@ -344,6 +449,7 @@ def load_html(
     *,
     lang: str,
     images: bool = True,
+    audit: bool = False,
 ) -> Document:
     """Load an HTML file or a generated HTML site.
 
@@ -352,6 +458,8 @@ def load_html(
         cfg: HTML extraction settings.
         lang: Language requested by the user, or ``"auto"``.
         images: Whether the images give blocks and are read.
+        audit: Whether to read the facts of each page that only the audit
+            uses; without it, `Document.html_pages` is empty.
 
     Returns:
         The document, its blocks in reading order. A page whose content is
@@ -366,7 +474,13 @@ def load_html(
         msg = f"no HTML pages found in {path}"
         raise InputError(msg)
     ordered, profiles = _ordered_pages(pages, cfg)
+    read = [_read_page(page) for page in ordered] if audit else []
     deep = _pruned(ordered)
+    spots = (
+        [_spots(page, profiles[page.rel_path], cfg) for page in ordered]
+        if audit
+        else []
+    )
     counter: Counter[str] = Counter()
     raw = [
         _raw_blocks(
@@ -385,18 +499,12 @@ def load_html(
     blocks = strip_caption_numbers(blocks, counter)
     assign_section_paths(blocks)
     declared = declared_language(ordered[0].tree.get("lang"))
-    sample = " ".join(
-        islice(
-            (block.text for block in blocks if not _is_image(block)),
-            _LANG_SAMPLE_BLOCKS,
-        ),
-    )
     return Document(
         path=path,
         format="html",
         blocks=blocks,
         parts=[page.rel_path for page in ordered],
-        lang=resolve_language(lang, declared, sample),
+        lang=resolve_language(lang, declared, _sample(blocks)),
         declared_lang=declared,
         generator=_generator(ordered, profiles),
         normalization=counter,
@@ -404,4 +512,5 @@ def load_html(
         chrome_keys=chrome.keys,
         warnings=[*deep, *image_warnings(blocks)],
         chrome_images=chrome.images,
+        html_pages=_page_facts(ordered, read, spots, resolve) if audit else (),
     )

@@ -22,7 +22,7 @@ MATCHED: Final = frozenset(
     {PairKind.EQUAL, PairKind.MODIFIED, PairKind.SPLIT, PairKind.MERGE},
 )
 
-type SegmentOp = Literal["equal", "delete", "insert"]
+type SegmentOp = Literal["equal", "delete", "insert", "mark"]
 
 
 @dataclass(frozen=True, slots=True)

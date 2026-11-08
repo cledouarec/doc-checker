@@ -10,6 +10,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
+    from doc_checker.model.facts import (
+        HtmlPageFacts,
+        OutlineEntry,
+        PdfPageFacts,
+        TagTree,
+    )
+
 # Key of `Block.attrs` that tells how a PDF found a heading, and its values:
 # a bookmark of the outline, or the look of the block.
 HEADING_SOURCE: Final = "heading"
@@ -275,6 +282,12 @@ class Document:
         tagged: Whether a PDF declares a tag structure, from its
             ``/MarkInfo``; ``None`` for HTML.
         chrome_images: Digests of the images removed as page chrome.
+        title: Title of the metadata of a PDF.
+        outline: Bookmarks of a PDF, in order.
+        html_pages: Facts of each HTML page, in reading order.
+        pdf_pages: Facts of each PDF page, in order.
+        tags: Structure tree of a PDF. The outline, the pages and the tree
+            are read only for the audit.
     """
 
     path: Path
@@ -290,6 +303,11 @@ class Document:
     warnings: list[str]
     tagged: bool | None = None
     chrome_images: frozenset[str] = frozenset()
+    title: str | None = None
+    outline: tuple[OutlineEntry, ...] = ()
+    html_pages: tuple[HtmlPageFacts, ...] = ()
+    pdf_pages: tuple[PdfPageFacts, ...] = ()
+    tags: TagTree | None = None
 
     def resolve(self, source: SourceRef) -> Path:
         """Return the filesystem path of a source reference.
