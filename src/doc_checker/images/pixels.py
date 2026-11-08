@@ -28,6 +28,12 @@ EXTERNAL: Final = "external"  # Never fetched, compared by its URL.
 # A vector figure of a PDF page past the figures rendered on it, which a
 # warning of its page counts.
 PAGE_LIMIT: Final = "past the page limit"
+# A vector figure of a PDF page that `/Rotate` turns, which is not rendered.
+NOT_RENDERED: Final = "not rendered"
+# The problems of the images left unread on purpose: an image that is never
+# fetched, or a vector figure that its page draws but that is not rendered.
+# Such an image is not broken.
+NOT_READ: Final = frozenset({EXTERNAL, PAGE_LIMIT, NOT_RENDERED})
 LOSSLESS_FORMATS: Final = frozenset(
     {"png", "gif", "bmp", "tiff", "flate", "raw", "ccitt", "jbig2"},
 )

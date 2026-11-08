@@ -10,12 +10,15 @@ read under the root of the site.
 from collections import Counter
 from dataclasses import replace
 from itertools import islice, starmap
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from doc_checker.errors import InputError
 from doc_checker.extract.common import (
+    IMAGE_CHROME,
+    TINY_IMAGE,
     assign_section_paths,
     image_warnings,
+    is_tiny_image,
     normalized_block,
     repeated_images,
     strip_caption_numbers,
@@ -68,7 +71,6 @@ if TYPE_CHECKING:
 _BODY_CHROME: Final = ("header", "footer", "aside")
 _LANG_SAMPLE_BLOCKS: Final = 200
 _ROLE: Final = "role"
-_IMAGE_CHROME: Final = "image_chrome"  # Images removed as page chrome.
 
 
 def _profile_for(page: HtmlPage, cfg: HtmlConfig) -> Profile:
@@ -249,23 +251,38 @@ def _page_blocks(
     ]
 
 
+class _Chrome(NamedTuple):
+    """What a site repeats on its pages, as page chrome.
+
+    Attributes:
+        texts: Texts of the blocks of the chrome, each once, in order.
+        keys: Strict keys of the blocks of the chrome.
+        images: Digests of the images of the chrome.
+    """
+
+    texts: list[str]
+    keys: frozenset[str]
+    images: frozenset[str]
+
+
 def _without_chrome(
     per_page: Sequence[Sequence[Block]],
     counter: Counter[str],
-) -> tuple[list[Block], list[str], frozenset[str]]:
+) -> tuple[list[Block], _Chrome]:
     """Remove the blocks of text and the images repeated as page chrome.
 
     The chrome of text is found among the blocks of text only, and the
     chrome of images among the images; the images removed are counted
-    (``image_chrome``).
+    (``image_chrome``). The tiny images, as `is_tiny_image` tells, are
+    removed too, and counted apart (``tiny_image``).
 
     Args:
         per_page: Blocks of each page, in page order.
         counter: Normalization counter to update.
 
     Returns:
-        The blocks kept, in order, with the anchors of the others; the
-        texts of the chrome; the strict keys of the chrome.
+        The blocks kept, in order, with the anchors of the others, and the
+        chrome.
     """
     texts = [[b for b in blocks if not _is_image(b)] for blocks in per_page]
     chrome_keys = find_chrome(texts)
@@ -277,7 +294,10 @@ def _without_chrome(
             if block.key_strict in chrome_keys
         ),
     )
-    chrome_images = repeated_images(per_page, share=CHROME_MIN_SHARE)
+    sized = [
+        [b for b in blocks if not is_tiny_image(b)] for blocks in per_page
+    ]
+    chrome_images = repeated_images(sized, share=CHROME_MIN_SHARE)
 
     def is_chrome(block: Block) -> bool:
         if _is_image(block) and block.image is not None:
@@ -285,11 +305,20 @@ def _without_chrome(
         return block.key_strict in chrome_keys
 
     every = [block for blocks in per_page for block in blocks]
-    removed = sum(_is_image(block) and is_chrome(block) for block in every)
+    tiny = sum(is_tiny_image(block) for block in every)
+    removed = sum(
+        _is_image(block) and not is_tiny_image(block) and is_chrome(block)
+        for block in every
+    )
     if removed:
-        counter[_IMAGE_CHROME] += removed
-    blocks = carry_anchors(every, lambda block: not is_chrome(block))
-    return blocks, chrome, chrome_keys
+        counter[IMAGE_CHROME] += removed
+    if tiny:
+        counter[TINY_IMAGE] += tiny
+    blocks = carry_anchors(
+        every,
+        lambda block: not (is_tiny_image(block) or is_chrome(block)),
+    )
+    return blocks, _Chrome(chrome, chrome_keys, chrome_images)
 
 
 def _generator(
@@ -351,7 +380,7 @@ def load_html(
     ]
     resolve = _resolver(path, pages, redirects, raw)
     per_page = _page_blocks(path, ordered, raw, resolve, counter)
-    blocks, chrome, chrome_keys = _without_chrome(per_page, counter)
+    blocks, chrome = _without_chrome(per_page, counter)
     blocks = strip_heading_numbers(blocks, counter)
     blocks = strip_caption_numbers(blocks, counter)
     assign_section_paths(blocks)
@@ -371,7 +400,8 @@ def load_html(
         declared_lang=declared,
         generator=_generator(ordered, profiles),
         normalization=counter,
-        chrome=chrome,
-        chrome_keys=chrome_keys,
+        chrome=chrome.texts,
+        chrome_keys=chrome.keys,
         warnings=[*deep, *image_warnings(blocks)],
+        chrome_images=chrome.images,
     )

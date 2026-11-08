@@ -9,9 +9,11 @@ import click
 import pytest
 
 from doc_checker.compare.engine import CompareResult, compare_documents
-from doc_checker.config import Config
+from doc_checker.config import Config, HtmlConfig
 from doc_checker.errors import ConfigError
-from doc_checker.model.document import BlockKind, Link, SourceRef
+from doc_checker.extract.html import load_html
+from doc_checker.images.refs import raster_ref
+from doc_checker.model.document import BlockKind, Link, PixelSource, SourceRef
 from doc_checker.model.findings import DiffSegment
 from doc_checker.pipeline import write_reports
 from doc_checker.report.context import MAX_OCCURRENCES_SHOWN, relative_link
@@ -23,7 +25,16 @@ from doc_checker.report.markdown import (
     render_markdown,
 )
 from doc_checker.report.terminal import render_blocks, render_summary, visible
-from tests.builders import PARAGRAPHS, make_block, make_document
+from tests.builders import (
+    FIGURES_EN,
+    PARAGRAPHS,
+    build_sphinx_like,
+    image_result,
+    make_block,
+    make_document,
+    make_image_block,
+)
+from tests.image_builders import drawing, encode
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -660,3 +671,110 @@ def test_markdown_diff_deletes_before_it_adds(tmp_path: Path) -> None:
         "```diff\n- pip install example\n- example --version\n"
         "+ pip install example example --version\n```"
     ) in text
+
+
+def _write(result: CompareResult, out: Path) -> dict[str, bytes]:
+    """Write both reports and return every file written, by name."""
+    write_reports(result, Config(output=out))
+    return {
+        path.relative_to(out).as_posix(): path.read_bytes()
+        for path in sorted(out.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_reports_are_byte_stable(tmp_path: Path) -> None:
+    """Two runs write the same files, byte for byte."""
+    result = image_result()
+    first = _write(result, tmp_path / "a")
+    second = _write(result, tmp_path / "b")
+    assert first == second
+    assets = [name for name in first if name.startswith("report_assets/")]
+    assert len(assets) == 2
+
+
+def test_markdown_assets_exist(tmp_path: Path) -> None:
+    """Each image of the Markdown report is a file next to it."""
+    path = render_markdown(image_result(), tmp_path / "report.md")
+    text = path.read_text(encoding="utf-8")
+    names = re.findall(r"\]\((report_assets/[0-9a-f]{16}\.webp)\)", text)
+    assert len(names) == 2
+    assert all((tmp_path / name).is_file() for name in names)
+
+
+def test_markdown_assets_are_kept_or_mended(tmp_path: Path) -> None:
+    """A thumbnail written whole is kept, a cut one rewritten, others stay."""
+    first = render_markdown(image_result(), tmp_path / "report.md")
+    text = first.read_text(encoding="utf-8")
+    names = re.findall(r"!\[[A-Za-z]+ image\]\(report_assets/(.+?)\)", text)
+    assets = tmp_path / "report_assets"
+    kept, cut = (assets / name for name in names)
+    whole, data = kept.stat().st_mtime_ns, cut.read_bytes()
+    cut.write_bytes(data[: len(data) // 2])
+    (assets / "0000000000000000.webp").write_bytes(b"older")
+    again = render_markdown(image_result(), first)
+    assert (kept.stat().st_mtime_ns, cut.read_bytes()) == (whole, data)
+    assert (assets / "0000000000000000.webp").read_bytes() == b"older"
+    assert again.read_text(encoding="utf-8") == text
+    assert len(list(assets.iterdir())) == 3
+
+
+def test_reports_tell_whether_images_were_compared(tmp_path: Path) -> None:
+    """The reports count the images matched, or say they were not compared."""
+    files = _write(image_result(), tmp_path / "on")
+    report = files["report.md"].decode()
+    assert "| Images | 1 | 1 |" in report
+    assert "of reference blocks, 1 of 1 reference images \xb7" in report
+    html_report = files["report.html"].decode()
+    assert "of reference blocks, 1 of 1 reference images &middot;" in (
+        html_report
+    )
+    block = make_block(PARAGRAPHS[0])
+    off = compare_documents(
+        make_document(block),
+        make_document(block),
+        Config(images=False),
+    )
+    files = _write(off, tmp_path / "off")
+    report = files["report.md"].decode()
+    assert "| Images | not compared | not compared |" in report
+    assert "reference images" not in report
+    html_report = files["report.html"].decode()
+    assert html_report.count('<td class="quote">not compared</td>') == 2
+
+
+def test_report_with_many_image_findings_stays_bounded(tmp_path: Path) -> None:
+    """Many missing images make one group and a bounded report."""
+    blocks = []
+    for number in range(150):
+        data = encode(drawing(f"image {number}", size=(200, 120)))
+        ref = raster_ref(
+            data,
+            name=f"{number}.png",
+            source=PixelSource(data=data),
+        )
+        blocks += [
+            make_block(f"Paragraph {number} talks about its own topic here."),
+            make_image_block(ref),
+        ]
+    texts = [block for block in blocks if block.kind is not BlockKind.IMAGE]
+    result = compare_documents(
+        make_document(*blocks),
+        make_document(*texts),
+        Config(),
+    )
+    (group,) = [f for f in result.findings if f.rule == "image.missing"]
+    assert len(group.occurrences) == 150
+    out = tmp_path / "out"
+    write_reports(result, Config(output=out))
+    assert (out / "report.html").stat().st_size < 3_000_000
+    assert len(list((out / "report_assets").iterdir())) == 100
+
+
+def test_extract_lists_images(tmp_path: Path) -> None:
+    """The listing of a document describes its images."""
+    site = build_sphinx_like(FIGURES_EN, tmp_path / "s")
+    doc = load_html(site, HtmlConfig(), lang="en")
+    text = render_blocks(doc)
+    assert "image       index.html#installation  _images/setup.png" in text
+    assert '_images/setup.png, 400x250 px, PNG, alt "Installer steps"' in text

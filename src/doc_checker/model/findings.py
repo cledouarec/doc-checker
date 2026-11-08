@@ -122,8 +122,29 @@ class Finding:
     occurrences: tuple[Finding, ...] = ()
 
 
+def _image_key(image: ImageRef) -> str:
+    """Return what tells an image apart from the others of its document.
+
+    Args:
+        image: The image of a side.
+
+    Returns:
+        Its name; else, for an image of a PDF, its page and its position
+        among the images of the page, or its box for a vector figure; else
+        its digest.
+    """
+    source = image.source
+    if image.name or source is None or source.page is None:
+        return image.name or image.digest
+    return f"{source.page} {source.index} {source.box}"
+
+
 def finding_id(rule: str, ref: Side | None, new: Side | None) -> str:
     """Return a short identifier that is stable across runs.
+
+    The text of a side with an image is followed by what tells the image
+    apart, as `_image_key` gives it: two images that look alike on two
+    pages of a PDF have the same description.
 
     Args:
         rule: Rule identifier.
@@ -137,10 +158,11 @@ def finding_id(rule: str, ref: Side | None, new: Side | None) -> str:
     for side in (ref, new):
         if side is None:
             parts.extend(("", "", ""))
-        else:
-            parts.extend(
-                (side.source.file, side.source.anchor or "", side.text),
-            )
+            continue
+        text = side.text
+        if side.image is not None:
+            text += _ID_SEPARATOR + _image_key(side.image)
+        parts.extend((side.source.file, side.source.anchor or "", text))
     digest = hashlib.blake2b(
         _ID_SEPARATOR.join(parts).encode(),
         digest_size=_ID_DIGEST_SIZE,

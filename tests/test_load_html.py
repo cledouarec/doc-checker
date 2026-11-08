@@ -7,12 +7,14 @@ import html
 from typing import TYPE_CHECKING
 
 import pytest
+from PIL import Image
 
 from doc_checker.config import Config, HtmlConfig
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
 from doc_checker.extract.html import images as html_images
 from doc_checker.extract.html import load_html
+from doc_checker.images.refs import content_digest
 from doc_checker.model.document import NUMBER_ATTR, BlockKind
 from tests.builders import (
     FIGURES_EN,
@@ -347,6 +349,24 @@ def test_image_on_most_pages_is_chrome(tmp_path: Path) -> None:
     doc = load_html(tmp_path / "s", HtmlConfig(), lang="en")
     assert [i.name for i in _images(doc)] == [f"p{n}.png" for n in range(4)]
     assert doc.normalization["image_chrome"] == 4
+    assert doc.chrome_images == frozenset({content_digest(logo)})
+
+
+def test_tiny_images_are_left_out_and_counted(tmp_path: Path) -> None:
+    """Spacers and rules drawn as images are no images of the content."""
+    site = tmp_path / "s"
+    _page(
+        site,
+        '<p id="top">Text of the page here.</p><img src="spacer.gif">'
+        '<img id="rule" src="rule.png"><img src="figure.png">',
+    )
+    (site / "spacer.gif").write_bytes(encode(Image.new("P", (1, 1)), "GIF"))
+    (site / "rule.png").write_bytes(encode(Image.new("RGB", (600, 3))))
+    (site / "figure.png").write_bytes(encode(drawing("figure")))
+    doc = load_html(site, HtmlConfig(), lang="en")
+    assert [i.name for i in _images(doc)] == ["figure.png"]
+    assert doc.normalization["tiny_image"] == 2
+    assert any("rule" in block.anchors for block in doc.blocks)
 
 
 def test_images_are_left_out_on_request(tmp_path: Path) -> None:

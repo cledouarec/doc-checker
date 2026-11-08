@@ -235,6 +235,15 @@ article.finding h3 code {
   padding: 0.4rem 0.6rem;
 }
 
+.thumb {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.25rem 0;
+  border: 1px solid var(--border);
+  background: #ffffff;
+}
+
 del {
   color: var(--del-fg);
   background: var(--del-bg);

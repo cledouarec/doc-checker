@@ -19,8 +19,11 @@ from typing import TYPE_CHECKING, Final
 
 from doc_checker.errors import InputError
 from doc_checker.extract.common import (
+    IMAGE_CHROME,
+    TINY_IMAGE,
     assign_section_paths,
     image_warnings,
+    is_tiny_image,
     normalized_block,
     repeated_images,
     strip_caption_numbers,
@@ -35,7 +38,7 @@ from doc_checker.extract.pdf.catalog import read_catalog
 from doc_checker.extract.pdf.chrome import find_chrome, title_pages
 from doc_checker.extract.pdf.headings import heading_levels
 from doc_checker.extract.pdf.joining import code_text, prose_text, vocabulary
-from doc_checker.extract.pdf.kinds import is_caption, toc_pages
+from doc_checker.extract.pdf.kinds import figure_list, is_caption, toc_pages
 from doc_checker.extract.pdf.layout import page_lines
 from doc_checker.extract.pdf.reader import (
     MAX_PAGE_FIGURES,
@@ -79,7 +82,6 @@ LANG_SAMPLE_BLOCKS: Final = 200  # Blocks whose text tells the language.
 
 _DIGITS: Final = re.compile(r"\d+")
 _MORE_LABELS: Final = f", {ELLIPSIS}"  # Ends a list of labels that goes on.
-_IMAGE_CHROME: Final = "image_chrome"  # Images removed as page chrome.
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,23 +396,26 @@ def _placed_images(
     file: str,
     share: float,
     counter: Counter[str],
-) -> list[_PlacedImage]:
+) -> tuple[list[_PlacedImage], frozenset[str]]:
     """Make the image blocks of a document, without its image chrome.
 
     An image whose content comes back on enough pages, as `repeated_images`
     tells with the share of the pages, is chrome, such as a logo: it is
-    removed.
+    removed. So is a tiny image, as `is_tiny_image` tells, which is counted
+    apart.
 
     Args:
         pdf: What is read from the file.
         file: The name of the PDF file, which the blocks point to.
         share: Least share of the pages on which an image is chrome.
         counter: The counts of the normalizations, in which `image_chrome`
-            goes up by one for each image removed.
+            goes up by one for each image removed as chrome, and
+            `tiny_image` for each tiny image.
 
     Returns:
         The image blocks that are kept, with where their images lie, by
-        page, then from the top of the page down, then from left to right.
+        page, then from the top of the page down, then from left to right;
+        and the digests of the images of the chrome.
     """
     per_page = [
         [
@@ -425,18 +430,26 @@ def _placed_images(
         ]
         for index, page in enumerate(pdf.pages)
     ]
-    chrome = repeated_images(per_page, share=share)
+    sized = [
+        [b for b in blocks if not is_tiny_image(b)] for blocks in per_page
+    ]
+    chrome = repeated_images(sized, share=share)
     kept = [
         _PlacedImage(index, image.top, image.x0, block)
         for index, (page, blocks) in enumerate(
             zip(pdf.pages, per_page, strict=True),
         )
         for image, block in zip(page.images, blocks, strict=True)
-        if image.ref.digest not in chrome
+        if image.ref.digest not in chrome and not is_tiny_image(block)
     ]
-    found = sum(len(page.images) for page in pdf.pages)
-    _count(counter, _IMAGE_CHROME, found - len(kept))
-    return sorted(kept, key=lambda image: (image.page, -image.top, image.x0))
+    found = sum(len(blocks) for blocks in sized)
+    _count(counter, IMAGE_CHROME, found - len(kept))
+    _count(counter, TINY_IMAGE, sum(map(len, per_page)) - found)
+    ordered = sorted(
+        kept,
+        key=lambda image: (image.page, -image.top, image.x0),
+    )
+    return ordered, chrome
 
 
 def _with_images(
@@ -500,15 +513,18 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
     Returns:
         The blocks, each located on the page of its first line, and the image
         blocks among them, each before the first block that starts under its
-        image.
+        image. The entries of a list of figures or tables, as `figure_list`
+        finds them, are contents.
     """
+    listed = figure_list(texts)
     blocks = []
     for index, (draft, text) in enumerate(zip(drafts, texts, strict=True)):
         page = draft.lines[0].page
         kind, raw_text = _kind(
             draft,
             text,
-            page_kind=kinds.get(page),
+            page_kind=kinds.get(page)
+            or (BlockKind.TOC if index in listed else None),
             heading=index in levels,
             counter=counter,
         )
@@ -642,17 +658,18 @@ def load_pdf(
     kinds, drafts = _drafts(kept, body=body, counter=counter)
     texts = _texts(drafts, counter)
     levels = _levels(drafts, texts, pdf.bookmarks, body=body)
+    images, chrome_images = _placed_images(
+        pdf,
+        file=path.name,
+        share=cfg.repeat_share,
+        counter=counter,
+    )
     blocks = _blocks(
         drafts,
         texts,
         levels=levels,
         kinds=kinds,
-        images=_placed_images(
-            pdf,
-            file=path.name,
-            share=cfg.repeat_share,
-            counter=counter,
-        ),
+        images=images,
         file=path.name,
         counter=counter,
     )
@@ -681,4 +698,5 @@ def load_pdf(
             *image_warnings(blocks),
         ],
         tagged=pdf.catalog.tagged,
+        chrome_images=chrome_images,
     )

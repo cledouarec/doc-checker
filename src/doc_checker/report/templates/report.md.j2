@@ -8,7 +8,7 @@
 | {{ label }} | {{ ref_value }} | {{ new_value }} |
 {% endfor %}
 
-**Matched:** {{ matched }}% of reference blocks · **Moved:** {{ moved }}
+**Matched:** {{ matched }}% of reference blocks{% if matched_images %}, {{ matched_images }}{% endif %} · **Moved:** {{ moved }}
 
 ## Summary
 
@@ -67,7 +67,7 @@ No findings.
 | ID | Reference | New |
 |---|---|---|
 {% for item in context.shown(finding) %}
-| {{ md_code(item.id) }} | {{ link(item.ref, "ref") }}<br>{{ cell(item.ref) }} | {{ link(item.new, "new") }}<br>{{ cell(item.new) }} |
+| {{ md_code(item.id) }} | {{ image(item.ref, "ref") }}{{ link(item.ref, "ref") }}<br>{{ cell(item.ref) }} | {{ image(item.new, "new") }}{{ link(item.new, "new") }}<br>{{ cell(item.new) }} |
 {% endfor %}
 {% if context.hidden(finding) %}
 
@@ -97,7 +97,7 @@ and {{ context.hidden(finding) }} more occurrences
 
 | Reference | New |
 |---|---|
-| {{ cell(finding.ref) }} | {{ cell(finding.new) }} |
+| {{ image(finding.ref, "ref") }}{{ cell(finding.ref) }} | {{ image(finding.new, "new") }}{{ cell(finding.new) }} |
 {% endif %}
 {% endif %}
 {% endfor %}
