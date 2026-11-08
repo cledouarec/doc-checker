@@ -4,7 +4,9 @@
 The report is one file that opens from the disk: its style sheet and its
 script are inline, and a content security policy lets them run, but nothing
 else. The texts of the documents are escaped, and no URL of a document ever
-becomes the target of a link or the source of a resource.
+becomes the target of a link or the source of a resource. The only images are
+the WebP thumbnails that Pillow encodes again, in data URLs; an SVG is never
+written.
 """
 
 import base64
@@ -19,6 +21,7 @@ from doc_checker.report.context import (
     SEVERITY_TITLES,
     TEMPLATES,
     ReportContext,
+    Thumbnails,
     is_code,
 )
 
@@ -84,16 +87,25 @@ class _DomIds:
         return f"f-{finding_id}" if count == 1 else f"f-{finding_id}-{count}"
 
 
-def render_html(result: CompareResult, path: Path) -> Path:
+def render_html(
+    result: CompareResult,
+    path: Path,
+    thumbnails: Thumbnails | None = None,
+) -> Path:
     """Write the standalone HTML report of a comparison.
 
     Args:
         result: Comparison result.
         path: Report file to write.
+        thumbnails: Thumbnails of the sides of the findings, shared with the
+            other report; ``None`` for thumbnails of this report only.
 
     Returns:
         The written file.
     """
+    if thumbnails is None:
+        with Thumbnails(result) as own:
+            return render_html(result, path, own)
     context = ReportContext(result, path.parent)
     css = _asset("report.css")
     script = _asset("report.js")
@@ -104,6 +116,7 @@ def render_html(result: CompareResult, path: Path) -> Path:
         script=script,
         inputs=context.inputs(),
         matched=context.matched(),
+        matched_images=context.matched_images(),
         moved=result.stats.moved,
         severities=severities,
         counts=[
@@ -127,6 +140,7 @@ def render_html(result: CompareResult, path: Path) -> Path:
         shown=context.shown,
         hidden=context.hidden,
         is_code=is_code,
+        thumbnail=thumbnails.get,
         dom_id=_DomIds(),
     )
     path.write_text(text, encoding="utf-8", newline="\n")

@@ -274,6 +274,7 @@ class Document:
         warnings: Non fatal extraction warnings.
         tagged: Whether a PDF declares a tag structure, from its
             ``/MarkInfo``; ``None`` for HTML.
+        chrome_images: Digests of the images removed as page chrome.
     """
 
     path: Path
@@ -288,6 +289,7 @@ class Document:
     chrome_keys: frozenset[str]
     warnings: list[str]
     tagged: bool | None = None
+    chrome_images: frozenset[str] = frozenset()
 
     def resolve(self, source: SourceRef) -> Path:
         """Return the filesystem path of a source reference.

@@ -25,6 +25,15 @@ those above the count included, as a number that cannot be a page number
 speaks against a contents. A page that has a title keeps its entries whatever
 their numbers, as the pages of a volume may be numbered from 301. A roman
 numeral always counts.
+
+A list of figures or of tables, as LibreOffice writes it, is contents too,
+whatever the rest of its page: a run of at least `TOC_MIN_LINES` blocks that
+each start like a caption and end like an entry, with dot leaders or
+without, right under the title of such a list. Their numbers are not bounded
+by the count of the pages: LibreOffice may keep the page numbers that a list
+had in the document it converts. Without that title, a run of captions is
+no list, as captions stacked on a page may all end in a number or an
+acronym; only a page of contents, as above, types such entries.
 """
 
 import re
@@ -45,6 +54,23 @@ TOC_TITLES: Final = frozenset(
     {"contents", "table of contents", "table des matieres", "sommaire"},
 )
 INDEX_TITLES: Final = frozenset({"index"})
+# The titles of the lists of figures and tables, as `loose_key` writes them.
+FIGURE_LIST_TITLES: Final = frozenset(
+    {
+        "list of figures",
+        "list of tables",
+        "list of illustrations",
+        "table of figures",
+        "figure index",
+        "illustration index",
+        "table index",
+        "liste des figures",
+        "liste des tableaux",
+        "liste des illustrations",
+        "table des figures",
+        "table des illustrations",
+    },
+)
 TOC_MIN_LINES: Final = 3  # Fewest lines of a contents or an index page.
 TOC_MIN_SHARE: Final = 0.5  # Smallest share of the lines that are entries.
 
@@ -241,6 +267,35 @@ def toc_pages(
         if kind is not None:
             kinds[page] = kind
     return kinds
+
+
+def figure_list(texts: Sequence[str]) -> frozenset[int]:
+    """Find the entries of the lists of figures or tables of a document.
+
+    Args:
+        texts: The text of each block of the document, in reading order.
+
+    Returns:
+        The positions of the blocks in runs of at least `TOC_MIN_LINES`
+        consecutive blocks whose stripped text is a caption, as `is_caption`
+        tells, and an entry, as `_TOC_ENTRY` reads it, when the block right
+        before the run is a title of `FIGURE_LIST_TITLES`.
+    """
+    found: set[int] = set()
+    run: list[int] = []
+    for index, text in enumerate([*texts, ""]):
+        entry = text.strip()
+        if is_caption(entry) and _TOC_ENTRY.search(entry):
+            run.append(index)
+            continue
+        if (
+            len(run) >= TOC_MIN_LINES
+            and run[0] > 0
+            and loose_key(texts[run[0] - 1]) in FIGURE_LIST_TITLES
+        ):
+            found.update(run)
+        run = []
+    return frozenset(found)
 
 
 def is_caption(text: str) -> bool:

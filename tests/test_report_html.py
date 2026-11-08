@@ -3,6 +3,7 @@
 
 import base64
 import hashlib
+import html
 import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -11,10 +12,19 @@ import lxml.html
 import pytest
 
 from doc_checker.compare.engine import CompareResult, compare_documents
-from doc_checker.config import Config
-from doc_checker.model.document import BlockKind, Link
+from doc_checker.config import Config, HtmlConfig
+from doc_checker.extract.html import load_html
+from doc_checker.images.svg import parse_svg
+from doc_checker.model.document import BlockKind, ImageRef, Link
 from doc_checker.report.html import content_security_policy, render_html
-from tests.builders import PARAGRAPHS, make_block, make_document
+from tests.builders import (
+    PARAGRAPHS,
+    image_result,
+    make_block,
+    make_document,
+    make_image_block,
+)
+from tests.image_builders import drawing, encode
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -278,7 +288,7 @@ def test_html_report_isolates_document_texts(tmp_path: Path) -> None:
     assert [e.text for e in tree.cssselect("#warnings .quote")] == [
         "1 page(s) without text, probably scanned: 2",
     ]
-    assert len(tree.cssselect("table.inputs td.quote")) == 12
+    assert len(tree.cssselect("table.inputs td.quote")) == 14
     (article,) = tree.cssselect("article.finding")
     assert article.cssselect("p.detail")
     assert [a.text for a in article.cssselect("p.where a.source")] == [
@@ -336,6 +346,7 @@ def test_html_report_header_counts_findings(
         "Generator",
         "Language",
         "Blocks",
+        "Images",
     ]
     assert "50.0%" in header.cssselect("p.matched")[0].text_content()
     options = tree.cssselect("form#filters select[name=category] option")
@@ -389,3 +400,90 @@ def test_html_report_head_and_output_are_stable(
     assert not tree.xpath("//comment()")
     again = render_html(result, tmp_path / "again.html")
     assert again.read_text(encoding="utf-8") == text
+
+
+def test_html_report_images_are_webp_data_urls(tmp_path: Path) -> None:
+    """Thumbnails are the only images, WebP in data URLs."""
+    tree = _tree(render_html(image_result(), tmp_path / "report.html"))
+    images = tree.cssselect("img")
+    assert len(images) == 2
+    assert tree.xpath("//@src") == [image.get("src") for image in images]
+    for image in images:
+        assert image.get("class") == "thumb"
+        prefix, _, payload = image.get("src").partition(",")
+        assert prefix == "data:image/webp;base64"
+        data = base64.b64decode(payload, validate=True)
+        assert data[:4] == b"RIFF"
+        assert data[8:12] == b"WEBP"
+
+
+def test_html_report_never_inlines_svg(tmp_path: Path) -> None:
+    """An SVG with a script is described, never written in the report."""
+    source = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200">'
+        "<script>alert(1)</script><text>Evil</text></svg>"
+    )
+    identity = parse_svg(source.encode())
+    svg = ImageRef(
+        name="img/<b>evil</b>.svg",
+        format="svg",
+        digest=identity.digest,
+        vector=True,
+        texts=identity.texts,
+    )
+    result = compare_documents(
+        make_document(make_block(PARAGRAPHS[0]), make_image_block(svg)),
+        make_document(make_block(PARAGRAPHS[0])),
+        Config(),
+    )
+    tree = _tree(render_html(result, tmp_path / "report.html"))
+    assert not tree.xpath("//svg | //img | //b")
+    assert len(tree.xpath("//script")) == 1
+    assert "img/<b>evil</b>.svg, SVG" in tree.text_content()
+
+
+# An SVG that would run a script if a report ever wrote it out.
+EVIL_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200" '
+    'onload="alert(1)"><script>alert(2)</script><text>Evil</text></svg>'
+)
+EVIL_ALT = '"><svg onload=alert(3)><script>alert(4)</script>'
+
+
+def test_html_report_of_a_hostile_site_shows_only_thumbnails(
+    tmp_path: Path,
+) -> None:
+    """Images of a hostile site reach the report only as WebP thumbnails."""
+    png = base64.b64encode(encode(drawing("hostile"))).decode()
+    svg = base64.b64encode(EVIL_SVG.encode()).decode()
+    paragraph = f"<p>{PARAGRAPHS[0]}</p>"
+    images = (
+        f'<img src="data:image/png;base64,{png}" '
+        f'alt="{html.escape(EVIL_ALT)}">{EVIL_SVG}'
+        f'<img src="data:image/svg+xml;base64,{svg}" alt="drawing">'
+    )
+    for name, body in (("ref", paragraph + images), ("new", paragraph)):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "index.html").write_text(
+            f"<html><body><main>{body}</main></body></html>",
+            encoding="utf-8",
+        )
+    ref, new = (
+        load_html(tmp_path / name, HtmlConfig(), lang="en")
+        for name in ("ref", "new")
+    )
+    result = compare_documents(ref, new, Config())
+    assert [f.rule for f in result.findings] == ["image.missing"] * 3
+    tree = _tree(render_html(result, tmp_path / "report.html"))
+    (thumb,) = tree.cssselect("img")
+    assert thumb.get("class") == "thumb"
+    assert thumb.get("alt") == "Reference image"
+    assert tree.xpath("//@src") == [thumb.get("src")]
+    prefix, _, payload = thumb.get("src").partition(",")
+    assert prefix == "data:image/webp;base64"
+    data = base64.b64decode(payload, validate=True)
+    assert (data[:4], data[8:12]) == (b"RIFF", b"WEBP")
+    assert not tree.xpath("//svg | //text | //@onload")
+    assert not tree.xpath("//@*[starts-with(name(), 'on')]")
+    assert len(tree.xpath("//script")) == 1
+    assert EVIL_ALT in tree.text_content()

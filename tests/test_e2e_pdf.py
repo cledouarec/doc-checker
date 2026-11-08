@@ -1,6 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """End to end comparison of PDF documents."""
 
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -8,7 +9,7 @@ import pytest
 from reportlab.lib.units import mm
 
 from doc_checker.config import Config
-from doc_checker.model.findings import Severity
+from doc_checker.model.findings import Category, Severity
 from doc_checker.pipeline import run_compare
 from tests.builders import (
     FIGURES_EN,
@@ -598,6 +599,24 @@ def test_layout_only_differences_produce_no_finding(
     assert result.stats.matched > 0
     assert [
         (f.rule, f.severity) for f in result.findings if f.severity >= MI
+    ] == []
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["forward", "swapped"])
+def test_logo_chrome_on_one_side_only_gives_no_image_finding(
+    tmp_path: Path,
+    order: tuple[int, int],
+) -> None:
+    """A logo that only the longer document removes as chrome is no image."""
+    two = replace(FIGURES_EN, sections=FIGURES_EN.sections[:2])
+    pdfs = (
+        build_reportlab_pdf(two, tmp_path / "two.pdf", logo=True),
+        build_reportlab_pdf(two, tmp_path / "toc.pdf", logo=True, toc=True),
+    )
+    result = run_compare(pdfs[order[0]], pdfs[order[1]], Config())
+    assert result.stats.matched_images > 0
+    assert [
+        f.rule for f in result.findings if f.category is Category.IMAGE
     ] == []
 
 

@@ -12,11 +12,15 @@ from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from doc_checker.compare.engine import compare_documents
+from doc_checker.config import Config
+from doc_checker.images.refs import raster_ref
 from doc_checker.model.document import (
     Block,
     BlockKind,
     Document,
     ImageRef,
+    PixelSource,
     SourceRef,
 )
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
@@ -33,6 +37,8 @@ from tests.image_builders import (
 
 if TYPE_CHECKING:
     from PIL import Image
+
+    from doc_checker.compare.engine import CompareResult
 
 
 def make_block(
@@ -1294,4 +1300,32 @@ def make_image_block(ref: ImageRef, *, file: str = "index.html") -> Block:
         raw_text="",
         source=SourceRef(file),
         image=ref,
+    )
+
+
+def _data_image_block(image: Image.Image) -> Block:
+    """Return the block of a PNG kept in memory, as a data URL keeps it."""
+    data = encode(image)
+    ref = raster_ref(data, name="a.png", source=PixelSource(data=data))
+    return make_image_block(ref)
+
+
+def image_result(*, scale: float = 0.4) -> CompareResult:
+    """Compare a paragraph and an image to the same with the image shrunk.
+
+    Args:
+        scale: Factor of both sides of the new image.
+
+    Returns:
+        The result, with one `image.degraded` finding whose sides both have
+        pixels.
+    """
+    original = drawing("setup")
+    return compare_documents(
+        make_document(make_block(PARAGRAPHS[0]), _data_image_block(original)),
+        make_document(
+            make_block(PARAGRAPHS[0]),
+            _data_image_block(scaled(original, scale)),
+        ),
+        Config(),
     )

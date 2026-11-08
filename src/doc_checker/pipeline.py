@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from doc_checker.compare.engine import compare_documents
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
+from doc_checker.report.context import Thumbnails
 from doc_checker.report.html import render_html
 from doc_checker.report.markdown import render_markdown
 
@@ -43,6 +44,28 @@ def run_compare(ref_path: Path, new_path: Path, cfg: Config) -> CompareResult:
     return compare_documents(ref, new, cfg)
 
 
+def _render_reports(result: CompareResult, cfg: Config) -> list[Path]:
+    """Write the reports of the formats of a run, with shared thumbnails.
+
+    Args:
+        result: Comparison result.
+        cfg: Run configuration, with the output directory and formats.
+
+    Returns:
+        The written report files.
+    """
+    cfg.output.mkdir(parents=True, exist_ok=True)
+    written = []
+    with Thumbnails(result) as thumbnails:
+        if "html" in cfg.formats:
+            html = cfg.output / "report.html"
+            written.append(render_html(result, html, thumbnails))
+        if "md" in cfg.formats:
+            markdown = cfg.output / "report.md"
+            written.append(render_markdown(result, markdown, thumbnails))
+    return written
+
+
 def write_reports(result: CompareResult, cfg: Config) -> list[Path]:
     """Write the reports of a comparison in the output directory.
 
@@ -52,18 +75,14 @@ def write_reports(result: CompareResult, cfg: Config) -> list[Path]:
 
     Returns:
         The written report files: ``report.html``, then ``report.md``,
-        for the formats of the configuration.
+        for the formats of the configuration. Both show the same
+        thumbnails, made once.
 
     Raises:
         ConfigError: If the reports cannot be written.
     """
-    written = []
     try:
-        cfg.output.mkdir(parents=True, exist_ok=True)
-        if "html" in cfg.formats:
-            written.append(render_html(result, cfg.output / "report.html"))
-        if "md" in cfg.formats:
-            written.append(render_markdown(result, cfg.output / "report.md"))
+        written = _render_reports(result, cfg)
     except OSError as exc:
         msg = f"cannot write reports to {cfg.output}: {exc.strerror}"
         raise ConfigError(msg) from None

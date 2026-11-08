@@ -65,6 +65,41 @@ def drawing(name: str, size: tuple[int, int] = (400, 250)) -> Image.Image:
     return image
 
 
+def smiley(width: int, height: int) -> Image.Image:
+    """Draw a smiley that is symmetric about its vertical axis.
+
+    It is drawn at twice its size, then reduced, as a renderer smooths its
+    edges, so that its renders at two near widths differ only by their
+    smoothing.
+
+    Args:
+        width: Width in pixels.
+        height: Height in pixels.
+
+    Returns:
+        An RGB image.
+    """
+    big_width, big_height = 2 * width, 2 * height
+    image = Image.new("L", (big_width, big_height), 255)
+    draw = ImageDraw.Draw(image)
+    line = max(1, big_width // 30)
+
+    def box(*shares: float) -> tuple[float, float, float, float]:
+        left, top, right, bottom = shares
+        return (
+            left * big_width,
+            top * big_height,
+            right * big_width,
+            bottom * big_height,
+        )
+
+    draw.ellipse(box(0.05, 0.05, 0.95, 0.95), outline=0, width=line)
+    draw.ellipse(box(0.30, 0.30, 0.40, 0.42), fill=0)
+    draw.ellipse(box(0.60, 0.30, 0.70, 0.42), fill=0)
+    draw.arc(box(0.25, 0.35, 0.75, 0.78), 20, 160, fill=0, width=line)
+    return image.resize((width, height), Image.Resampling.BOX).convert("RGB")
+
+
 def encode(image: Image.Image, fmt: str = "PNG", **options: object) -> bytes:
     """Encode an image.
 
