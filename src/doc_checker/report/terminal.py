@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import click
 
+from doc_checker.images.refs import describe
 from doc_checker.model.findings import Severity
 from doc_checker.report.context import UNKNOWN, matched_percent
 from doc_checker.text.normalize import BIDI_CLASS, CONTROL_CLASS, truncate
@@ -69,10 +70,18 @@ def _link_line(link: Link) -> str:
 
 
 def _block_lines(index: int, block: Block) -> list[str]:
-    """Return the line of a block, then the line of each of its links."""
+    """Return the line of a block, then the line of each of its links.
+
+    The line of an image describes it, as `describe` does.
+    """
+    content = (
+        _shorten(block.text, _MAX_TEXT)
+        if block.image is None
+        else _one_line(describe(block.image))
+    )
     line = (
         f"{index:>5}  {block.kind.value:<10}  {_one_line(block.source.href)}  "
-        f"{_shorten(block.text, _MAX_TEXT)}"
+        f"{content}"
     )
     return [line, *map(_link_line, block.links)]
 
@@ -87,11 +96,11 @@ def render_blocks(doc: Document) -> str:
         A header line, then one line per warning and one line per block,
         followed by one line per link of the block: its text and its
         `Link.target`, then ``(missing)`` for an internal link whose page
-        does not exist. The header tells the generator, a dash if it is
-        unknown, and whether a PDF is tagged. The values that come from the
-        document are on one line and have their controls made visible, as
-        `visible` does; an excerpt of a block shows its line breaks as
-        marks.
+        does not exist. The line of an image describes it, as `describe`
+        does. The header tells the generator, a dash if it is unknown, and
+        whether a PDF is tagged. The values that come from the document are
+        on one line and have their controls made visible, as `visible` does;
+        an excerpt of a block shows its line breaks as marks.
     """
     header = (
         f"{_one_line(str(doc.path))}: {doc.format}, {len(doc.parts)} page(s), "
@@ -126,11 +135,12 @@ def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
         reports: Report files written.
 
     Returns:
-        Styled text; ``click.echo`` removes the styles when not in a TTY. The
-        warnings of both documents follow the critical findings. The
-        values that come from the documents are on one line and have their
-        controls made visible, as `visible` does; an excerpt of a block
-        shows its line breaks as marks.
+        Styled text; ``click.echo`` removes the styles when not in a TTY.
+        A line counts the images when a document has some. The warnings of
+        both documents follow the critical findings. The values that come
+        from the documents are on one line and have their controls made
+        visible, as `visible` does; an excerpt of a block shows its line
+        breaks as marks.
     """
     ref, new, stats = result.ref, result.new, result.stats
     counts = ", ".join(
@@ -144,8 +154,13 @@ def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
             f"blocks {stats.ref_blocks} <-> {stats.new_blocks} | "
             f"matched {matched_percent(stats)}% | moved {stats.moved}"
         ),
-        f"findings: {counts}",
     ]
+    if stats.ref_images or stats.new_images:
+        lines.append(
+            f"images {stats.ref_images} <-> {stats.new_images} | "
+            f"matched {stats.matched_images}",
+        )
+    lines.append(f"findings: {counts}")
     critical = [
         finding
         for finding in result.findings

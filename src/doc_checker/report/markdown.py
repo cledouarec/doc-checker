@@ -1,5 +1,10 @@
 # Copyright 2026 Christophe Le Douarec
-"""Markdown report of a comparison."""
+"""Markdown report of a comparison.
+
+The thumbnails that the report shows are WebP files in a directory next to
+it, named by their content. A file already there is kept, and none is ever
+deleted.
+"""
 
 import difflib
 import re
@@ -12,6 +17,7 @@ from doc_checker.report.context import (
     TEMPLATES,
     UNKNOWN,
     ReportContext,
+    Thumbnails,
     is_code,
 )
 
@@ -20,8 +26,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from doc_checker.compare.engine import CompareResult
+    from doc_checker.images.thumbnail import Thumbnail
     from doc_checker.model.findings import DiffSegment, Finding, Side
 
+# The directory of the thumbnails, next to the report.
+ASSETS_DIR: Final = "report_assets"
+_IMAGE_LABELS: Final = {"ref": "Reference image", "new": "New image"}
 _ABSENT: Final = "\U00002014"
 _MARKUP: Final = {
     "delete": ("<del>", "</del>"),
@@ -205,17 +215,91 @@ def _count_of(categories: Sequence[tuple[object, Sequence[object]]]) -> int:
     return sum(len(findings) for _, findings in categories)
 
 
-def render_markdown(result: CompareResult, path: Path) -> Path:
-    """Write the Markdown report of a comparison.
+def _holds(target: Path, size: int) -> bool:
+    """Tell whether a file exists with a given size.
+
+    Args:
+        target: The file.
+        size: The size it must have, in bytes.
+
+    Returns:
+        Whether it is a file of that size.
+    """
+    try:
+        return target.is_file() and target.stat().st_size == size
+    except OSError:
+        return False
+
+
+class _Assets:
+    """The thumbnails that a Markdown report shows, as files next to it."""
+
+    def __init__(self, thumbnails: Thumbnails) -> None:
+        """Start with no thumbnail shown.
+
+        Args:
+            thumbnails: Thumbnails of the sides of the findings.
+        """
+        self._thumbnails = thumbnails
+        self._shown: dict[str, Thumbnail] = {}
+
+    def __call__(self, side: Side | None, which: Literal["ref", "new"]) -> str:
+        """Return the image that opens the table cell of a side.
+
+        Args:
+            side: A side of a finding, if any.
+            which: The document of the side.
+
+        Returns:
+            The image of its thumbnail and a line break, or "" without one.
+        """
+        thumb = self._thumbnails.get(side, which)
+        if thumb is None:
+            return ""
+        self._shown.setdefault(thumb.name, thumb)
+        return f"![{_IMAGE_LABELS[which]}]({ASSETS_DIR}/{thumb.name})<br>"
+
+    def write(self, directory: Path) -> None:
+        """Write each thumbnail shown that the directory does not hold yet.
+
+        A file of the name and of another size, which a run cut short may
+        leave, is written again; the bytes of a thumbnail are the same at
+        each run.
+
+        Args:
+            directory: Where the thumbnails go, created if some are shown.
+        """
+        if not self._shown:
+            return
+        directory.mkdir(exist_ok=True)
+        for name, thumb in self._shown.items():
+            target = directory / name
+            if not _holds(target, len(thumb.data)):
+                target.write_bytes(thumb.data)
+
+
+def render_markdown(
+    result: CompareResult,
+    path: Path,
+    thumbnails: Thumbnails | None = None,
+) -> Path:
+    """Write the Markdown report of a comparison, and its thumbnails.
 
     Args:
         result: Comparison result.
         path: Report file to write.
+        thumbnails: Thumbnails of the sides of the findings, shared with the
+            other report; ``None`` for thumbnails of this report only.
 
     Returns:
-        The written file.
+        The written file. The thumbnails that it shows are in `ASSETS_DIR`,
+        next to it.
     """
+    if thumbnails is None:
+        with Thumbnails(result) as own:
+            return render_markdown(result, path, own)
     context = ReportContext(result, path.parent)
+    assets = _Assets(thumbnails)
     inputs = [
         (label, md_cell_code(ref), md_cell_code(new))
         if label == "Path"
@@ -225,6 +309,7 @@ def render_markdown(result: CompareResult, path: Path) -> Path:
     text = TEMPLATES.get_template("report.md.j2").render(
         inputs=inputs,
         matched=context.matched(),
+        matched_images=context.matched_images(),
         moved=result.stats.moved,
         categories=context.categories(),
         summary=[
@@ -248,6 +333,8 @@ def render_markdown(result: CompareResult, path: Path) -> Path:
         shown_pattern=shown_pattern,
         link=lambda side, which: _source(context, side, which),
         cell=_cell,
+        image=assets,
     )
+    assets.write(path.parent / ASSETS_DIR)
     path.write_text(text, encoding="utf-8")
     return path

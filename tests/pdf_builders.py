@@ -1474,6 +1474,161 @@ def build_lines_pdf(
     return out
 
 
+# The figures of `build_figure_list_pdf`: title, page and the paragraph
+# under the caption, line by line.
+_LISTED_FIGURES: Final = (
+    (
+        "Main screen of the application",
+        2,
+        (
+            "The service opens on its main screen, which lists the projects",
+            "of the account and the jobs that run for each of them.",
+        ),
+    ),
+    (
+        "Flow of a request through the workers",
+        2,
+        (
+            "A request goes from the queue to a worker, which runs it and",
+            "writes its result back for the client that sent it.",
+        ),
+    ),
+    (
+        "State of the scheduler",
+        3,
+        (
+            "The scheduler keeps the jobs in the order of their deadlines,",
+            "and starts each one as soon as a worker is free.",
+        ),
+    ),
+    (
+        "Dashboard of a project",
+        3,
+        (
+            "Each project has a dashboard of its own, with the jobs of the",
+            "week and the share of them that ended without an error.",
+        ),
+    ),
+)
+_LIST_LEADING: Final = 14  # From one line to the next.
+_LIST_GAP: Final = 28  # From one block to the next.
+
+
+def build_figure_list_pdf(out: Path) -> Path:
+    """Write a guide that opens with a list of figures, as LibreOffice does.
+
+    The first page has the title ``Table of figures``, one entry a figure,
+    ``Figure n: Title``, its page number set at the right margin on the same
+    line without dot leaders, and a paragraph under the list. The second and
+    third pages hold the captions of the figures, each one above a
+    paragraph. The text is Helvetica 10, 72 pt from the edges, with
+    `_LIST_LEADING` points from one line to the next and `_LIST_GAP` from
+    one block to the next.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    right = _W - _LINES_MARGIN
+    y = _H - _LINES_MARGIN
+    canvas.setFont("Helvetica-Bold", 16)
+    canvas.drawString(_LINES_MARGIN, y, "Table of figures")
+    canvas.setFont("Helvetica", 10)
+    y -= _LIST_GAP
+    for number, (title, page, _) in enumerate(_LISTED_FIGURES, start=1):
+        canvas.drawString(_LINES_MARGIN, y, f"Figure {number}: {title}")
+        canvas.drawRightString(right, y, str(page))
+        y -= _LIST_LEADING
+    y -= _LIST_GAP
+    for line in (
+        "This guide shows the screens of the service and how they work, one",
+        "figure at a time, with the steps that lead to each of them.",
+    ):
+        canvas.drawString(_LINES_MARGIN, y, line)
+        y -= _LIST_LEADING
+    for page in (2, 3):
+        canvas.showPage()
+        canvas.setFont("Helvetica", 10)
+        y = _H - _LINES_MARGIN
+        for number, (title, on, lines) in enumerate(
+            _LISTED_FIGURES,
+            start=1,
+        ):
+            if on != page:
+                continue
+            canvas.drawString(_LINES_MARGIN, y, f"Figure {number}: {title}")
+            y -= _LIST_GAP
+            for line in lines:
+                canvas.drawString(_LINES_MARGIN, y, line)
+                y -= _LIST_LEADING
+            y -= _LIST_GAP
+    canvas.save()
+    return out
+
+
+# The paragraph around the figures of `build_stacked_figures_pdf`, line by
+# line.
+_STACKED_TEXT: Final = (
+    "The service reads its settings from a file and starts the workers that",
+    "pull jobs from the queue, while the scheduler keeps track of their state",
+    "and retries the failed ones after a delay, as the figures below show.",
+)
+
+
+def build_stacked_figures_pdf(
+    out: Path,
+    captions: Sequence[str],
+    *,
+    float_page: bool,
+) -> Path:
+    """Write a guide whose figures stack, each over its caption.
+
+    A paragraph opens the guide, and a section ``Setup`` on a page of its
+    own closes it. Each figure is a drawing, ``Figure n: Caption`` centred
+    under it, as pdflatex sets a float. The figures follow the first
+    paragraph on its page, or fill a page of their own, as pdflatex sets a
+    float page.
+
+    Args:
+        out: The PDF file to write.
+        captions: The texts of the captions, without their labels.
+        float_page: Whether the figures fill a page of their own.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Helvetica", 10)
+    y = _H - _LINES_MARGIN
+    for line in _STACKED_TEXT:
+        canvas.drawString(_LINES_MARGIN, y, line)
+        y -= _LIST_LEADING
+    if float_page:
+        canvas.showPage()
+        canvas.setFont("Helvetica", 10)
+        y = _H - _LINES_MARGIN + _LIST_GAP
+    for number, caption in enumerate(captions, start=1):
+        y -= _LIST_GAP + 120
+        picture = ImageReader(drawing(f"stacked {number}", (400, 240)))
+        canvas.drawImage(picture, _W / 2 - 100, y, width=200, height=120)
+        y -= _LIST_GAP
+        canvas.drawCentredString(_W / 2, y, f"Figure {number}: {caption}")
+    canvas.showPage()
+    canvas.setFont("Helvetica-Bold", 12)
+    y = _H - _LINES_MARGIN
+    canvas.drawString(_LINES_MARGIN, y, "Setup")
+    canvas.setFont("Helvetica", 10)
+    y -= _LIST_GAP
+    for line in _STACKED_TEXT:
+        canvas.drawString(_LINES_MARGIN, y, line)
+        y -= _LIST_LEADING
+    canvas.save()
+    return out
+
+
 def build_turned_pdf(
     pages: Sequence[Sequence[str]],
     out: Path,

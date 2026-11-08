@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from doc_checker.extract.pdf.kinds import is_caption, toc_pages
+from doc_checker.extract.pdf.kinds import figure_list, is_caption, toc_pages
 from doc_checker.model.document import BlockKind
 from tests.pdf_builders import make_line
 
@@ -327,3 +327,60 @@ def test_a_page_goes_on_with_the_contents_if_its_numbers_rise(
 def test_more_caption_labels(text: str) -> None:
     """Office suites name their figures in other ways."""
     assert is_caption(text)
+
+
+def test_list_of_figures_needs_a_run_of_entries() -> None:
+    """Three captions in a row that end with a page number are a list."""
+    entries = [
+        "Figure 1: Main screen 2",
+        "Figure 2: Flow of a request 2",
+        "Table 1: Options 3",
+    ]
+    texts = ["Table of figures", *entries, "This guide shows the service."]
+    assert figure_list(texts) == {1, 2, 3}
+    # Two entries are no list, nor is a run that a caption without a number
+    # breaks.
+    assert figure_list(texts[:3]) == set()
+    broken = ["Table of figures", *entries[:2], "Figure 3: Load", entries[2]]
+    assert figure_list(broken) == set()
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "List of Figures",
+        "LIST OF TABLES",
+        "Liste des figures",
+        "Liste des tableaux",
+        "Table des illustrations",
+        "Illustration Index",
+        "Table Index",
+        "Table of figures",
+    ],
+)
+def test_list_of_figures_opens_with_its_title(title: str) -> None:
+    """A run of entries is a list of figures under the title of one."""
+    entries = ["Figure 1: Sales in 2021", "Figure 2: Sales in 2022"]
+    texts = [title, *entries, "Figure 3: Sales in 2023", "The end."]
+    assert figure_list(texts) == {1, 2, 3}
+
+
+@pytest.mark.parametrize(
+    "captions",
+    [
+        ("Sales in 2021", "Sales in 2022", "Sales in 2023"),
+        ("Release 3", "Release 4", "Release 5"),
+        ("Step 1", "Step 2", "Step 3"),
+        ("Output of the CLI", "Schema of the XML", "Menu of the DVD"),
+    ],
+    ids=["years", "release", "step", "acronyms"],
+)
+def test_stacked_captions_without_a_title_stay_captions(
+    captions: tuple[str, ...],
+) -> None:
+    """Captions that end alike in a number or an acronym are no list."""
+    stacked = [f"Figure {n}: {text}" for n, text in enumerate(captions, 1)]
+    texts = ["The service has three views.", *stacked, "The end."]
+    assert figure_list(texts) == set()
+    # A title that does not open the run opens no list.
+    assert figure_list(["List of Figures", *texts]) == set()

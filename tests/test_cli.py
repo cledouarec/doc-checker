@@ -4,15 +4,18 @@
 import re
 from typing import TYPE_CHECKING
 
+import click
 import lxml.html
 from click.testing import CliRunner
 
 from doc_checker import __version__
 from doc_checker.cli import main
 from tests.builders import (
+    FIGURES_EN,
     SAMPLE_EN,
     build_mkdocs_like,
     build_sphinx_like,
+    figure_defect,
     replace_text,
 )
 from tests.pdf_builders import (
@@ -143,6 +146,28 @@ def test_compare_html_report_references_no_external_resource(
     style = tree.findtext(".//style")
     assert "url(" not in style
     assert "@import" not in style
+
+
+def test_compare_writes_image_thumbnails(tmp_path: Path) -> None:
+    """A degraded figure appears in both reports with its thumbnails."""
+    ref = build_sphinx_like(FIGURES_EN, tmp_path / "ref")
+    new = build_mkdocs_like(
+        figure_defect(FIGURES_EN, "setup", "x0.4"),
+        tmp_path / "new",
+    )
+    out = tmp_path / "out"
+    args = ["compare", str(ref), str(new), "-o", str(out)]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 0, result.output
+    assert "images 4 <-> 4 | matched 4" in click.unstyle(result.output)
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert html.count('class="thumb"') == 2
+    assert len(list((out / "report_assets").iterdir())) == 2
+    tree = lxml.html.document_fromstring(html)
+    assert not tree.xpath("//link | //svg")
+    sources = tree.xpath("//@src")
+    assert len(sources) == 2
+    assert all(s.startswith("data:image/webp;base64,") for s in sources)
 
 
 def test_compare_markdown_only(tmp_path: Path) -> None:

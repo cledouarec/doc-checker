@@ -4,7 +4,8 @@
 The numbers of the headings, such as ``2.1`` or ``Chapter 3``, and those of
 the captions, such as ``Figure 1``, are set apart from their texts, as
 generators number them differently. The images repeated on many pages are
-chrome, and the images that cannot be read are warnings.
+chrome, the images too small to show content are decoration, and the images
+that cannot be read are warnings.
 """
 
 import math
@@ -26,7 +27,14 @@ if TYPE_CHECKING:
 
 NUMBERED_MIN: Final = 3  # Fewest numbered headings of a numbered document.
 NUMBERED_SHARE: Final = 0.5  # Least share of the headings that are numbered.
-CHROME_MIN_PAGES: Final = 3  # Fewest pages on which chrome repeats.
+# Fewest pages on which an image repeats as chrome.
+IMAGE_CHROME_MIN_PAGES: Final = 3
+# The normalization counter of the images removed as page chrome.
+IMAGE_CHROME: Final = "image_chrome"
+# An image with a shorter side, in pixels, is decoration, such as a spacer
+# or a rule drawn as an image; its normalization counter.
+TINY_IMAGE_SIDE: Final = 4
+TINY_IMAGE: Final = "tiny_image"
 _WARNING_NAMES: Final = 10  # Most names of unreadable images in a warning.
 _INLINE_IMAGE: Final = "inline image"  # Name of an image without a name.
 
@@ -216,6 +224,27 @@ def strip_caption_numbers(
     ]
 
 
+def is_tiny_image(block: Block) -> bool:
+    """Tell an image block whose image is too small to show content.
+
+    Args:
+        block: A block.
+
+    Returns:
+        Whether it is an `IMAGE` block whose image has fewer than
+        `TINY_IMAGE_SIDE` pixels on a side. An image whose size is not
+        known, such as an SVG or an image that cannot be read, is not.
+    """
+    image = block.image
+    return (
+        block.kind is BlockKind.IMAGE
+        and image is not None
+        and image.width is not None
+        and image.height is not None
+        and min(image.width, image.height) < TINY_IMAGE_SIDE
+    )
+
+
 def repeated_images(
     pages: Sequence[Sequence[Block]],
     *,
@@ -229,7 +258,7 @@ def repeated_images(
 
     Returns:
         The digests of the images of `IMAGE` blocks found on at least
-        ``max(CHROME_MIN_PAGES, ceil(share * pages))`` pages, a page
+        ``max(IMAGE_CHROME_MIN_PAGES, ceil(share * pages))`` pages, a page
         counting once.
     """
     counts: Counter[str] = Counter()
@@ -240,7 +269,7 @@ def repeated_images(
             if block.kind is BlockKind.IMAGE and block.image is not None
         }
         counts.update(digests)
-    threshold = max(CHROME_MIN_PAGES, math.ceil(share * len(pages)))
+    threshold = max(IMAGE_CHROME_MIN_PAGES, math.ceil(share * len(pages)))
     return frozenset(
         digest for digest, count in counts.items() if count >= threshold
     )

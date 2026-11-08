@@ -5,13 +5,12 @@ import math
 from collections import Counter
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.extract.common import CHROME_MIN_PAGES
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from doc_checker.model.document import Block
 
+CHROME_MIN_PAGES: Final = 3
 CHROME_MIN_SHARE: Final = 0.5
 CHROME_EDGE_BLOCKS: Final = 5
 

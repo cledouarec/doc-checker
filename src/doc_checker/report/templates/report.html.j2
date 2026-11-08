@@ -23,7 +23,9 @@
 {% macro sides(finding) %}
 <div class="sides">
 {% for which, label, side in (("ref", "Reference", finding.ref), ("new", "New", finding.new)) %}
+{% set thumb = thumbnail(side, which) %}
 <div class="side {{ which }}"><h4>{{ label }}{% if side is not none and side.kind is not none %} <span class="kind">{{ side.kind.value | replace("_", " ") }}</span>{% endif %}</h4>
+{%- if thumb %}<img class="thumb" src="{{ thumb.data_uri }}" alt="{{ label }} image" width="{{ thumb.width }}" height="{{ thumb.height }}">{% endif %}
 {{- side_text(side, is_code(finding)) }}</div>
 {% endfor %}
 </div>
@@ -48,7 +50,7 @@
 {% endfor %}
 </tbody>
 </table>
-<p class="matched">Matched: {{ matched }}% of reference blocks &middot; Moved: {{ moved }}</p>
+<p class="matched">Matched: {{ matched }}% of reference blocks{% if matched_images %}, {{ matched_images }}{% endif %} &middot; Moved: {{ moved }}</p>
 <ul class="counts">
 {% for severity, count in counts %}
 <li data-severity="{{ severity.label }}"><span class="count">{{ count }}</span> {{ severity.label }}</li>

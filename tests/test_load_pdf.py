@@ -10,6 +10,7 @@ import pytest
 from pypdf import PdfWriter
 from pypdf.generic import NameObject, TextStringObject
 
+from doc_checker.compare.engine import compare_documents
 from doc_checker.config import Config, PdfConfig
 from doc_checker.errors import InputError
 from doc_checker.extract import detect_format, load_document
@@ -18,6 +19,7 @@ from doc_checker.images.pixels import TOO_LARGE
 from doc_checker.model.document import HEADING_SOURCE, NUMBER_ATTR, BlockKind
 from tests.builders import FIGURES_EN, SAMPLE_EN, SAMPLE_FR
 from tests.pdf_builders import (
+    build_figure_list_pdf,
     build_fpdf2_pdf,
     build_images_pdf,
     build_listing_pdf,
@@ -27,6 +29,7 @@ from tests.pdf_builders import (
     build_reportlab_pdf,
     build_scanned_pdf,
     build_shared_resources_pdf,
+    build_stacked_figures_pdf,
     build_turned_pdf,
 )
 
@@ -35,6 +38,7 @@ if TYPE_CHECKING:
 
     from doc_checker.model.document import Document
 
+NUMBERS = "text.number_changed"
 SECTION_HEADINGS = [(s.title, s.level) for s in SAMPLE_EN.sections]
 
 
@@ -171,6 +175,74 @@ def test_values_beyond_the_page_count_are_no_contents(tmp_path: Path) -> None:
     doc = _load(build_turned_pdf([values], tmp_path / "values.pdf"))
     assert doc.blocks
     assert BlockKind.TOC not in {block.kind for block in doc.blocks}
+
+
+def test_list_of_figures_is_contents(tmp_path: Path) -> None:
+    """A list of figures, as LibreOffice writes it, is typed as contents."""
+    doc = _load(build_figure_list_pdf(tmp_path / "figures.pdf"))
+    kinds = [(b.kind, b.source.page) for b in doc.blocks]
+    assert kinds.count((BlockKind.TOC, 1)) == 4
+    assert [b.text for b in doc.blocks if b.kind is BlockKind.CAPTION] == [
+        "Main screen of the application",
+        "Flow of a request through the workers",
+        "State of the scheduler",
+        "Dashboard of a project",
+    ]
+
+
+def test_tiny_images_are_left_out_and_counted(tmp_path: Path) -> None:
+    """Images of a pixel or three, used as rules, are no images."""
+    doc = _load(
+        build_images_pdf(tmp_path / "rules.pdf", pages=2, image_size=(3, 40)),
+    )
+    assert [b for b in doc.blocks if b.kind is BlockKind.IMAGE] == []
+    assert doc.normalization["tiny_image"] == 2
+
+
+@pytest.mark.parametrize("float_page", [False, True], ids=["stacked", "page"])
+@pytest.mark.parametrize(
+    ("captions", "edited", "rule"),
+    [
+        (("Sales in 2021", "Sales in 2022", "Sales in 2023"), "2024", NUMBERS),
+        (("Release 3", "Release 4", "Release 5"), "6", NUMBERS),
+        (
+            ("Output of the CLI", "Schema of the XML", "Menu of the DVD"),
+            "VM",
+            None,
+        ),
+    ],
+    ids=["years", "release", "acronyms"],
+)
+def test_stacked_captions_keep_their_changes(
+    tmp_path: Path,
+    captions: tuple[str, ...],
+    edited: str,
+    rule: str | None,
+    *,
+    float_page: bool,
+) -> None:
+    """Stacked captions that end alike stay captions, and are compared."""
+    ref = _load(
+        build_stacked_figures_pdf(
+            tmp_path / "ref.pdf",
+            captions,
+            float_page=float_page,
+        ),
+    )
+    assert [b.text for b in ref.blocks if b.kind is BlockKind.CAPTION] == [
+        *captions,
+    ]
+    last = captions[-1].rsplit(" ", 1)[0]
+    new = _load(
+        build_stacked_figures_pdf(
+            tmp_path / "new.pdf",
+            [*captions[:-1], f"{last} {edited}"],
+            float_page=float_page,
+        ),
+    )
+    rules = [f.rule for f in compare_documents(ref, new, Config()).findings]
+    assert len(rules) == 1
+    assert rule is None or rules == [rule]
 
 
 def test_scanned_page_and_artifacts(pdfs: dict[str, Path]) -> None:
@@ -503,6 +575,8 @@ def test_logo_on_every_page_is_chrome(tmp_path: Path) -> None:
         == 3
     )
     assert doc.normalization["image_chrome"] == pages
+    (logo,) = doc.chrome_images
+    assert all(b.image is None or b.image.digest != logo for b in doc.blocks)
 
 
 def test_pdf_with_hundreds_of_images_loads_quickly(tmp_path: Path) -> None:
@@ -543,7 +617,7 @@ def _text_counts(doc: Document) -> dict[str, int]:
     return {
         key: count
         for key, count in doc.normalization.items()
-        if key != "image_chrome"
+        if key not in {"image_chrome", "tiny_image"}
     }
 
 

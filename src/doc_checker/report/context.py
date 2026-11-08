@@ -1,13 +1,14 @@
 # Copyright 2026 Christophe Le Douarec
 """Format-neutral data shared by the Markdown and HTML reports.
 
-The module also sets up the templates of both reports, once.
+The module also sets up the templates of both reports, once, and makes the
+thumbnails that both show.
 """
 
 import os
 import urllib.parse
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, Self
 
 from jinja2 import (
     Environment,
@@ -16,14 +17,19 @@ from jinja2 import (
     select_autoescape,
 )
 
+from doc_checker.images.load import PixelLoader
+from doc_checker.images.thumbnail import make_thumbnail
 from doc_checker.model.document import BlockKind
 from doc_checker.model.findings import Category, Severity
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
+    from types import TracebackType
 
     from doc_checker.compare.engine import CompareResult, CompareStats
+    from doc_checker.images.thumbnail import Thumbnail
+    from doc_checker.model.document import ImageRef
     from doc_checker.model.findings import Finding, Side
 
 MAX_OCCURRENCES_SHOWN: Final = 100
@@ -42,6 +48,7 @@ SEVERITY_TITLES: Final[Mapping[Severity, str]] = {
 }
 # What stands for a value that a document does not tell.
 UNKNOWN: Final = "-"
+NOT_COMPARED: Final = "not compared"  # Images left out by --no-images.
 # The templates of the reports. Only the HTML one escapes the texts it
 # shows: the Markdown renderer escapes them itself, with md_text, md_code
 # and md_cell.
@@ -116,6 +123,104 @@ def is_code(finding: Finding) -> bool:
     )
 
 
+class Thumbnails:
+    """The thumbnails of the sides of the findings, made once for both reports.
+
+    The pixels of an image are read again, at the first demand of its
+    thumbnail, by a `PixelLoader` of its document, which opens with that
+    first demand. This object is a context manager that closes the loaders;
+    once closed, it reads no more pixels.
+    """
+
+    def __init__(self, result: CompareResult) -> None:
+        """Keep the documents whose images are read.
+
+        Args:
+            result: Comparison result.
+        """
+        self._paths = {"ref": result.ref.path, "new": result.new.path}
+        self._loaders: dict[str, PixelLoader] = {}
+        self._made: dict[tuple[str, ImageRef], Thumbnail | None] = {}
+        self._closed = False
+
+    def __enter__(self) -> Self:
+        """Return the thumbnails.
+
+        Returns:
+            This object itself.
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Close the loaders."""
+        self.close()
+
+    def close(self) -> None:
+        """Close the loaders, and read no more pixels."""
+        self._closed = True
+        for loader in self._loaders.values():
+            loader.close()
+        self._loaders.clear()
+
+    def get(
+        self,
+        side: Side | None,
+        which: Literal["ref", "new"],
+    ) -> Thumbnail | None:
+        """Return the thumbnail of the image of a side.
+
+        Args:
+            side: A side of a finding, if any.
+            which: The document of the side.
+
+        Returns:
+            The thumbnail, the same one each time for an image of a document;
+            ``None`` without a side, without an image, for an image without
+            pixels, such as an SVG, or for one whose pixels can no longer be
+            read.
+        """
+        image = None if side is None else side.image
+        if image is None or not image.readable:
+            return None
+        key = (which, image)
+        if key not in self._made:
+            if self._closed:
+                return None
+            self._made[key] = self._make(image, which)
+        return self._made[key]
+
+    def _make(
+        self,
+        image: ImageRef,
+        which: Literal["ref", "new"],
+    ) -> Thumbnail | None:
+        """Read the pixels of an image again and make its thumbnail.
+
+        Args:
+            image: An image with pixels.
+            which: Its document.
+
+        Returns:
+            The thumbnail, or ``None`` if the pixels cannot be read or put
+            in a thumbnail.
+        """
+        loader = self._loaders.get(which)
+        if loader is None:
+            loader = self._loaders[which] = PixelLoader(self._paths[which])
+        pixels = loader.load(image)
+        if pixels is None:
+            return None
+        try:
+            return make_thumbnail(pixels)
+        except OSError, ValueError:
+            return None
+
+
 class ReportContext:
     """Raw values of a report, with no formatting of any output format."""
 
@@ -143,11 +248,28 @@ class ReportContext:
             ),
             ("Language", ref.lang or UNKNOWN, new.lang or UNKNOWN),
             ("Blocks", str(stats.ref_blocks), str(stats.new_blocks)),
+            (
+                ("Images", str(stats.ref_images), str(stats.new_images))
+                if stats.images
+                else ("Images", NOT_COMPARED, NOT_COMPARED)
+            ),
         ]
 
     def matched(self) -> str:
         """Return the share of reference blocks found, in percent."""
         return matched_percent(self.result.stats)
+
+    def matched_images(self) -> str | None:
+        """Return the reference images matched, out of all of them.
+
+        Returns:
+            Such as ``3 of 4 reference images``, or None when the images
+            were not compared or neither document has one.
+        """
+        stats = self.result.stats
+        if not stats.images or not (stats.ref_images or stats.new_images):
+            return None
+        return f"{stats.matched_images} of {stats.ref_images} reference images"
 
     def categories(self) -> list[Category]:
         """Return the categories that have findings, in a stable order."""

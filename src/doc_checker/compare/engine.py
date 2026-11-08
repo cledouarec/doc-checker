@@ -19,6 +19,11 @@ that a generator that shifts every heading changes nothing. The links of
 matched blocks are compared by `link_drafts` of `doc_checker.compare.links`,
 which reports the links lost, broken or leading elsewhere.
 
+The images, which the alignment leaves out, are matched and judged by
+`image_drafts` of `doc_checker.compare.images`, and their drafts follow
+those of the text; an image that either document removed as page chrome is
+compared on neither side.
+
 The drafts then take the severities of the configuration, and those of the
 disabled rules, below the minimum severity or ignored are left out. Last,
 `group_findings` of `doc_checker.compare.aggregate` replaces the findings of
@@ -33,10 +38,16 @@ from doc_checker.compare.aggregate import group_findings, text_pattern
 from doc_checker.compare.align import Pair, PairKind, align
 from doc_checker.compare.classify import HunkContext, classify_hunk
 from doc_checker.compare.drafts import MATCHED, Draft, whole
+from doc_checker.compare.images import (
+    image_drafts,
+    match_images,
+    placed_images,
+)
 from doc_checker.compare.links import link_drafts
 from doc_checker.compare.structure import kind_drafts, level_drafts
 from doc_checker.compare.textdiff import Hunk, diff_tokens, span_text
 from doc_checker.config import rule_disabled
+from doc_checker.images.load import PixelLoader
 from doc_checker.model.document import (
     CELL_SEPARATOR,
     NUMBER_ATTR,
@@ -78,12 +89,20 @@ class CompareStats:
         new_blocks: Compared new blocks.
         matched: Reference blocks found in the new document.
         moved: Pairs out of the common order.
+        ref_images: Images of the reference.
+        new_images: Images of the new document.
+        matched_images: Reference images matched with a new one.
+        images: Whether the images were compared.
     """
 
     ref_blocks: int
     new_blocks: int
     matched: int
     moved: int
+    ref_images: int = 0
+    new_images: int = 0
+    matched_images: int = 0
+    images: bool = True
 
 
 @dataclass(slots=True)
@@ -114,14 +133,18 @@ def _prepare(
     patterns: Sequence[re.Pattern[str]],
     *,
     compare_toc: bool,
-) -> list[Block]:
+) -> tuple[list[Block], list[int]]:
     """Return the blocks to compare, with ignored patterns removed.
 
     Page chrome is left out. So are the table of contents and index blocks,
     unless ``compare_toc`` is set, and the blocks that the ignored patterns
-    leave without a loose key. The anchors of the blocks left out go to the
-    next kept block of their page, as `carry_anchors` moves them, so that
-    the links to them still lead somewhere.
+    leave without a loose key, such as the image blocks. The anchors of the
+    blocks left out go to the next kept block of their page, as
+    `carry_anchors` moves them, so that the links to them still lead
+    somewhere.
+
+    Returns:
+        The kept blocks, and their positions among ``blocks``.
     """
     skipped = frozenset() if compare_toc else _CONTENTS
     # A block left out loses its loose key, as a block without words.
@@ -131,7 +154,8 @@ def _prepare(
         else _keyed(block, patterns)
         for block in blocks
     ]
-    return carry_anchors(keyed, lambda block: bool(block.key_loose))
+    kept = [index for index, block in enumerate(keyed) if block.key_loose]
+    return carry_anchors(keyed, lambda block: bool(block.key_loose)), kept
 
 
 def _segments(
@@ -481,6 +505,77 @@ def _finalize(drafts: Iterable[Draft], cfg: Config) -> list[Finding]:
     return group_findings(findings)
 
 
+@dataclass(frozen=True, slots=True)
+class _Images:
+    """The drafts of the images of two documents, and their counts.
+
+    Attributes:
+        drafts: The drafts, in the order of `image_drafts`.
+        ref: Images of the reference that are compared.
+        new: Images of the new document that are compared.
+        matched: Reference images matched with a new one.
+    """
+
+    drafts: list[Draft]
+    ref: int
+    new: int
+    matched: int
+
+
+def _images(
+    docs: tuple[Document, Document],
+    kept: tuple[Sequence[int], Sequence[int]],
+    pairs: Sequence[Pair],
+) -> _Images:
+    """Match and judge the images of two documents.
+
+    An image that either document removed as page chrome is left out of
+    both, as the text of the chrome is.
+
+    Args:
+        docs: The reference and the new document.
+        kept: Positions of the compared blocks among the blocks of each
+            document, as `_prepare` gives them.
+        pairs: The alignment of the compared blocks.
+
+    Returns:
+        The drafts of the images, after `placed_images`, `match_images` and
+        `image_drafts`, with the pixels read only while they are judged.
+    """
+    ref, new = docs
+    logos = ref.chrome_images | new.chrome_images
+    ref_images, new_images = (
+        [
+            placed
+            for placed in placed_images(doc.blocks, positions)
+            if placed.image.digest not in logos
+        ]
+        for doc, positions in zip(docs, kept, strict=True)
+    )
+    matched = [pair for pair in pairs if pair.kind in MATCHED]
+    follows = {index: pair.new[-1] for pair in matched for index in pair.ref}
+    # The end of the reference blocks faces the end of the new ones.
+    precedes = {len(kept[0]): len(kept[1])}
+    precedes |= {index: pair.new[0] for pair in matched for index in pair.ref}
+    matches = match_images(ref_images, new_images, follows, precedes)
+    drafts: list[Draft] = []
+    if matches:
+        with PixelLoader(ref.path) as first, PixelLoader(new.path) as second:
+            drafts = image_drafts(
+                ref_images,
+                new_images,
+                matches,
+                (first, second),
+                pdf=ref.format == new.format == "pdf",
+            )
+    return _Images(
+        drafts,
+        len(ref_images),
+        len(new_images),
+        sum(m.ref is not None and m.new is not None for m in matches),
+    )
+
+
 def compare_documents(
     ref: Document,
     new: Document,
@@ -489,7 +584,9 @@ def compare_documents(
     """Compare a reference document with its new version.
 
     The table of contents and index blocks of PDF documents are neither
-    compared nor counted, unless ``cfg.pdf.compare_toc`` is set.
+    compared nor counted, unless ``cfg.pdf.compare_toc`` is set. Nor are
+    the images that either document removed as page chrome, nor any image
+    without ``cfg.images``.
 
     Args:
         ref: Reference document.
@@ -497,13 +594,24 @@ def compare_documents(
         cfg: Run configuration.
 
     Returns:
-        The findings, in reference order, and statistics.
+        The findings, in reference order, those of the images after those
+        of the text, and statistics.
     """
     chrome = ref.chrome_keys | new.chrome_keys
     patterns = [re.compile(pattern) for pattern in cfg.ignore.patterns]
     toc = cfg.pdf.compare_toc
-    ref_blocks = _prepare(ref.blocks, chrome, patterns, compare_toc=toc)
-    new_blocks = _prepare(new.blocks, chrome, patterns, compare_toc=toc)
+    ref_blocks, ref_kept = _prepare(
+        ref.blocks,
+        chrome,
+        patterns,
+        compare_toc=toc,
+    )
+    new_blocks, new_kept = _prepare(
+        new.blocks,
+        chrome,
+        patterns,
+        compare_toc=toc,
+    )
     pairs = align(
         ref_blocks,
         new_blocks,
@@ -516,15 +624,20 @@ def compare_documents(
         (ref.lang, new.lang),
         pdf=ref.format == "pdf",
     )
+    images = (
+        _images((ref, new), (ref_kept, new_kept), pairs)
+        if cfg.images
+        else _Images([], 0, 0, 0)
+    )
     stats = CompareStats(
         ref_blocks=len(ref_blocks),
         new_blocks=len(new_blocks),
         matched=sum(len(pair.ref) for pair in pairs if pair.kind in MATCHED),
         moved=sum(pair.moved for pair in pairs),
+        ref_images=images.ref,
+        new_images=images.new,
+        matched_images=images.matched,
+        images=cfg.images,
     )
-    return CompareResult(
-        ref,
-        new,
-        _finalize(drafter.drafts(pairs), cfg),
-        stats,
-    )
+    drafts = [*drafter.drafts(pairs), *images.drafts]
+    return CompareResult(ref, new, _finalize(drafts, cfg), stats)

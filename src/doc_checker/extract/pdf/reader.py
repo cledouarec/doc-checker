@@ -33,7 +33,11 @@ from doc_checker.images.load import (
     object_stream,
     render_figure,
 )
-from doc_checker.images.pixels import PAGE_LIMIT, UnreadableImage
+from doc_checker.images.pixels import (
+    NOT_RENDERED,
+    PAGE_LIMIT,
+    UnreadableImage,
+)
 from doc_checker.images.refs import content_digest, pixels_ref, unreadable_ref
 from doc_checker.model.document import PixelSource
 from doc_checker.text.normalize import printable
@@ -62,9 +66,6 @@ BOLD_NAME: Final = re.compile(
 TURN_TOLERANCE: Final = 2.0  # Largest gap to a right angle, in degrees.
 LABEL_LIMIT: Final = 40  # Most characters of a page label.
 METADATA_LIMIT: Final = 200  # Most characters of a metadata value.
-# Why a vector figure has no pixels: its page is turned by `/Rotate`, or it
-# comes after the first `MAX_PAGE_FIGURES` figures of its page.
-NOT_RENDERED: Final = "not rendered"
 MAX_PAGE_FIGURES: Final = 64  # Most vector figures rendered on a page.
 
 _SUBSET_PREFIX: Final = re.compile(r"^[A-Z]{6}\+")
