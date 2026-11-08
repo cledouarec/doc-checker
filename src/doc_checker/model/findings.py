@@ -59,13 +59,17 @@ class Category(StrEnum):
     STRUCTURE = "structure"
     LINK = "link"
     IMAGE = "image"
+    ACCESSIBILITY = "a11y"
 
 
 @dataclass(frozen=True, slots=True)
 class DiffSegment:
-    """A piece of text marked as unchanged, deleted or inserted."""
+    """A piece of text marked as unchanged, deleted, inserted or marked.
 
-    op: Literal["equal", "delete", "insert"]
+    A marked piece is the part a finding points at.
+    """
+
+    op: Literal["equal", "delete", "insert", "mark"]
     text: str
 
 

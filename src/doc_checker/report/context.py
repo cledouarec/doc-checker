@@ -39,6 +39,7 @@ CATEGORY_TITLES: Final[Mapping[Category, str]] = {
     Category.STRUCTURE: "Structure",
     Category.LINK: "Links",
     Category.IMAGE: "Images",
+    Category.ACCESSIBILITY: "Accessibility",
 }
 SEVERITY_TITLES: Final[Mapping[Severity, str]] = {
     Severity.CRITICAL: "Critical",

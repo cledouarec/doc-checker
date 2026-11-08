@@ -233,3 +233,210 @@ def test_images_can_be_turned_off(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert load_config(None, cwd=tmp_path).images is False
+
+
+AUDIT_RULES = {
+    "image.low_dpi": Severity.MINOR,
+    "image.upscaled": Severity.MINOR,
+    "image.blurry": Severity.MINOR,
+    "image.jpeg_quality": Severity.MINOR,
+    "image.blocky": Severity.MINOR,
+    "image.pixelated": Severity.MINOR,
+    "image.heavy": Severity.MINOR,
+    "image.photo_png": Severity.INFO,
+    "image.broken": Severity.MAJOR,
+    "structure.heading_skipped": Severity.MINOR,
+    "structure.empty_section": Severity.MINOR,
+    "structure.duplicate_heading": Severity.MINOR,
+    "structure.unresolved_reference": Severity.MAJOR,
+    "structure.figure_caption": Severity.INFO,
+    "structure.table_caption": Severity.INFO,
+    "structure.orphan_page": Severity.MINOR,
+    "link.page_missing": Severity.MAJOR,
+    "link.anchor_missing": Severity.MAJOR,
+    "link.file_missing": Severity.MAJOR,
+    "link.destination_invalid": Severity.MAJOR,
+    "a11y.alt_missing": Severity.MAJOR,
+    "a11y.alt_filename": Severity.MINOR,
+    "a11y.svg_title": Severity.MINOR,
+    "a11y.lang_missing": Severity.MAJOR,
+    "a11y.lang_mismatch": Severity.MINOR,
+    "a11y.table_headers": Severity.MINOR,
+    "a11y.pdf_untagged": Severity.MAJOR,
+    "a11y.title_missing": Severity.MINOR,
+    "a11y.unmapped_chars": Severity.MINOR,
+    "a11y.scanned_page": Severity.MAJOR,
+    "a11y.link_empty": Severity.MAJOR,
+    "a11y.link_text": Severity.MINOR,
+}
+AUDIT_FAMILIES = {
+    "image": Category.IMAGE,
+    "structure": Category.STRUCTURE,
+    "link": Category.LINK,
+    "a11y": Category.ACCESSIBILITY,
+}
+
+
+def test_audit_rules_have_their_severities_and_categories() -> None:
+    """The 32 audit rules are registered, and none is critical."""
+    assert {r: get_rule(r).severity for r in AUDIT_RULES} == AUDIT_RULES
+    for rule in AUDIT_RULES:
+        family = rule.split(".", maxsplit=1)[0]
+        assert get_rule(rule).category is AUDIT_FAMILIES[family]
+
+
+def test_audit_settings_have_the_defaults_of_the_spec() -> None:
+    """All families, the screen profile and the thresholds of the spec."""
+    cfg = Config()
+    assert cfg.checks == ("images", "structure", "a11y")
+    assert cfg.profile == "screen"
+    assert cfg.audit.dpi("screen") == (96.0, 150.0)
+    assert cfg.audit.dpi("print") == (150.0, 300.0)
+    assert (cfg.audit.heavy_minor, cfg.audit.heavy_major) == (
+        1_000_000,
+        3_000_000,
+    )
+
+
+def test_audit_settings_are_read_from_the_file(tmp_path: Path) -> None:
+    """The families, the profile and the thresholds come from the file."""
+    (tmp_path / "doc-checker.toml").write_text(
+        '[general]\nchecks = ["a11y", "images", "a11y"]\n'
+        'profile = "print"\n'
+        "[thresholds.audit]\ndpi_minor = 200\nheavy_minor = 500000\n"
+        "blur = 0.05\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(None, cwd=tmp_path)
+    assert (cfg.checks, cfg.profile) == (("a11y", "images"), "print")
+    audit = cfg.audit
+    assert (audit.dpi_minor, audit.heavy_minor, audit.blur) == (
+        200.0,
+        500_000,
+        0.05,
+    )
+
+
+@pytest.mark.parametrize(
+    ("toml", "message"),
+    [
+        ('[general]\nchecks = ["text"]\n', "unknown check 'text'"),
+        ("[general]\nchecks = []\n", "checks: expected at least one check"),
+        (
+            '[general]\nprofile = "paper"\n',
+            "profile: 'paper' is not one of screen, print",
+        ),
+        (
+            "[thresholds.audit]\ndpi_major = 200\n",
+            "thresholds.audit.dpi_major: must be below dpi_minor",
+        ),
+        (
+            "[thresholds.audit]\nblur = 0\n",
+            "thresholds.audit.blur: must be in ]0, 1]",
+        ),
+        (
+            "[thresholds.audit]\nheavy_major = true\n",
+            "thresholds.audit.heavy_major: expected an integer",
+        ),
+        (
+            "[thresholds.audit]\njpeg_quality_minor = 120\n",
+            "thresholds.audit.jpeg_quality_minor: must be in [1, 100]",
+        ),
+        (
+            "[thresholds.audit]\nupscale = 0.9\n",
+            "thresholds.audit.upscale: must be above 1",
+        ),
+        (
+            "[thresholds.audit]\nsharpness = 1\n",
+            "thresholds.audit.sharpness: unknown key",
+        ),
+    ],
+)
+def test_bad_audit_settings_are_config_errors(
+    tmp_path: Path,
+    toml: str,
+    message: str,
+) -> None:
+    """Each wrong audit setting is an error that names its key."""
+    (tmp_path / "doc-checker.toml").write_text(toml, encoding="utf-8")
+    with pytest.raises(ConfigError, match=re.escape(message)):
+        load_config(None, cwd=tmp_path)
+
+
+def test_command_line_overrides_checks_and_profile() -> None:
+    """The options replace the families and the profile of the file."""
+    overrides = CliOverrides(checks=("images",), profile="print")
+    cfg = apply_overrides(Config(), overrides)
+    assert (cfg.checks, cfg.profile) == (("images",), "print")
+
+
+@pytest.mark.parametrize(
+    ("toml", "message"),
+    [
+        (
+            "[thresholds.audit]\nupscale = nan\n",
+            "thresholds.audit.upscale: expected a finite number",
+        ),
+        (
+            "[thresholds.audit]\ndpi_minor = inf\n",
+            "thresholds.audit.dpi_minor: expected a finite number",
+        ),
+        (
+            "[thresholds.audit]\nblockiness = -inf\n",
+            "thresholds.audit.blockiness: expected a finite number",
+        ),
+        (
+            "[thresholds.audit]\nblur = nan\n",
+            "thresholds.audit.blur: must be in ]0, 1]",
+        ),
+        (
+            "[thresholds.audit]\ndpi_major = 0\n",
+            "thresholds.audit.dpi_major: must be above 0",
+        ),
+        (
+            "[thresholds.audit]\nprint_dpi_minor = -5\n",
+            "thresholds.audit.print_dpi_minor: must be above 0",
+        ),
+        (
+            "[thresholds.audit]\nheavy_minor = 0\n",
+            "thresholds.audit.heavy_minor: must be above 0",
+        ),
+        (
+            "[thresholds.audit]\ndpi_major = true\n",
+            "thresholds.audit.dpi_major: expected a number",
+        ),
+        (
+            "[thresholds.audit]\nheavy_minor = false\n",
+            "thresholds.audit.heavy_minor: expected an integer",
+        ),
+        (
+            "[thresholds.audit]\nheavy_minor = 1.5\n",
+            "thresholds.audit.heavy_minor: expected an integer",
+        ),
+        (
+            "[thresholds.audit]\ndpi_major = 150\n",
+            "thresholds.audit.dpi_major: must be below dpi_minor",
+        ),
+        (
+            "[thresholds.audit]\nprint_dpi_major = 300\n",
+            "thresholds.audit.print_dpi_major: must be below print_dpi_minor",
+        ),
+        (
+            "[thresholds.audit]\nheavy_minor = 3000000\n",
+            "thresholds.audit.heavy_minor: must be below heavy_major",
+        ),
+        (
+            "[thresholds.audit]\njpeg_quality_major = 50\n",
+            "jpeg_quality_major: must be below jpeg_quality_minor",
+        ),
+    ],
+)
+def test_audit_thresholds_reject_degenerate_values(
+    tmp_path: Path,
+    toml: str,
+    message: str,
+) -> None:
+    """Non-finite, null, mistyped and tied thresholds are errors."""
+    (tmp_path / "doc-checker.toml").write_text(toml, encoding="utf-8")
+    with pytest.raises(ConfigError, match=re.escape(message)):
+        load_config(None, cwd=tmp_path)

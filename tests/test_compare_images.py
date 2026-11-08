@@ -819,3 +819,30 @@ def test_many_images_match_quickly() -> None:
     assert time.perf_counter() - start < 3.0
     paired = {(m.ref, m.new) for m in matches if m.how == "content"}
     assert paired == {(int(i), j) for j, i in enumerate(order)}
+
+
+def test_inline_svg_title_is_lost_when_the_image_has_no_alt(
+    tmp_path: Path,
+) -> None:
+    """The title of an inline SVG is its alt: an img without one loses it."""
+    drawing_png = encode(drawing("pipeline"))
+    bodies = {
+        "ref": (
+            '<svg width="300" height="200"><title>Build pipeline</title>'
+            '<sodipodi:namedview/><rect width="90" height="90"/></svg>'
+        ),
+        "new": '<img src="p.png">',
+    }
+    pages = []
+    for name, body in bodies.items():
+        site = tmp_path / name
+        site.mkdir()
+        (site / "p.png").write_bytes(drawing_png)
+        (site / "index.html").write_text(
+            f"<html><body><main><p>{PARAGRAPHS[0]}</p>{body}"
+            f"<p>{PARAGRAPHS[1]}</p></main></body></html>",
+            encoding="utf-8",
+        )
+        pages.append(load_html(site, HtmlConfig(), lang="en"))
+    result = compare_documents(*pages, Config())
+    assert "image.alt_lost" in {f.rule for f in result.findings}
