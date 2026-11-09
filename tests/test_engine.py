@@ -33,6 +33,7 @@ from tests.builders import (
     build_mkdocs_like,
     make_block,
     make_document,
+    random_blocks,
 )
 
 if TYPE_CHECKING:
@@ -457,3 +458,19 @@ def test_inline_code_keeps_the_classification_of_phase_1(
     result = compare_documents(ref, new, CFG)
     assert _rules(result) == [expected]
     assert bool(calls) is not bool(code)
+
+
+def test_cut_alignment_is_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An alignment cut by its budget is told in the warnings."""
+    monkeypatch.setattr("doc_checker.compare.align.ALIGN_WORK_BASE", 10)
+    monkeypatch.setattr("doc_checker.compare.align.ALIGN_WORK_PER_CHAR", 0)
+    ref = make_document(*random_blocks(1, 20))
+    new = make_document(*random_blocks(2, 20))
+    result = compare_documents(ref, new, Config())
+    note = (
+        "20 block(s) were compared by identical text only: "
+        "the alignment reached its work limit"
+    )
+    assert result.new.warnings == [note]

@@ -353,6 +353,44 @@ def jpeg_of_components(count: int) -> bytes:
     )
 
 
+def progressive_jpeg(
+    extra_scans: int,
+    side: int = 64,
+    fmt: Literal["JPEG", "MPO"] = "JPEG",
+) -> bytes:
+    """Forge a progressive JPEG with empty scans added.
+
+    Args:
+        extra_scans: How many empty copies of the second scan header to add
+            before the end of the first image.
+        side: The side of the square picture, in pixels.
+        fmt: ``JPEG``, or ``MPO``: a JPEG that a multi-picture segment
+            makes the first of two pictures, which Pillow opens as MPO.
+
+    Returns:
+        A progressive JPEG of Pillow, whose first end marker is preceded by
+        `extra_scans` headers of scans that hold no data.
+    """
+    image = Image.new("RGB", (side, side), (200, 30, 30))
+    data = encode(
+        image,
+        fmt,
+        progressive=True,
+        **(
+            {"save_all": True, "append_images": [image]}
+            if fmt == "MPO"
+            else {}
+        ),
+    )
+    first = data.index(b"\xff\xda")
+    second = data.index(b"\xff\xda", first + 2)
+    header = data[
+        second : second + 2 + int.from_bytes(data[second + 2 : second + 4])
+    ]
+    end = data.index(b"\xff\xd9", second)
+    return data[:end] + header * extra_scans + data[end:]
+
+
 def cmyk_encoded(fmt: Literal["JPEG", "JPEG2000"]) -> bytes:
     """Encode the setup drawing in CMYK, in four components.
 

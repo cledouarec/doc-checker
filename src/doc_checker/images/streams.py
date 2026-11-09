@@ -64,6 +64,16 @@ _SOI: Final = b"\xff\xd8"  # The marker that starts a JPEG.
 # A marker of a JPEG: the last of one or more 0xFF, then a byte that is
 # neither 0 nor 0xFF. One 0xFF in the pattern keeps the search linear.
 _MARKER: Final = re.compile(rb"\xff([\x01-\xfe])")
+# A marker that is not part of the data of a scan: neither a stuffed 0xFF00
+# nor a restart marker RSTn, 0xD0 to 0xD7. Linear, like `_MARKER`.
+_SCAN_MARKER: Final = re.compile(rb"\xff([\x01-\xcf\xd8-\xfe])")
+_SOS: Final = 0xDA  # The marker that starts a scan.
+_EOI: Final = 0xD9  # The marker that ends a JPEG.
+# The markers without a segment, which a scan walk passes over.
+_STANDALONE: Final = frozenset({0x01, 0xD8})
+# The most scans that a JPEG may have: the progressive ones of the encoders
+# have ten or so, and the decoder works through each scan in turn.
+MAX_JPEG_SCANS: Final = 64
 # The markers that end the header: SOS and EOI, and the markers without a
 # segment, TEM, RSTn and SOI, which have no place before a frame header.
 _HEADER_END: Final = frozenset({0x01, *range(0xD0, 0xDB)})
@@ -233,6 +243,47 @@ def _jpeg_segments(data: bytes) -> Iterator[tuple[int, int]]:
         if length < len(b"xx"):
             return
         position += length
+
+
+def jpeg_scans(data: bytes) -> int:
+    """Count the scans of a JPEG, without decoding any.
+
+    The markers are read in order, each segment skipped by its length, and
+    the data of a scan up to the next marker that is neither a stuffed byte,
+    a restart marker nor fill. The walk is linear in the data, never reads
+    past its end, and stops at `MAX_JPEG_SCANS` plus one scans, or after
+    `_MOST_SEGMENTS` markers, which counts as too many scans.
+
+    Args:
+        data: The JPEG, maybe after other bytes, maybe truncated or not a
+            JPEG at all.
+
+    Returns:
+        The number of scans, at most `MAX_JPEG_SCANS` plus one; 0 if there is
+        no SOI marker. It never raises.
+    """
+    start = data.find(_SOI)
+    if start < 0:
+        return 0
+    position, scans = start + len(_SOI), 0
+    for _ in range(_MOST_SEGMENTS):
+        match = _SCAN_MARKER.search(data, position)
+        if match is None:
+            return scans
+        marker, position = match[1][0], match.end()
+        if marker == _EOI:
+            return scans
+        if marker in _STANDALONE:
+            continue
+        if marker == _SOS:
+            scans += 1
+            if scans > MAX_JPEG_SCANS:
+                return scans
+        if position + 2 > len(data):
+            return scans
+        length = int.from_bytes(data[position : position + 2])
+        position += max(length, len(b"xx"))
+    return MAX_JPEG_SCANS + 1  # Past the bound on markers: not decoded.
 
 
 def jpeg_header(data: bytes) -> CodecHeader | None:

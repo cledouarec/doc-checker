@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Final
 import numpy as np
 from PIL import Image
 
+from doc_checker.images.streams import MAX_JPEG_SCANS, jpeg_scans
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -19,6 +21,9 @@ MAX_FILE_BYTES: Final = 50_000_000
 # reads it with its JPEG opener and has no opener of its own for it.
 ALLOWED_FORMATS: Final = ("PNG", "JPEG", "GIF", "WEBP", "BMP", "ICO", "TIFF")
 ALPHA_OPAQUE: Final = 250
+# The marker that starts a JPEG, whatever Pillow opens it as: a JPEG with a
+# multi-picture segment is an MPO.
+_JPEG_START: Final = b"\xff\xd8"
 # Why the pixels of an image are not read: the `problem` of its `ImageRef`.
 TOO_LARGE: Final = "too large"
 CANNOT_DECODE: Final = "cannot decode"
@@ -210,14 +215,20 @@ def _decoded(data: bytes) -> Image.Image:
         data: Encoded image.
 
     Returns:
-        The loaded image. Too many pixels raise `UnreadableImage` before
-        decoding, or Pillow's `DecompressionBombWarning` as an error.
+        The loaded image.
+
+    Raises:
+        UnreadableImage: Before decoding, for too many pixels or a JPEG of
+            too many scans, an MPO included. Pillow's
+            `DecompressionBombWarning` is an error.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         warnings.simplefilter("error", Image.DecompressionBombWarning)
         image = Image.open(io.BytesIO(data), formats=ALLOWED_FORMATS)
         _refuse_large(image)
+        if data.startswith(_JPEG_START) and jpeg_scans(data) > MAX_JPEG_SCANS:
+            raise UnreadableImage(TOO_LARGE)
         image.load()
     return image
 
