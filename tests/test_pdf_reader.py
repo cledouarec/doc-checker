@@ -1540,5 +1540,6 @@ def test_an_ascii_wrapped_jpeg_drawn_on_many_pages_is_read_quickly(
     start = time.perf_counter()
     images = _all_images(path)
     assert time.perf_counter() - start < 10.0
-    assert {image.ref.problem for image in images} == {CANNOT_DECODE}
+    # 5000 segments are past the bound on markers: too many scans to decode.
+    assert {image.ref.problem for image in images} == {TOO_LARGE}
     assert len(images) == 20

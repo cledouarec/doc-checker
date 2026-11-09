@@ -37,7 +37,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.compare.aggregate import finalize_drafts, text_pattern
-from doc_checker.compare.align import Pair, PairKind, align
+from doc_checker.compare.align import Alignment, Pair, PairKind, align_blocks
 from doc_checker.compare.classify import (
     Classification,
     HunkContext,
@@ -602,6 +602,17 @@ def _images(
     )
 
 
+def _unsearched_notes(alignment: Alignment) -> list[str]:
+    """Return the warning of an alignment cut by its work limit."""
+    if not alignment.unsearched:
+        return []
+    message = (
+        f"{alignment.unsearched} block(s) were compared by identical text"
+        " only: the alignment reached its work limit"
+    )
+    return [message]
+
+
 def compare_documents(
     ref: Document,
     new: Document,
@@ -642,7 +653,7 @@ def compare_documents(
         patterns,
         compare_toc=toc,
     )
-    pairs = align(
+    alignment = align_blocks(
         ref_blocks,
         new_blocks,
         match=cfg.compare.match,
@@ -655,20 +666,22 @@ def compare_documents(
         pdf=ref.format == "pdf",
         speller=Speller(cfg.spelling.words),
     )
-    text_drafts = drafter.drafts(pairs)
-    notes = drafter.warnings()
+    text_drafts = drafter.drafts(alignment.pairs)
+    notes = [*_unsearched_notes(alignment), *drafter.warnings()]
     if notes:
         new = replace(new, warnings=[*new.warnings, *notes])
     images = (
-        _images((ref, new), (ref_kept, new_kept), pairs)
+        _images((ref, new), (ref_kept, new_kept), alignment.pairs)
         if cfg.images
         else _Images([], 0, 0, 0)
     )
     stats = CompareStats(
         ref_blocks=len(ref_blocks),
         new_blocks=len(new_blocks),
-        matched=sum(len(pair.ref) for pair in pairs if pair.kind in MATCHED),
-        moved=sum(pair.moved for pair in pairs),
+        matched=sum(
+            len(pair.ref) for pair in alignment.pairs if pair.kind in MATCHED
+        ),
+        moved=sum(pair.moved for pair in alignment.pairs),
         ref_images=images.ref,
         new_images=images.new,
         matched_images=images.matched,

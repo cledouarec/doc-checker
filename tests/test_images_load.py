@@ -1,7 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the pixels read again on demand."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pypdfium2.raw as pdfium_c
 import pytest
@@ -9,11 +9,12 @@ import pytest
 from doc_checker.config import PdfConfig
 from doc_checker.extract.pdf.loader import load_pdf
 from doc_checker.images.load import PixelLoader, least_length
+from doc_checker.images.pixels import TOO_LARGE, UnreadableImage, open_raster
 from doc_checker.images.refs import raster_ref
 from doc_checker.model.document import PixelSource
 from tests.builders import FIGURES_EN
-from tests.image_builders import drawing, encode
-from tests.pdf_builders import build_reportlab_pdf
+from tests.image_builders import drawing, encode, progressive_jpeg
+from tests.pdf_builders import build_image_stream_pdf, build_reportlab_pdf
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -87,3 +88,31 @@ def test_least_length_takes_the_fewest_bits(
     assert least_length((width, height), bpp, colorspace) == (
         (width * bits + 7) // 8 * height
     )
+
+
+@pytest.mark.parametrize("fmt", ["JPEG", "MPO"])
+def test_jpeg_of_too_many_scans_is_too_large(
+    fmt: Literal["JPEG", "MPO"],
+) -> None:
+    """A JPEG of too many scans is refused before any decoder runs, MPO too."""
+    with pytest.raises(UnreadableImage) as caught:
+        open_raster(progressive_jpeg(70, fmt=fmt))
+    assert caught.value.reason == TOO_LARGE
+    image = open_raster(progressive_jpeg(0, fmt=fmt))
+    assert (image.size, image.format) == ((64, 64), fmt)
+
+
+def test_pdf_jpeg_of_too_many_scans_is_too_large(tmp_path: Path) -> None:
+    """A DCT stream of too many scans is refused before PDFium decodes it."""
+    problems = []
+    for extra in (70, 0):
+        pdf = build_image_stream_pdf(
+            tmp_path / f"s{extra}.pdf",
+            progressive_jpeg(extra),
+            filters="/DCTDecode",
+            size=(64, 64),
+        )
+        doc = load_pdf(pdf, PdfConfig(), lang="en")
+        image = next(b.image for b in doc.blocks if b.image is not None)
+        problems.append(image.problem)
+    assert problems == [TOO_LARGE, None]
