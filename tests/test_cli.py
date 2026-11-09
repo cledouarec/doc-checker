@@ -10,10 +10,12 @@ import pytest
 from click.testing import CliRunner
 
 from doc_checker import __version__
+from doc_checker import cli as cli_module
 from doc_checker.cli import main
 from tests.builders import (
     FIGURES_EN,
     SAMPLE_EN,
+    add_paragraph,
     build_mkdocs_like,
     build_sphinx_like,
     figure_defect,
@@ -381,3 +383,166 @@ def test_no_images_help_names_what_each_command_does() -> None:
     assert "extraction and the checks." in " ".join(audit.split())
     assert "extraction and the comparison." in " ".join(compare.split())
     assert "comparison" not in audit
+
+
+def _misspelt_site(tmp_path: Path) -> Path:
+    """Build a site with a misspelling and a jargon word."""
+    spec = replace_text(
+        add_paragraph(FIGURES_EN, "getting-started", "Zorblax runs here."),
+        "installer downloads",
+        "installer donwloads",
+    )
+    return build_sphinx_like(spec, tmp_path / "site")
+
+
+def test_audit_writes_the_word_list(tmp_path: Path) -> None:
+    """The unknown words of the audit are written one per line."""
+    site = _misspelt_site(tmp_path)
+    words = tmp_path / "words.txt"
+    cmd = ["audit", str(site), "-o", str(tmp_path / "out")]
+    cmd += ["--emit-wordlist", str(words)]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 0, result.output
+    assert words.read_text(encoding="utf-8") == "donwloads\nZorblax\n"
+
+
+def test_word_list_needs_the_text_checks(tmp_path: Path) -> None:
+    """Without the text family there is no word list to write."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    words = tmp_path / "w.txt"
+    cmd = ["audit", str(site), "-o", str(tmp_path / "out")]
+    cmd += ["--checks", "structure", "--emit-wordlist", str(words)]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 2
+    assert "--emit-wordlist needs the text checks" in result.output
+    assert not words.exists()
+
+
+def test_personal_words_silence_unknown_words(tmp_path: Path) -> None:
+    """A word of a --words file is no longer reported."""
+    site = _misspelt_site(tmp_path)
+    words = tmp_path / "words.txt"
+    words.write_text("donwloads\n", encoding="utf-8")
+    out = tmp_path / "out"
+    cmd = ["audit", str(site), "-o", str(out), "--words", str(words)]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 0, result.output
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "donwloads" not in report
+    assert "Zorblax" in report
+
+
+def test_compare_accepts_word_files(tmp_path: Path) -> None:
+    """Compare takes --words too: a personal word is no typo."""
+    ref = build_mkdocs_like(SAMPLE_EN, tmp_path / "ref")
+    typo = replace_text(
+        SAMPLE_EN,
+        "installer downloads",
+        "installer donwloads",
+    )
+    new = build_mkdocs_like(typo, tmp_path / "new")
+    words = tmp_path / "words.txt"
+    words.write_text("donwloads\n", encoding="utf-8")
+    out = tmp_path / "out"
+    cmd = ["compare", str(ref), str(new), "-o", str(out)]
+    result = CliRunner().invoke(main, [*cmd, "--words", str(words)])
+    assert result.exit_code == 0, result.output
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "(`text.word_replaced`)" in report
+    assert "(`text.typo`)" not in report
+
+
+def test_word_list_destination_cannot_be_a_directory(
+    tmp_path: Path,
+) -> None:
+    """A directory cannot hold the word list: exit code 2."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    cmd = ["audit", str(site), "-o", str(tmp_path / "out")]
+    result = CliRunner().invoke(
+        main,
+        [*cmd, "--emit-wordlist", str(tmp_path)],
+    )
+    assert result.exit_code == 2
+
+
+def test_word_list_in_a_missing_folder_leaves_no_report(
+    tmp_path: Path,
+) -> None:
+    """A word list that cannot be written is exit 2, with no report."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    out = tmp_path / "out"
+    target = tmp_path / "missing" / "w.txt"
+    cmd = ["audit", str(site), "-o", str(out), "--emit-wordlist", str(target)]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 2
+    assert "cannot write the word list to" in result.output
+    assert not out.exists()
+
+
+def test_word_list_inside_a_new_output_folder(tmp_path: Path) -> None:
+    """The word list may go in the output folder that the run creates."""
+    site = _misspelt_site(tmp_path)
+    out = tmp_path / "out" / "audit"
+    words = out / "words.txt"
+    cmd = ["audit", str(site), "-o", str(out), "--emit-wordlist", str(words)]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 0, result.output
+    assert words.read_text(encoding="utf-8") == "donwloads\nZorblax\n"
+    assert (out / "report.md").is_file()
+
+
+def test_word_list_above_a_new_output_folder(tmp_path: Path) -> None:
+    """A folder that the output folder is made in can hold the list."""
+    site = _misspelt_site(tmp_path)
+    out = tmp_path / "runs" / "one" / "out"
+    words = tmp_path / "runs" / "words.txt"
+    cmd = ["audit", str(site), "-o", str(out), "--emit-wordlist", str(words)]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 0, result.output
+    assert words.read_text(encoding="utf-8") == "donwloads\nZorblax\n"
+
+
+def test_a_word_list_in_a_missing_folder_stops_before_the_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A word list that cannot be written is found before the audit."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    out = tmp_path / "out"
+    target = out / "missing" / "w.txt"
+    out.mkdir()
+
+    def no_audit(*_: object) -> None:
+        pytest.fail("the audit ran")
+
+    monkeypatch.setattr(cli_module, "run_audit", no_audit)
+    cmd = ["audit", str(site), "-o", str(out), "--emit-wordlist", str(target)]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 2, result.output
+    assert f"cannot write the word list to {target}: " in result.output
+    assert list(out.iterdir()) == []
+
+
+def test_config_checks_without_text_refuse_the_word_list(
+    tmp_path: Path,
+) -> None:
+    """The checks of a configuration file count for --emit-wordlist."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    conf = tmp_path / "conf.toml"
+    conf.write_text('[general]\nchecks = ["structure"]\n', encoding="utf-8")
+    words = tmp_path / "w.txt"
+    cmd = ["audit", str(site), "-o", str(tmp_path / "out"), "-c", str(conf)]
+    result = CliRunner().invoke(main, [*cmd, "--emit-wordlist", str(words)])
+    assert result.exit_code == 2
+    assert "--emit-wordlist needs the text checks" in result.output
+    assert not words.exists()
+
+
+def test_empty_word_list_is_an_empty_file(tmp_path: Path) -> None:
+    """With no unknown word the list is written, empty."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    words = tmp_path / "w.txt"
+    cmd = ["audit", str(site), "-o", str(tmp_path / "out")]
+    result = CliRunner().invoke(main, [*cmd, "--emit-wordlist", str(words)])
+    assert result.exit_code == 0, result.output
+    assert words.read_bytes() == b""

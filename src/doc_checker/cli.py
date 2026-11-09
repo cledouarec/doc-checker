@@ -11,6 +11,7 @@ from typing import Any, Final
 import click
 
 from doc_checker import __version__
+from doc_checker.audit.text import TEXT
 from doc_checker.config import (
     AVAILABLE_CHECKS,
     AVAILABLE_FORMATS,
@@ -23,7 +24,14 @@ from doc_checker.config import (
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import load_document
 from doc_checker.model.findings import Severity
-from doc_checker.pipeline import run_audit, run_compare, write_reports
+from doc_checker.pipeline import (
+    check_wordlist_path,
+    make_output_folder,
+    run_audit,
+    run_compare,
+    write_reports,
+    write_wordlist,
+)
 from doc_checker.report.terminal import (
     render_audit_summary,
     render_blocks,
@@ -115,6 +123,12 @@ def _config_options[F: Callable[..., object]](
 
 def _report_options[F: Callable[..., object]](function: F) -> F:
     """Return the command with the report options added."""
+    function = click.option(
+        "--words",
+        multiple=True,
+        type=click.Path(exists=True, dir_okay=False, path_type=Path),
+        help="File of personal words, one per line.",
+    )(function)
     function = click.option(
         "--disable",
         multiple=True,
@@ -266,6 +280,7 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
     formats: tuple[str, ...] | None,
     min_severity: str | None,
     disable: tuple[str, ...],
+    words: tuple[Path, ...],
     ignore_moves: bool,
     config: Path | None,
     lang: str | None,
@@ -285,6 +300,7 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
                 content_selector=content_selector,
                 exclude=exclude,
                 disable=disable,
+                words=words,
                 ignore_moves=ignore_moves,
                 no_images=no_images,
             ),
@@ -297,8 +313,8 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
 
 @main.command(
     help=(
-        "Audit the documentation DOC: structure, links, accessibility "
-        "and images."
+        "Audit the documentation DOC: structure, links, accessibility, "
+        "images and text."
     ),
 )
 @click.argument("doc", type=click.Path(exists=True, path_type=Path))
@@ -314,6 +330,11 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
     type=click.Choice(PROFILES),
     help="Resolution expected of PDF images.",
 )
+@click.option(
+    "--emit-wordlist",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write the unknown words to this file, one per line.",
+)
 @partial(_config_options, no_images=_NO_IMAGES_AUDIT)
 def audit(  # ruff: ignore[too-many-arguments] - Click passes options as keywords
     *,
@@ -322,15 +343,22 @@ def audit(  # ruff: ignore[too-many-arguments] - Click passes options as keyword
     formats: tuple[str, ...] | None,
     min_severity: str | None,
     disable: tuple[str, ...],
+    words: tuple[Path, ...],
     checks: tuple[str, ...] | None,
     profile: str | None,
+    emit_wordlist: Path | None,
     config: Path | None,
     lang: str | None,
     content_selector: str | None,
     exclude: tuple[str, ...],
     no_images: bool,
 ) -> None:
-    """Audit the documentation DOC."""
+    """Audit the documentation DOC.
+
+    Raises:
+        click.UsageError: If `--emit-wordlist` is given without the text
+            checks.
+    """
     with _exit_on_error():
         cfg = _load(
             config,
@@ -342,12 +370,21 @@ def audit(  # ruff: ignore[too-many-arguments] - Click passes options as keyword
                 content_selector=content_selector,
                 exclude=exclude,
                 disable=disable,
+                words=words,
                 no_images=no_images,
                 checks=checks,
                 profile=profile,
             ),
         )
+        if emit_wordlist is not None:
+            if TEXT not in cfg.checks:
+                msg = "--emit-wordlist needs the text checks"
+                raise click.UsageError(msg)
+            check_wordlist_path(emit_wordlist, cfg.output)
         result = run_audit(doc, cfg)
+        if emit_wordlist is not None:
+            make_output_folder(cfg)
+            write_wordlist(result.words, emit_wordlist)
         reports = write_reports(result, cfg)
     color = False if _NO_COLOR in os.environ else None
     click.echo(render_audit_summary(result, reports), color=color)
