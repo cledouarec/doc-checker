@@ -5,6 +5,8 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import pytest
+
 from doc_checker.audit.structure import structure_drafts
 from doc_checker.config import Config
 from doc_checker.extract.loader import load_document
@@ -180,6 +182,63 @@ def test_unresolved_references_in_texts() -> None:
     ]
     assert [d.pattern for d in drafts] == ["??", "[?]", "[text][label]"]
     assert marked == [["??"], ["[?]"], ["[the details][missing]"]]
+
+
+def test_question_marks_in_inline_code_are_not_references() -> None:
+    """A ``??`` that inline code holds is an operator, not a reference."""
+    block = make_block("Use a ?? b to pick.")
+    coded = replace(block, code_spans=("a ?? b",))
+    rule = "structure.unresolved_reference"
+    assert not _of(make_audit_document(coded), rule)
+    assert len(_of(make_audit_document(block), rule)) == 1
+    both = replace(
+        make_block("Use a ?? b, see Section ?? and [x][y]."),
+        code_spans=("a ?? b", "[x][y]"),
+    )
+    (draft,) = _of(make_audit_document(both), rule)
+    assert [s.text for s in draft.ref.segments if s.op == "mark"] == ["??"]
+    assert draft.detail == "1 unresolved reference(s) in this block"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"fd::<infd>[,<outfd>][/<anything>]" (as URL)',
+        "objects/[0-9a-f][0-9a-f]",
+        'Only valid setting is "--unified=??" to set it.',
+        "The operator ??= assigns a default.",
+    ],
+)
+def test_syntax_quoted_in_prose_is_no_reference(text: str) -> None:
+    """Command syntax and character classes are not unresolved references."""
+    doc = make_audit_document(make_block(text))
+    assert not _of(doc, "structure.unresolved_reference")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See the [setup guide][setup] first.",
+        "As shown in figure ??, the server.",
+        "See [e-mail][x] for the address.",
+        "See [a-b-c][d] for the range.",
+    ],
+)
+def test_unresolved_references_are_still_found(text: str) -> None:
+    """A Markdown reference without target and a LaTeX ?? are found."""
+    doc = make_audit_document(make_block(text))
+    assert [d.rule for d in structure_drafts(doc)] == [
+        "structure.unresolved_reference",
+    ]
+
+
+def test_an_unclosed_bracket_is_read_in_linear_time() -> None:
+    """A 200 kB text after an open bracket does not make the scan quadratic."""
+    for text in ("[" + "a" * 200_000, "[a][" * 50_000):
+        doc = make_audit_document(make_block(text))
+        start = time.process_time()
+        _of(doc, "structure.unresolved_reference")
+        assert time.process_time() - start < 2.0
 
 
 def test_markdown_references_are_not_sought_in_pdf() -> None:

@@ -1,6 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for generator profiles and DOM to block conversion."""
 
+import time
 from collections import Counter
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,8 @@ from doc_checker.model.document import BlockKind
 
 if TYPE_CHECKING:
     from lxml.html import HtmlElement
+
+    from doc_checker.model.document import Block
 
 
 def _root(body: str, head: str = "") -> HtmlElement:
@@ -364,3 +367,62 @@ def test_images_of_formulas_are_not_figures() -> None:
         BlockKind.PARAGRAPH,
     ]
     assert counter["icon"] == 0
+
+
+def test_inline_code_of_a_block_is_kept() -> None:
+    """A block keeps its outermost inline code; code and images none."""
+    root = _root(
+        "<p>Run <code>orbit start</code>, then <kbd>Ctrl</kbd>+<kbd>C</kbd>"
+        " and <code><var>x</var></code>.</p>"
+        "<pre>Run <code>orbit stop</code></pre>"
+        '<p><img src="a.png" alt="A"></p>',
+    )
+    assert [(b.kind, b.code) for b in blocks_from_root(root.body)] == [
+        (BlockKind.PARAGRAPH, ("orbit start", "Ctrl", "C", "x")),
+        (BlockKind.CODE, ()),
+        (BlockKind.IMAGE, ()),
+    ]
+
+
+def test_inline_code_of_every_block_of_text() -> None:
+    """Items, captions, cells and loose runs keep their code, not drawings."""
+    root = _root(
+        "<ul><li>Set <code>a</code><p>then <tt>b</tt></p>"
+        "<ul><li><samp>c</samp></li></ul></li></ul>"
+        "<table><caption>The <code>d</code> table</caption>"
+        "<tr><td><code>e \n  f</code></td></tr></table>"
+        "<div>Loose <var>g</var> text</div>"
+        '<p>See <svg viewBox="0 0 300 200"><foreignObject><code>h</code>'
+        "</foreignObject></svg><code> </code>here.</p>",
+    )
+    blocks = blocks_from_root(root.body)
+    assert [(b.kind, b.code) for b in blocks] == [
+        (BlockKind.LIST_ITEM, ("a", "b")),
+        (BlockKind.LIST_ITEM, ("c",)),
+        (BlockKind.CAPTION, ("d",)),
+        (BlockKind.TABLE, ("e f",)),
+        (BlockKind.PARAGRAPH, ("g",)),
+        (BlockKind.PARAGRAPH, ()),
+        (BlockKind.IMAGE, ()),
+    ]
+
+
+def test_inline_code_is_read_in_one_walk() -> None:
+    """Codes deep under nested elements cost about what shallow ones do.
+
+    A walk up from each code to its block would cost the codes times the
+    depth: about 20 times the shallow time here, whatever the machine.
+    """
+    codes = "<code>x</code> " * 50_000
+
+    def read(depth: int) -> tuple[float, Block]:
+        """Return the time to read the block of codes, and the block."""
+        root = _root(f"<p>{'<span>' * depth}{codes}{'</span>' * depth}</p>")
+        start = time.perf_counter()
+        (block,) = blocks_from_root(root.body)
+        return time.perf_counter() - start, block
+
+    shallow, _ = read(0)
+    deep, block = read(240)
+    assert deep < 5 * shallow
+    assert block.code == ("x",) * 50_000

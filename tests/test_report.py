@@ -827,8 +827,9 @@ def test_audit_markdown_report_has_one_column(tmp_path: Path) -> None:
     assert text.startswith("# doc-checker report: audit\n")
     assert "| | Document |" in text
     assert "| Reference |" not in text
-    assert "**Checks:** images, structure, a11y \xb7 **Profile:** screen" in (
-        text
+    assert (
+        "**Checks:** images, structure, a11y, text \xb7 **Profile:** screen"
+        in text
     )
     assert "<mark>??</mark>" in text
 
@@ -840,7 +841,7 @@ def test_audit_reports_name_the_families_that_ran(tmp_path: Path) -> None:
     text = render_markdown(result, tmp_path / "report.md").read_text(
         encoding="utf-8",
     )
-    assert "**Checks:** structure, a11y \xb7 **Profile:** screen" in text
+    assert "**Checks:** structure, a11y, text \xb7 **Profile:** screen" in text
     unread = audit_document(doc, Config(checks=("images",), images=False))
     text = render_markdown(unread, tmp_path / "r.md").read_text(
         encoding="utf-8",
@@ -861,7 +862,7 @@ def test_audit_terminal_summary(tmp_path: Path) -> None:
     ).splitlines()
     assert lines[0].startswith("audit  doc=doc (1 pages, generic)")
     assert lines[1] == (
-        "blocks 1 | images 0 | links 0 | checks images, structure, a11y"
+        "blocks 1 | images 0 | links 0 | checks images, structure, a11y, text"
         " | profile screen"
     )
     assert lines[2] == "findings: 0 critical, 1 major, 0 minor, 0 info"

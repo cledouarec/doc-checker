@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Final
 from doc_checker.compare.aggregate import PATTERN_MAX_CHARS
 from doc_checker.compare.drafts import marked_side, marked_span
 from doc_checker.images.refs import describe
+from doc_checker.spell.words import is_word_char
 from doc_checker.text.normalize import normalize_display, truncate
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 
     from doc_checker.model.document import Block
     from doc_checker.model.findings import Side
+    from doc_checker.spell.words import Span
 
 # How many times the text of a block each pass of the placing of its links
 # reads at most.
@@ -28,8 +30,6 @@ LINK_SCAN_FACTOR: Final = 2
 
 _BLANKS: Final = re.compile(r"\s+")
 _WORD_RUN: Final = re.compile(r"\w*")
-
-type Span = tuple[int, int]
 
 
 def quote(text: str) -> str:
@@ -46,14 +46,6 @@ def image_side(block: Block) -> Side:
     """Return the side that shows a figure, as `describe` tells it."""
     text = block.text if block.image is None else describe(block.image)
     return marked_side(block.source, text, kind=block.kind, image=block.image)
-
-
-def _is_word(char: str) -> bool:
-    """Return whether a character is a letter, a digit or an underscore.
-
-    That is what a word character of a regular expression is.
-    """
-    return char.isalnum() or char == "_"
 
 
 class LinkMarks:
@@ -133,9 +125,9 @@ class LinkMarks:
         if stop > end:
             return None
         if (
-            _is_word(words[-1][-1])
+            is_word_char(words[-1][-1])
             and stop < len(text)
-            and _is_word(text[stop])
+            and is_word_char(text[stop])
         ):
             return None
         return at, stop
@@ -150,14 +142,14 @@ class LinkMarks:
         """
         text = self.block.text
         first = words[0]
-        head = _is_word(first[0])
+        head = is_word_char(first[0])
         while self.budget > 0:
             at = text.find(first, start, end)
             if at < 0:
                 self.budget -= end - start
                 return None
             self.budget -= at - start + len(first)
-            if head and at and _is_word(text[at - 1]):
+            if head and at and is_word_char(text[at - 1]):
                 start = _WORD_RUN.match(text, at).end()
                 self.budget -= start - at
                 continue
@@ -180,7 +172,7 @@ class LinkMarks:
         """
         text = self.block.text
         first = words[0]
-        head = _is_word(first[0])
+        head = is_word_char(first[0])
         stop = end
         while self.budget > 0:
             at = text.rfind(first, start, stop)
@@ -188,7 +180,7 @@ class LinkMarks:
                 self.budget -= stop - start
                 return None
             self.budget -= stop - at
-            if not (head and at and _is_word(text[at - 1])):
+            if not (head and at and is_word_char(text[at - 1])):
                 span = self._match(words, at, end)
                 if span is not None:
                     return span

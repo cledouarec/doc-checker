@@ -504,7 +504,10 @@ def test_audit_html_report_has_one_column(tmp_path: Path) -> None:
     assert "Reference</th>" not in text
     assert '<div class="sides single">' in text
     assert "<mark>??</mark>" in text
-    assert "Checks: images, structure, a11y &middot; Profile: screen" in text
+    assert (
+        "Checks: images, structure, a11y, text &middot; Profile: screen"
+        in text
+    )
 
 
 def test_audit_reports_are_byte_stable(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 from doc_checker.errors import ConfigError
 from doc_checker.model.findings import Severity
 from doc_checker.rules import RULES
+from doc_checker.spell.words import read_word_file
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -20,7 +21,7 @@ type PageOrder = Literal["auto", "nav", "path"]
 
 AVAILABLE_FORMATS: Final = ("html", "md")
 DEFAULT_FORMATS: Final = ("html", "md")
-AVAILABLE_CHECKS: Final = ("images", "structure", "a11y")
+AVAILABLE_CHECKS: Final = ("images", "structure", "a11y", "text")
 PROFILES: Final = ("screen", "print")
 LANGUAGES: Final = ("auto", "fr", "en")
 PAGE_ORDERS: Final = ("auto", "nav", "path")
@@ -50,6 +51,7 @@ _SECTIONS: Final = (
     "thresholds",
     "ignore",
     "severity",
+    "spelling",
 )
 
 
@@ -134,6 +136,9 @@ class AuditThresholds:
         blockiness: Block artefact ratio above which an image is blocky.
         unmapped_major: Share of the characters of a PDF without Unicode
             mapping that is a major finding.
+        long_sentence_minor: Number of words above which a sentence is long.
+        long_sentence_major: Number of words above which a sentence is very
+            long.
     """
 
     dpi_major: float = 96.0
@@ -148,6 +153,8 @@ class AuditThresholds:
     blur: float = 0.10
     blockiness: float = 2.0
     unmapped_major: float = 0.01
+    long_sentence_minor: int = 40
+    long_sentence_major: int = 60
 
     def dpi(self, profile: str) -> tuple[float, float]:
         """Return the major and minor resolution limits of a profile.
@@ -179,6 +186,18 @@ class IgnoreConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SpellingConfig:
+    """Spell checking settings.
+
+    Attributes:
+        words: Personal words: those of the configuration, then those of its
+            word files, then those of the command line.
+    """
+
+    words: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Complete configuration of a run.
 
@@ -194,6 +213,7 @@ class Config:
         checks: Audit check families to run.
         profile: Audit profile, ``"screen"`` or ``"print"``.
         audit: Audit thresholds.
+        spelling: Spell checking settings.
         ignore: What to leave out of the reports.
         severity: Severity overrides by rule identifier.
     """
@@ -209,6 +229,7 @@ class Config:
     checks: tuple[str, ...] = AVAILABLE_CHECKS
     profile: str = "screen"
     audit: AuditThresholds = field(default_factory=AuditThresholds)
+    spelling: SpellingConfig = field(default_factory=SpellingConfig)
     ignore: IgnoreConfig = field(default_factory=IgnoreConfig)
     severity: Mapping[str, Severity] = field(default_factory=dict)
 
@@ -228,6 +249,7 @@ class CliOverrides:
     no_images: bool = False
     checks: tuple[str, ...] | None = None
     profile: str | None = None
+    words: tuple[Path, ...] = ()
 
 
 class _Section:
@@ -442,6 +464,14 @@ def _parse_audit(section: _Section) -> AuditThresholds:
         blur=section.ratio("blur", defaults.blur),
         blockiness=section.positive("blockiness", defaults.blockiness),
         unmapped_major=section.ratio("unmapped_major", default_unmapped),
+        long_sentence_minor=section.count(
+            "long_sentence_minor",
+            defaults.long_sentence_minor,
+        ),
+        long_sentence_major=section.count(
+            "long_sentence_major",
+            defaults.long_sentence_major,
+        ),
     )
     for key in ("jpeg_quality_minor", "jpeg_quality_major"):
         if getattr(values, key) > MAX_JPEG_QUALITY:
@@ -454,6 +484,7 @@ def _parse_audit(section: _Section) -> AuditThresholds:
         ("print_dpi_major", "print_dpi_minor"),
         ("heavy_minor", "heavy_major"),
         ("jpeg_quality_major", "jpeg_quality_minor"),
+        ("long_sentence_minor", "long_sentence_major"),
     ):
         if getattr(values, low) >= getattr(values, high):
             raise section.error(low, f"must be below {high}")
@@ -518,6 +549,14 @@ def _parse_ignore(section: _Section) -> IgnoreConfig:
     )
 
 
+def _parse_spelling(section: _Section, base_dir: Path) -> SpellingConfig:
+    section.check_keys(("words", "files"))
+    words = list(section.texts("words", ()))
+    for name in section.texts("files", ()):
+        words.extend(read_word_file(base_dir / name))
+    return SpellingConfig(words=tuple(words))
+
+
 def _parse_severity(section: _Section) -> dict[str, Severity]:
     overrides: dict[str, Severity] = {}
     for rule_id in sorted(section.data):
@@ -562,6 +601,7 @@ def config_from_mapping(
         pdf=_parse_pdf(section("pdf")),
         compare=compare,
         audit=audit,
+        spelling=_parse_spelling(section("spelling"), source.parent),
         ignore=_parse_ignore(section("ignore")),
         severity=_parse_severity(section("severity")),
     )
@@ -648,6 +688,9 @@ def apply_overrides(cfg: Config, overrides: CliOverrides) -> Config:
         rules=cfg.ignore.rules + overrides.disable + moved,
     )
     changes: dict[str, object] = {"html": html, "ignore": ignore}
+    if overrides.words:
+        extra = [w for p in overrides.words for w in read_word_file(p)]
+        changes["spelling"] = SpellingConfig(cfg.spelling.words + tuple(extra))
     if overrides.no_images:
         changes["images"] = False
     for name in (

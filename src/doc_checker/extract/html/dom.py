@@ -13,6 +13,10 @@ without giving one, such as an empty ``section`` or ``div``, then those of
 the elements whose text makes it. They are printable, in document order and
 without duplicates.
 
+A block of text keeps the text of its inline code, the elements of
+`INLINE_CODE_TAGS` of the elements whose text makes it that no other such
+element holds. A code block and an image have none.
+
 An ``svg`` element is an image, never text: neither its texts nor its links
 belong to a block of text. An image block follows the block of text whose
 elements hold it, or comes in its place when that text is empty; an inline
@@ -55,6 +59,8 @@ class RawBlock:
             order.
         ids: Printable identifiers that designate the block, in order.
         image: The image of an `IMAGE` block.
+        code: Text of each inline code of the block, its ASCII whitespace
+            collapsed, in order; empty ones are left out.
     """
 
     kind: BlockKind
@@ -66,6 +72,7 @@ class RawBlock:
     links: tuple[tuple[str, str], ...] = ()
     ids: tuple[str, ...] = ()
     image: RawImage | None = None
+    code: tuple[str, ...] = ()
 
 
 INLINE_TAGS: Final[frozenset[str]] = frozenset(
@@ -105,6 +112,9 @@ INLINE_TAGS: Final[frozenset[str]] = frozenset(
     },
 )
 
+# The inline elements whose text is code: source code, keys, outputs and
+# variables.
+INLINE_CODE_TAGS: Final = frozenset({"code", "kbd", "samp", "tt", "var"})
 _HEADING_LEVELS: Final = {f"h{level}": level for level in range(1, 7)}
 _ITEM_TEXT_TAGS: Final = frozenset({"p"})
 _FORMULA_CLASSES: Final = frozenset({"math", "arithmatex"})
@@ -250,6 +260,35 @@ def _links(parts: Iterable[HtmlElement]) -> tuple[tuple[str, str], ...]:
     return tuple(found)
 
 
+def _inline_code(parts: Iterable[HtmlElement]) -> tuple[str, ...]:
+    """Return the text of the inline code of elements, in document order.
+
+    Each part is walked once, in document order, without entering an
+    element of `INLINE_CODE_TAGS`, whose text holds the codes in it, nor
+    an ``svg`` element, whose text is part of the drawing; a part that
+    holds no inline code is not walked. The text has its ASCII whitespace
+    collapsed; an empty one is left out.
+    """
+    found: list[str] = []
+    for part in parts:
+        if next(part.iter(*INLINE_CODE_TAGS), None) is None:
+            continue
+        stack = [part]
+        while stack:
+            node = stack.pop()
+            if node.tag in INLINE_CODE_TAGS:
+                text = _collapse(_raw_text(node))
+                if text:
+                    found.append(text)
+            elif node.tag != _SVG:
+                stack.extend(
+                    child
+                    for child in reversed(node)
+                    if isinstance(child.tag, str)
+                )
+    return tuple(found)
+
+
 def strip_elements(root: HtmlElement, selectors: Iterable[str]) -> int:
     """Remove the elements matched by CSS selectors, keeping their tail.
 
@@ -304,17 +343,22 @@ class _Walker:
         parts: Sequence[HtmlElement],
         **extra: int | str | RawImage | None,
     ) -> None:
-        """Record a block, with the links and identifiers of its parts."""
+        """Record a block, with the links, code and identifiers of its parts.
+
+        A code block and an image have neither links nor inline code.
+        """
         ids = tuple(dict.fromkeys((*self.waiting, *_all_identifiers(parts))))
         self.waiting = []
+        textless = kind in _LINKLESS
         self.blocks.append(
             RawBlock(
                 kind,
                 text,
                 line,
                 self.anchor,
-                links=() if kind in _LINKLESS else _links(parts),
+                links=() if textless else _links(parts),
                 ids=ids,
+                code=() if textless else _inline_code(parts),
                 **extra,  # type: ignore[arg-type]
             ),
         )

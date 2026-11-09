@@ -1,6 +1,7 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for text normalization."""
 
+import time
 from collections import Counter
 
 import pytest
@@ -51,6 +52,19 @@ def test_strict_key_removes_french_spacing() -> None:
     text = "Attention\U0000202f: oui\xa0?"
     assert strict_key(text, counter) == "Attention: oui?"
     assert counter["punct_spacing"] == 2
+
+
+def test_strict_key_reads_a_run_of_spaces_once() -> None:
+    """A long run of spaces costs one reading, whatever follows it."""
+    counter: Counter[str] = Counter()
+    start = time.perf_counter()
+    assert strict_key("a" + " " * 200_000 + ",a", counter) == "a ,a"
+    assert strict_key("a" + "\xa0" * 40_000 + ",a", counter) == "a ,a"
+    assert counter["punct_spacing"] == 0
+    assert strict_key("a" + " " * 200_000 + ";a", counter) == "a;a"
+    assert strict_key("a" + "\xa0" * 40_000 + ";a", counter) == "a;a"
+    assert counter["punct_spacing"] == 2
+    assert time.perf_counter() - start < 1
 
 
 def test_strict_key_collapses_whitespace_and_anchor_glyph() -> None:

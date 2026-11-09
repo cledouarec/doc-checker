@@ -2,6 +2,7 @@
 """Tests for configuration loading and command line overrides."""
 
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -10,6 +11,7 @@ from doc_checker.config import (
     CliOverrides,
     Config,
     PdfConfig,
+    SpellingConfig,
     apply_overrides,
     load_config,
     rule_disabled,
@@ -288,13 +290,17 @@ def test_audit_rules_have_their_severities_and_categories() -> None:
 def test_audit_settings_have_the_defaults_of_the_spec() -> None:
     """All families, the screen profile and the thresholds of the spec."""
     cfg = Config()
-    assert cfg.checks == ("images", "structure", "a11y")
+    assert cfg.checks == ("images", "structure", "a11y", "text")
     assert cfg.profile == "screen"
     assert cfg.audit.dpi("screen") == (96.0, 150.0)
     assert cfg.audit.dpi("print") == (150.0, 300.0)
     assert (cfg.audit.heavy_minor, cfg.audit.heavy_major) == (
         1_000_000,
         3_000_000,
+    )
+    assert (cfg.audit.long_sentence_minor, cfg.audit.long_sentence_major) == (
+        40,
+        60,
     )
 
 
@@ -320,8 +326,24 @@ def test_audit_settings_are_read_from_the_file(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("toml", "message"),
     [
-        ('[general]\nchecks = ["text"]\n', "unknown check 'text'"),
+        ('[general]\nchecks = ["grammar"]\n', "unknown check 'grammar'"),
         ("[general]\nchecks = []\n", "checks: expected at least one check"),
+        (
+            '[spelling]\nfiles = ["missing.txt"]\n',
+            "missing.txt: cannot read file",
+        ),
+        (
+            "[spelling]\nwords = 3\n",
+            "spelling.words: expected a list of strings",
+        ),
+        ('[spelling]\nlang = "fr"\n', "spelling.lang: unknown key"),
+        (
+            "[thresholds.audit]\nlong_sentence_minor = 70\n",
+            (
+                "thresholds.audit.long_sentence_minor: must be below "
+                "long_sentence_major"
+            ),
+        ),
         (
             '[general]\nprofile = "paper"\n',
             "profile: 'paper' is not one of screen, print",
@@ -440,3 +462,112 @@ def test_audit_thresholds_reject_degenerate_values(
     (tmp_path / "doc-checker.toml").write_text(toml, encoding="utf-8")
     with pytest.raises(ConfigError, match=re.escape(message)):
         load_config(None, cwd=tmp_path)
+
+
+def test_spelling_words_come_from_the_file_and_its_word_files(
+    tmp_path: Path,
+) -> None:
+    """Words of the table, then of each listed file, relative to it."""
+    (tmp_path / "jargon.txt").write_text("kubectl\n", encoding="utf-8")
+    (tmp_path / "doc-checker.toml").write_text(
+        '[spelling]\nwords = ["Kubernetes"]\nfiles = ["jargon.txt"]\n'
+        "[thresholds.audit]\nlong_sentence_minor = 30\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(None, cwd=tmp_path)
+    assert cfg.spelling.words == ("Kubernetes", "kubectl")
+    assert cfg.audit.long_sentence_minor == 30
+
+
+def test_command_line_word_files_extend_the_words(tmp_path: Path) -> None:
+    """--words adds the words of its files after the configured ones."""
+    path = tmp_path / "more.txt"
+    path.write_text("frobnicate\n", encoding="utf-8")
+    cfg = replace(Config(), spelling=SpellingConfig(("Kubernetes",)))
+    cfg = apply_overrides(cfg, CliOverrides(words=(path,)))
+    assert cfg.spelling.words == ("Kubernetes", "frobnicate")
+
+
+def test_word_files_resolve_against_the_config_folder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A word file is read next to the config file, not in the cwd."""
+    folder = tmp_path / "conf"
+    folder.mkdir()
+    (folder / "words.txt").write_text("kubectl\n", encoding="utf-8")
+    config = folder / "doc-checker.toml"
+    config.write_text('[spelling]\nfiles = ["words.txt"]\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(config, cwd=tmp_path)
+    assert cfg.spelling.words == ("kubectl",)
+
+
+def test_word_files_may_have_an_absolute_path(tmp_path: Path) -> None:
+    """An absolute path in files is used as it is."""
+    words = tmp_path / "words.txt"
+    words.write_text("kubectl\n", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    config = other / "doc-checker.toml"
+    config.write_text(
+        f"[spelling]\nfiles = ['{words}']\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(config, cwd=tmp_path)
+    assert cfg.spelling.words == ("kubectl",)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (b"\xff\xfe\x00bad\n", "cannot read file: not UTF-8 text"),
+        (b"two words\n", ":1: expected one word per line"),
+    ],
+)
+def test_bad_word_files_are_config_errors(
+    tmp_path: Path,
+    content: bytes,
+    message: str,
+) -> None:
+    """A word file that is not UTF-8 or has a blank in a word is refused."""
+    (tmp_path / "words.txt").write_bytes(content)
+    (tmp_path / "doc-checker.toml").write_text(
+        '[spelling]\nfiles = ["words.txt"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=re.escape(message)):
+        load_config(None, cwd=tmp_path)
+
+
+def test_a_missing_command_line_word_file_is_a_config_error(
+    tmp_path: Path,
+) -> None:
+    """--words with an unreadable file is a configuration error."""
+    overrides = CliOverrides(words=(tmp_path / "nope.txt",))
+    with pytest.raises(ConfigError, match=r"nope\.txt: cannot read file"):
+        apply_overrides(Config(), overrides)
+
+
+TEXT_RULES = {
+    "text.typo_fixed": Severity.INFO,
+    "text.unknown_word": Severity.MINOR,
+    "text.unknown_name": Severity.INFO,
+    "text.jargon": Severity.INFO,
+    "text.space_missing": Severity.MINOR,
+    "text.space_breakable": Severity.INFO,
+    "text.space_before_punctuation": Severity.MINOR,
+    "text.quotes": Severity.INFO,
+    "text.ordinal": Severity.MINOR,
+    "text.unit_space": Severity.MINOR,
+    "text.double_punctuation": Severity.MINOR,
+    "text.repeated_word": Severity.MINOR,
+    "text.long_sentence": Severity.MINOR,
+    "text.block_language": Severity.INFO,
+}
+
+
+def test_text_rules_have_their_severities_and_category() -> None:
+    """The text rules of the audit and the typo fix are registered."""
+    assert {r: get_rule(r).severity for r in TEXT_RULES} == TEXT_RULES
+    assert {get_rule(r).category for r in TEXT_RULES} == {Category.TEXT}

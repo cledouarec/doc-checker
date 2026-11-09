@@ -6,6 +6,7 @@ import binascii
 import re
 import time
 import zlib
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -33,6 +34,8 @@ from doc_checker.extract.pdf.reader import (
     Bookmark,
     char_text,
     font_style,
+    is_code_font,
+    monospaced_words,
     open_pdf,
     read_bookmarks,
     read_labels,
@@ -63,6 +66,7 @@ from tests.pdf_builders import (
     build_raw_pdf,
     build_reportlab_pdf,
     build_single_page_pdf,
+    make_chars,
     scan_image,
     to_unicode_cmap,
 )
@@ -754,6 +758,108 @@ def test_char_text() -> None:
     assert char_text(0x41, hyphen=False, unmapped=False) == "A"
     assert char_text(0x02, hyphen=True, unmapped=False) == "-"
     assert char_text(0x41, hyphen=False, unmapped=True) == "\U0000fffd"
+
+
+def test_monospaced_words_end_with_their_run() -> None:
+    """A run of code ends at a blank or a proportional character."""
+    chars = [
+        *make_chars("Use ", 72, 700),
+        *make_chars("(tlmgr", 92, 700, mono=True),
+        *make_chars("), then ", 122, 700),
+        *make_chars("a_b `` \U0000fb01le x\x01y", 162, 700, mono=True),
+    ]
+    assert monospaced_words(chars) == frozenset({"tlmgr", "a_b", "file", "xy"})
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("SFTT1000", True),
+        ("ABCDEF+SFTT1095", True),
+        ("SFST1000", True),
+        ("SFIT1000", True),
+        ("SFTC1000", True),
+        ("CMSLTT10", True),
+        ("CMITT10", True),
+        ("CMTCSC10", True),
+        ("cstt10", True),
+        ("CSSLTT10", True),
+        ("NimbusMonL-Regu", True),
+        ("t1xtt-Slant_167", True),
+        ("t1xbttsc", True),
+        ("txtt", True),
+        ("newtxtt", True),
+        ("Tt-Kp-Regular", True),
+        ("AnonymousPro-Bold", True),
+        ("Hack-Regular", True),
+        ("MonaspaceNeon-Regular", True),
+        ("SFVT1000", False),
+        ("SFRM1000", False),
+        ("SFTI1000", False),
+        ("CMCSC10", False),
+        ("NimbusRomNo9L-Regu", False),
+        ("NimbusSanL-Regu", False),
+        ("Hackney", False),
+        ("XSFTT1000", False),
+        ("Helvetica", False),
+    ],
+)
+def test_code_font_names(name: str, *, expected: bool) -> None:
+    """The typewriter fonts of TeX and the code fonts that MONO_NAME misses."""
+    assert is_code_font(name) is expected
+    assert not font_style(name, 0, 0)[0]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CMTT10",
+        "LMMono10-Regular",
+        "Courier",
+        "Inconsolata-zi4r",
+        "DejaVuSansMono",
+        "LiberationMono",
+        "Consolas",
+        "Menlo-Regular",
+        "SourceCodePro-Regular",
+        "FiraMono-Regular",
+        "NimbusMonoPS-Regular",
+    ],
+)
+def test_common_code_fonts_are_monospaced_by_name(name: str) -> None:
+    """MONO_NAME already knows them, so their code needs no other name."""
+    assert font_style(name, 0, 0)[0]
+    assert not is_code_font(name)
+
+
+def test_monospaced_words_read_code_fonts() -> None:
+    """A character of a code font sets code, though it is not monospaced."""
+    chars = [
+        *make_chars("Run ", 72, 700),
+        *(replace(char, code=True) for char in make_chars("tlmgr", 92, 700)),
+    ]
+    assert monospaced_words(chars) == frozenset({"tlmgr"})
+
+
+def test_monospaced_words_end_where_the_text_moves() -> None:
+    """A run of code ends where its baseline moves or its text moves back."""
+    # The baseline may move by half the size of the next character, and the
+    # box of that character may overlap the one before it by half its size.
+    line_end = [
+        *make_chars("one", 500, 700, mono=True),
+        *make_chars("two", 515, 688, mono=True),
+    ]
+    back = [
+        *make_chars("ab", 200, 700, mono=True),
+        *make_chars("cd", 204, 700, mono=True),
+    ]
+    near = [
+        *make_chars("fo", 72, 700, mono=True),
+        *make_chars("o", 77, 705, mono=True),
+    ]
+    assert monospaced_words(line_end) == frozenset({"one", "two"})
+    assert monospaced_words(back) == frozenset({"ab", "cd"})
+    assert monospaced_words(near) == frozenset({"foo"})
 
 
 def test_read_catalog(tmp_path: Path) -> None:
