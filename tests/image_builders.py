@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from hashlib import blake2b
 from typing import Literal
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from doc_checker.images.pixels import flatten
@@ -63,6 +64,43 @@ def drawing(name: str, size: tuple[int, int] = (400, 250)) -> Image.Image:
         )
     draw.text((10, 10), name, fill="black")
     return image
+
+
+def _gradient(width: int, height: int) -> Image.Image:
+    """Return a picture that turns from blue to orange and down to green."""
+    x = np.linspace(0.0, 1.0, width)[None, :, None]
+    y = np.linspace(0.0, 1.0, height)[:, None, None]
+    zero = np.zeros((height, width, 1))
+    channels = (40 + 150 * x + zero, 60 + 120 * y + zero, 180 - 80 * x + zero)
+    pixels = np.concatenate(channels, axis=2).astype(np.uint8)
+    return Image.fromarray(pixels, "RGB")
+
+
+def photo(name: str, size: tuple[int, int] = (480, 320)) -> Image.Image:
+    """Draw a photograph-like picture: gradient, discs and fine noise.
+
+    Args:
+        name: Seed of the picture; the same name gives the same pixels.
+        size: Width and height in pixels.
+
+    Returns:
+        An RGB image.
+    """
+    seed = int.from_bytes(blake2b(name.encode()).digest()[:8])
+    rng = random.Random(seed)  # ruff: ignore[suspicious-non-cryptographic-random-usage] - test picture, not security
+    width, height = size
+    image = _gradient(width, height)
+    draw = ImageDraw.Draw(image)
+    for _ in range(40):
+        cx, cy = rng.randrange(width), rng.randrange(height)
+        r = rng.randrange(8, max(9, width // 8))
+        fill = (rng.randrange(256), rng.randrange(256), rng.randrange(256))
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fill)
+    noise = np.random.default_rng(seed).normal(0.0, 24.0, (height, width, 3))
+    pixels = np.clip(np.asarray(image, dtype=np.float64) + noise, 0, 255)
+    return Image.fromarray(pixels.astype(np.uint8), "RGB").filter(
+        ImageFilter.GaussianBlur(0.8),
+    )
 
 
 def smiley(width: int, height: int) -> Image.Image:
@@ -168,6 +206,46 @@ def grayed(image: Image.Image) -> Image.Image:
         An RGB image of grays.
     """
     return image.convert("L").convert("RGB")
+
+
+def screenshot() -> Image.Image:
+    """Draw a window as a screenshot shows it, its edges on the 8 px grid.
+
+    A dark title bar, a side panel of buttons and a framed pane: a few
+    strong edges, all on the borders of the 8 x 8 blocks of a JPEG, and
+    flat colours between them, without any JPEG history.
+
+    Returns:
+        An RGB image of 640 x 400 pixels.
+    """
+    image = Image.new("RGB", (640, 400), (246, 245, 244))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 639, 47), fill=(48, 48, 48))
+    draw.rectangle((0, 48, 159, 399), fill=(222, 221, 218))
+    for k in range(6):
+        fill = (53, 132, 228) if k == 0 else (250, 250, 250)
+        draw.rectangle((16, 64 + 40 * k, 143, 87 + 40 * k), fill=fill)
+    draw.rectangle((176, 64, 623, 383), outline=(154, 153, 150))
+    draw.text((24, 16), "Settings", fill="white")
+    return image
+
+
+def swatches() -> Image.Image:
+    """Draw a grid of colour swatches whose edges fall on the 8 px grid.
+
+    Returns:
+        An RGB image of 480 x 288 pixels: six rows of ten swatches of 40
+        pixels, 8 pixels apart, on a light gray.
+    """
+    rng = np.random.default_rng(5)
+    image = Image.new("RGB", (480, 288), (240, 240, 240))
+    draw = ImageDraw.Draw(image)
+    for row in range(6):
+        for column in range(10):
+            left, top = 8 + 48 * column, 8 + 48 * row
+            fill = tuple(int(value) for value in rng.integers(0, 256, 3))
+            draw.rectangle((left, top, left + 39, top + 39), fill=fill)
+    return image
 
 
 def _chunk(kind: bytes, body: bytes) -> bytes:

@@ -13,7 +13,7 @@ top.
 
 import re
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import TYPE_CHECKING, Final
 
@@ -29,6 +29,7 @@ from doc_checker.extract.common import (
     strip_caption_numbers,
     strip_heading_numbers,
 )
+from doc_checker.extract.pdf import reader
 from doc_checker.extract.pdf.blocks import (
     group_lines,
     merge_flows,
@@ -42,8 +43,10 @@ from doc_checker.extract.pdf.kinds import figure_list, is_caption, toc_pages
 from doc_checker.extract.pdf.layout import page_lines
 from doc_checker.extract.pdf.reader import (
     MAX_PAGE_FIGURES,
+    METADATA_LIMIT,
     open_pdf,
     read_bookmarks,
+    read_labels,
     read_metadata,
     read_page,
 )
@@ -55,8 +58,13 @@ from doc_checker.model.document import (
     Document,
     SourceRef,
 )
+from doc_checker.model.facts import (
+    NO_STRUCTURE_TREE,
+    OutlineEntry,
+    PdfPageFacts,
+)
 from doc_checker.text.lang import declared_language, resolve_language
-from doc_checker.text.normalize import ELLIPSIS
+from doc_checker.text.normalize import ELLIPSIS, printable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -70,15 +78,19 @@ if TYPE_CHECKING:
     from doc_checker.extract.pdf.layout import Line
     from doc_checker.extract.pdf.reader import (
         Bookmark,
+        LinkTargets,
+        OutlineCut,
         PdfImage,
         PdfPageText,
     )
     from doc_checker.extract.pdf.segments import Segment
     from doc_checker.model.document import HeadingSource
+    from doc_checker.model.facts import PdfLink, TagTree
 
 SCANNED_MIN_COVERAGE: Final = 0.5  # Smallest image share of a scanned page.
 SCANNED_LABELS_MAX: Final = 10  # Most page labels that a warning lists.
 LANG_SAMPLE_BLOCKS: Final = 200  # Blocks whose text tells the language.
+MAX_DOCUMENT_LINKS: Final = 1_000_000  # Most links read in a document.
 
 _DIGITS: Final = re.compile(r"\d+")
 _MORE_LABELS: Final = f", {ELLIPSIS}"  # Ends a list of labels that goes on.
@@ -100,6 +112,13 @@ class _Page:
             unless they were not read.
         unrendered: Number of vector figures not rendered because they come
             after the first `MAX_PAGE_FIGURES` of the page.
+        chars: Number of characters that the page keeps.
+        unmapped: Number of them without Unicode mapping.
+        links: The link annotations of the page, if they were read.
+        more_links: Whether the page has more link annotations than
+            `MAX_PAGE_LINKS` of the reader, those after them not read.
+        untexted_links: Number of its links whose text was not read, for
+            `LINK_TEXT_WORK` of the reader.
     """
 
     label: str
@@ -109,6 +128,11 @@ class _Page:
     angled: int
     images: tuple[PdfImage, ...]
     unrendered: int = 0
+    chars: int = 0
+    unmapped: int = 0
+    links: tuple[PdfLink, ...] = ()
+    more_links: bool = False
+    untexted_links: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +162,11 @@ class _PdfFile:
         title: The title of the metadata, if any.
         generator: The producer of the metadata, or else its creator, if any.
         pages: Every page of the document, in order.
+        links_cut: Whether links were left unread for `MAX_DOCUMENT_LINKS`.
+        outline_cut: Why bookmarks were left unread, if they were: for
+            `MAX_BOOKMARKS` or `OUTLINE_TITLE_WORK` of the reader.
+        labels_cut: Whether pages were numbered rather than labelled for
+            `PAGE_LABEL_WORK` of the reader.
     """
 
     catalog: PdfCatalog
@@ -145,6 +174,51 @@ class _PdfFile:
     title: str | None
     generator: str | None
     pages: tuple[_Page, ...]
+    links_cut: bool = False
+    outline_cut: OutlineCut = None
+    labels_cut: bool = False
+
+
+@dataclass(slots=True)
+class _LinkBudget:
+    """How the links of a document are read, page after page, for the audit.
+
+    Attributes:
+        room: How many more links are read before `MAX_DOCUMENT_LINKS`.
+        cut: Whether a link was left unread for that limit, after which no
+            link is read.
+        targets: The targets of the link annotations already resolved, as
+            `read_links` of the reader takes them, while the document is
+            open.
+    """
+
+    room: int
+    cut: bool = False
+    targets: LinkTargets = field(default_factory=dict)
+
+    @property
+    def limit(self) -> int | None:
+        """The most links to read on the next page; None to read none."""
+        return None if self.cut else self.room
+
+    def spend(self, page: PdfPageText) -> bool:
+        """Count the links read on a page.
+
+        The page was read with the lower of the room and `MAX_PAGE_LINKS`
+        of the reader as its limit: the links that it left unread were left
+        for the lower of the two.
+
+        Args:
+            page: The page, read with `limit`.
+
+        Returns:
+            Whether links of the page were left unread for `MAX_PAGE_LINKS`,
+            rather than for the limit of the document.
+        """
+        for_document = page.more_links and self.room < reader.MAX_PAGE_LINKS
+        self.cut = self.cut or for_document
+        self.room -= len(page.links)
+        return page.more_links and not for_document
 
 
 def _count(counter: Counter[str], key: str, amount: int) -> None:
@@ -153,40 +227,62 @@ def _count(counter: Counter[str], key: str, amount: int) -> None:
         counter[key] += amount
 
 
-def _read_page(
+def _read_page(  # ruff: ignore[too-many-arguments] - one keyword per part of the page that is read
     pdf: pdfium.PdfDocument,
     index: int,
     path: Path,
     *,
     images: bool,
+    links: _LinkBudget | None,
+    label: str,
 ) -> PdfPageText:
-    """Read the characters and the images of a page.
+    """Read the characters, the images and the links of a page.
 
     Args:
         pdf: The document, opened by `open_pdf`.
         index: Position of the page, from 0.
-        path: The PDF file, which the error names.
+        path: The PDF file, which the error names, and from whose folder the
+            files of the links are checked.
         images: Whether the images are read.
+        links: How the links of the document are read, or ``None`` not to
+            read them.
+        label: The label of the page, as `read_labels` reads it.
 
     Returns:
-        The characters and the images of the page, as `read_page` returns
-        them.
+        The characters, the images and the links of the page, as
+        `read_page` returns them.
 
     Raises:
         InputError: If the page cannot be read.
     """
+    limit = None if links is None else links.limit
     try:
-        return read_page(pdf, index, images=images)
+        return read_page(
+            pdf,
+            index,
+            images=images,
+            link_folder=None if limit is None else path.parent,
+            link_limit=limit,
+            link_targets=None if links is None else links.targets,
+            label=label,
+        )
     except InputError as exc:
         msg = f"cannot read {path}: {exc}"
         raise InputError(msg) from None
 
 
-def _read(path: Path, counter: Counter[str], *, images: bool) -> _PdfFile:
+def _read(
+    path: Path,
+    counter: Counter[str],
+    *,
+    images: bool,
+    audit: bool,
+) -> _PdfFile:
     """Read the catalog, the outline, the metadata and the pages of a PDF.
 
-    The pages are read one at a time, and each one keeps its segments and
-    its images only, not its characters.
+    The pages are read one at a time, and each one keeps its segments, its
+    images and its links only, not its characters. The links are read for
+    the audit only, `MAX_DOCUMENT_LINKS` at most in the whole document.
 
     Args:
         path: The PDF file.
@@ -196,21 +292,32 @@ def _read(path: Path, counter: Counter[str], *, images: bool) -> _PdfFile:
             characters left out for their angle, and `figure_text` by the
             characters left out as drawn in a vector figure.
         images: Whether the images are read.
+        audit: Whether the links are read.
 
     Returns:
         What is read from the file.
     """
     with open_pdf(path) as pdf:
+        budget = _LinkBudget(MAX_DOCUMENT_LINKS) if audit else None
         catalog = read_catalog(pdf)
-        bookmarks = tuple(read_bookmarks(pdf))
+        bookmarks, outline_cut = read_bookmarks(pdf)
         title, generator = read_metadata(pdf)
+        labels, labels_cut = read_labels(pdf)
         pages = []
-        for index in range(len(pdf)):
-            page = _read_page(pdf, index, path, images=images)
+        for index, label in enumerate(labels):
+            page = _read_page(
+                pdf,
+                index,
+                path,
+                images=images,
+                links=budget,
+                label=label,
+            )
             _count(counter, "artifact", page.artifacts)
             _count(counter, "unicode_map", page.unmapped)
             _count(counter, "angled_text", page.angled)
             _count(counter, "figure_text", page.figure_chars)
+            more_links = budget is not None and budget.spend(page)
             segments = tuple(build_segments(page))
             pages.append(
                 _Page(
@@ -221,9 +328,23 @@ def _read(path: Path, counter: Counter[str], *, images: bool) -> _PdfFile:
                     page.angled,
                     page.images,
                     page.unrendered,
+                    chars=len(page.chars),
+                    unmapped=page.unmapped,
+                    links=page.links,
+                    more_links=more_links,
+                    untexted_links=page.untexted_links,
                 ),
             )
-    return _PdfFile(catalog, bookmarks, title, generator, tuple(pages))
+    return _PdfFile(
+        catalog,
+        tuple(bookmarks),
+        title,
+        generator,
+        tuple(pages),
+        links_cut=budget is not None and budget.cut,
+        outline_cut=outline_cut,
+        labels_cut=labels_cut,
+    )
 
 
 def _strip_chrome(
@@ -562,14 +683,25 @@ def _page_list(labels: Sequence[str]) -> str:
     return listed
 
 
+def _is_scanned(page: _Page, segments: Sequence[Segment]) -> bool:
+    """Tell whether a page is probably scanned.
+
+    Args:
+        page: The page.
+        segments: Its segments, chrome removed.
+
+    Returns:
+        Whether the page keeps no segment once the chrome is removed, and
+        images cover at least `SCANNED_MIN_COVERAGE` of it.
+    """
+    return not segments and page.image_coverage >= SCANNED_MIN_COVERAGE
+
+
 def _scanned_warnings(
     pdf: _PdfFile,
     kept: Sequence[Sequence[Segment]],
 ) -> list[str]:
-    """Warn about the pages that are probably scanned.
-
-    A page is scanned if it keeps no segment once the chrome is removed, and
-    images cover at least `SCANNED_MIN_COVERAGE` of it.
+    """Warn about the pages that are probably scanned, as `_is_scanned` says.
 
     Args:
         pdf: What is read from the file.
@@ -582,7 +714,7 @@ def _scanned_warnings(
     labels = [
         page.label
         for page, segments in zip(pdf.pages, kept, strict=True)
-        if not segments and page.image_coverage >= SCANNED_MIN_COVERAGE
+        if _is_scanned(page, segments)
     ]
     if not labels:
         return []
@@ -626,12 +758,164 @@ def _figure_warnings(pdf: _PdfFile) -> list[str]:
     ]
 
 
+def _link_warnings(pdf: _PdfFile) -> list[str]:
+    """Warn about the links, and the texts of links, that were left unread.
+
+    Args:
+        pdf: What is read from the file.
+
+    Returns:
+        One warning that counts the pages whose links after the first
+        `MAX_PAGE_LINKS` of the reader were not read, then one that counts
+        the links whose text was not read, for `LINK_TEXT_WORK` of the
+        reader, and their pages, each listing the labels of the first
+        `SCANNED_LABELS_MAX` pages, if there are such pages; then one if
+        links were left unread for `MAX_DOCUMENT_LINKS`. Each limit is the
+        one that the reading used.
+    """
+    warnings: list[str] = []
+    cut = [page.label for page in pdf.pages if page.more_links]
+    if cut:
+        warnings.append(
+            f"{len(cut)} page(s) with more than {reader.MAX_PAGE_LINKS}"
+            f" links, the others were not read: {_page_list(cut)}",
+        )
+    untexted = [page for page in pdf.pages if page.untexted_links]
+    if untexted:
+        total = sum(page.untexted_links for page in untexted)
+        labels = _page_list([page.label for page in untexted])
+        warnings.append(
+            f"{len(untexted)} page(s) where the text of {total} links was"
+            f" not read: {labels}",
+        )
+    if pdf.links_cut:
+        warnings.append(
+            f"more than {MAX_DOCUMENT_LINKS} links in the document,"
+            " the others were not read",
+        )
+    return warnings
+
+
+def _label_warnings(pdf: _PdfFile) -> list[str]:
+    """Warn about the pages that were numbered rather than labelled.
+
+    Args:
+        pdf: What is read from the file.
+
+    Returns:
+        One warning if the labels asked reached `PAGE_LABEL_WORK` of the
+        reader, as the reading used it, before the last page; or none.
+    """
+    if not pdf.labels_cut:
+        return []
+    return [
+        (
+            f"the page labels exceed {reader.PAGE_LABEL_WORK} bytes,"
+            " the other pages are numbered"
+        ),
+    ]
+
+
+def _outline_warnings(pdf: _PdfFile) -> list[str]:
+    """Warn about the bookmarks that were left unread.
+
+    Args:
+        pdf: What is read from the file.
+
+    Returns:
+        One warning if bookmarks were not read, after the first
+        `MAX_BOOKMARKS` of the reader or once their titles reached
+        `OUTLINE_TITLE_WORK` bytes, each as the reading used it; or none.
+    """
+    match pdf.outline_cut:
+        case "bookmarks":
+            warning = (
+                f"the outline has more than {reader.MAX_BOOKMARKS} bookmarks,"
+                " the others were not read"
+            )
+        case "titles":
+            warning = (
+                f"the outline titles exceed {reader.OUTLINE_TITLE_WORK} bytes,"
+                " the other bookmarks were not read"
+            )
+        case _:
+            return []
+    return [warning]
+
+
+def _tag_warnings(tags: TagTree | None) -> list[str]:
+    """Warn about a structure tree that was not read in full.
+
+    Args:
+        tags: The structure tree, if it was read.
+
+    Returns:
+        One warning that tells why the tree was not read in full, unless the
+        document has no tree; or none.
+    """
+    if tags is None or tags.problem in {None, NO_STRUCTURE_TREE}:
+        return []
+    return [f"{tags.problem}; the checks of the tags may be incomplete"]
+
+
+def _outline(bookmarks: Sequence[Bookmark]) -> tuple[OutlineEntry, ...]:
+    """Make the outline of a document from its bookmarks.
+
+    Args:
+        bookmarks: The bookmarks, in the order of the document.
+
+    Returns:
+        One entry for each bookmark, with its printable title, cut at
+        `METADATA_LIMIT` characters, and its page from 1, if it has one.
+    """
+    return tuple(
+        OutlineEntry(
+            bookmark.level,
+            printable(bookmark.title, limit=METADATA_LIMIT),
+            None if bookmark.page is None else bookmark.page + 1,
+        )
+        for bookmark in bookmarks
+    )
+
+
+def _page_facts(
+    pdf: _PdfFile,
+    kept: Sequence[Sequence[Segment]],
+) -> tuple[PdfPageFacts, ...]:
+    """Gather what the audit reads of each page.
+
+    Args:
+        pdf: What is read from the file.
+        kept: The segments of each page, chrome removed.
+
+    Returns:
+        The facts of each page, in order: its number from 1, its label, its
+        kept characters, those without Unicode mapping, whether it is
+        scanned, as `_is_scanned` tells, and its links.
+    """
+    return tuple(
+        PdfPageFacts(
+            number,
+            page.label,
+            page.chars,
+            page.unmapped,
+            scanned=_is_scanned(page, segments),
+            links=page.links,
+        )
+        for number, (page, segments) in enumerate(
+            zip(pdf.pages, kept, strict=True),
+            1,
+        )
+    )
+
+
 def load_pdf(
     path: Path,
     cfg: PdfConfig,
     *,
     lang: str,
     images: bool = True,
+    audit: bool = False,
 ) -> Document:
     """Load a PDF file.
 
@@ -643,16 +927,24 @@ def load_pdf(
         cfg: PDF extraction settings.
         lang: Language requested by the user, or ``"auto"``.
         images: Whether the raster images give blocks and are read.
+        audit: Whether to read the facts that only the audit uses: the
+            characters, the scans and the links of the pages, and the
+            structure tree of a document that declares its tags.
 
     Returns:
         The document, its blocks in reading order. Its chrome lists the texts
         removed as running headers, footers and page numbers, and its
         warnings the pages that are probably scanned, then those whose text
         at an angle was left out, then those with more vector figures than
-        are rendered, then the images that could not be read.
+        are rendered, then those with more links than are read or links
+        whose text was not read, then the pages numbered rather than
+        labelled, then the bookmarks that were not read, then the images
+        that could not be read, then why the structure tree was not read in
+        full. Its title and its outline are always read, its page facts and
+        its structure tree only for the audit.
     """
     counter: Counter[str] = Counter()
-    pdf = _read(path, counter, images=images)
+    pdf = _read(path, counter, images=images, audit=audit)
     body = body_size(page.segments for page in pdf.pages)
     kept, chrome = _strip_chrome(pdf, body=body, cfg=cfg, counter=counter)
     kinds, drafts = _drafts(kept, body=body, counter=counter)
@@ -680,6 +972,11 @@ def load_pdf(
         ),
     )
     declared = declared_language(pdf.catalog.lang)
+    tags = None
+    if audit and pdf.catalog.tagged:
+        from doc_checker.extract.pdf.tags import read_tags  # ruff: ignore[import-outside-top-level] - pypdf is only needed by the audit
+
+        tags = read_tags(path)
     return Document(
         path=path,
         format="pdf",
@@ -695,8 +992,16 @@ def load_pdf(
             *_scanned_warnings(pdf, kept),
             *_angled_warnings(pdf),
             *_figure_warnings(pdf),
+            *_link_warnings(pdf),
+            *_label_warnings(pdf),
+            *_outline_warnings(pdf),
             *image_warnings(blocks),
+            *_tag_warnings(tags),
         ],
         tagged=pdf.catalog.tagged,
         chrome_images=chrome_images,
+        title=pdf.title,
+        outline=_outline(pdf.bookmarks),
+        pdf_pages=_page_facts(pdf, kept) if audit else (),
+        tags=tags,
     )
