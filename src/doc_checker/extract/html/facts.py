@@ -3,9 +3,11 @@
 
 The identifiers, the links and the title are read from the whole page, its
 navigation included. The links without a name, the references that lead
-nowhere and the tables without a header are read from the content of the
-page only, before its chrome is removed: what would be removed, and what a
-drawing or a formula holds, does not count.
+nowhere, the tables without a header and the content that gives no block
+are read from the content of the page only, before its chrome is removed:
+what would be removed, and what a drawing or a formula holds, does not
+count, but for a toctree, which the chrome removes though it is the body of
+its section.
 
 The walks are iterative, as the document is not trusted.
 """
@@ -13,7 +15,9 @@ The walks are iterative, as the document is not trusted.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.extract.html.dom import in_formula, in_svg
+from lxml import etree
+
+from doc_checker.extract.html.dom import in_formula, in_svg, is_formula
 from doc_checker.extract.html.images import first_role
 from doc_checker.images.svg import local_name
 from doc_checker.model.document import CELL_SEPARATOR
@@ -42,10 +46,21 @@ LAYOUT_TABLE_CLASSES: Final = frozenset(
 LAYOUT_ROLES: Final = frozenset({"presentation", "none"})
 
 _NAME_ATTRIBUTES: Final = ("aria-label", "aria-labelledby", "title")
-_IMAGE_TAGS: Final = ("img", "svg")
+_SVG: Final = "svg"
+_IMAGE_TAGS: Final = ("img", _SVG)
 _IMG_NAMES: Final = ("alt", "aria-label")
 _UNRESOLVED_REFERENCE: Final = frozenset({"xref", "std"})
+# The elements that embed a medium, which no block shows.
+_MEDIA_TAGS: Final = frozenset({"iframe", "video", "audio", "object", "embed"})
+# The elements that show a picture, which no block shows when the images are
+# not read.
+_PICTURE_TAGS: Final = frozenset({"img", _SVG, "picture"})
+_HEADING_TAGS: Final = frozenset(f"h{level}" for level in range(1, 7))
+# The class of the list of the pages of a Sphinx toctree.
+_TOCTREE: Final = "toctree-wrapper"
 _PROBLEMATIC: Final = "problematic"
+# The elements that may hold an identifier: an id, or the name of an anchor.
+_IDENTIFIED: Final = etree.XPath("//*[@id] | //a[@name]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,11 +71,17 @@ class ContentSpots:
         empty_links: Links without an accessible name, by their href.
         unresolved: References that lead nowhere, by their text.
         bare_tables: Tables without a header cell, by their first row.
+        media: Source lines of the elements that embed a medium: iframe,
+            video, audio, object and embed.
+        blockless: Source lines of the other content that gives no block:
+            a toctree, and a picture when the images are not read.
     """
 
     empty_links: tuple[Spot, ...]
     unresolved: tuple[Spot, ...]
     bare_tables: tuple[Spot, ...]
+    media: tuple[int, ...] = ()
+    blockless: tuple[int, ...] = ()
 
 
 def _elements(tree: HtmlElement) -> Iterator[HtmlElement]:
@@ -81,7 +102,7 @@ def page_ids(tree: HtmlElement) -> frozenset[str]:
         but the empty ones.
     """
     found: set[str] = set()
-    for node in _elements(tree):
+    for node in _IDENTIFIED(tree):
         names = ("id", "name") if node.tag == "a" else ("id",)
         found.update(
             identifier
@@ -124,18 +145,39 @@ def page_title(tree: HtmlElement) -> str | None:
     return printable("".join(title.itertext())) or None
 
 
-def _is_removed(
-    element: HtmlElement,
+def _left_out(
     root: HtmlElement,
     removed: frozenset[HtmlElement],
-) -> bool:
-    """Return whether an element, or an ancestor under the root, goes."""
-    for node in (element, *element.iterancestors()):
-        if node is root:
-            return False
-        if node in removed:
-            return True
-    return False
+) -> set[HtmlElement]:
+    """Return the elements of a root that go, or lie in a drawing or formula.
+
+    One walk from the root down tells each element: it is left out when its
+    parent is, when it is removed, when its parent is an ``svg`` element or
+    when it is a formula. The root itself is never removed; it is left out
+    when a drawing or a formula holds it.
+
+    Args:
+        root: Root of the content of a page.
+        removed: The elements that the selectors match.
+
+    Returns:
+        The elements left out.
+    """
+    left: set[HtmlElement] = set()
+    if in_svg(root) or in_formula(root):
+        left.add(root)
+    for node in root.iterdescendants():
+        if not isinstance(node.tag, str):
+            continue
+        parent = node.getparent()
+        if (
+            parent in left
+            or node in removed
+            or parent.tag == _SVG
+            or is_formula(node)
+        ):
+            left.add(node)
+    return left
 
 
 def _hidden(element: HtmlElement) -> bool:
@@ -220,33 +262,88 @@ def _first_row(table: HtmlElement) -> str:
     return ""
 
 
+def _blockless(
+    root: HtmlElement,
+    left: set[HtmlElement],
+    *,
+    images: bool,
+) -> list[int]:
+    """Return the source lines of the content that gives no block.
+
+    Args:
+        root: Root of the content of a page.
+        left: The elements left out, as `_left_out` tells.
+        images: Whether the images are read, and give blocks.
+
+    Returns:
+        In document order, the line of each toctree that holds a link, is
+        not hidden and lies in no element left out; then, when the images
+        are not read, that of each ``img``, ``svg`` and ``picture`` element
+        that is not left out. What a heading holds, which its heading block
+        shows, gives no line.
+    """
+    lines: list[int] = []
+    headed: set[HtmlElement] = set()
+    for node in _elements(root):
+        parent = node.getparent()
+        if node.tag in _HEADING_TAGS or parent in headed:
+            headed.add(node)
+            continue
+        line = node.sourceline
+        if line is None:
+            continue
+        if _TOCTREE in (node.get("class") or "").split():
+            if parent not in left and not _hidden(node) and _has_link(node):
+                lines.append(line)
+        elif not images and node.tag in _PICTURE_TAGS and node not in left:
+            lines.append(line)
+    return lines
+
+
+def _has_link(element: HtmlElement) -> bool:
+    """Return whether an element holds a link with a target."""
+    return any(anchor.get("href") is not None for anchor in element.iter("a"))
+
+
 def content_spots(
     root: HtmlElement,
     selectors: Sequence[str],
+    *,
+    images: bool = True,
 ) -> ContentSpots:
-    """Find the links without a name, the dead references and bare tables.
+    """Find the links without a name, dead references, bare tables, media.
 
     Call it before the elements of the selectors are removed from the root.
 
     Args:
         root: Root of the content of a page.
         selectors: CSS selectors of the elements that are removed.
+        images: Whether the images are read, and give blocks.
 
     Returns:
         The places found, in document order. An element that a selector
         matches, or that one of its ancestors under the root does, and one
         in a drawing or a formula, are left out; the root itself is never
-        removed. A table without text gives no place.
+        removed. A table without text gives no place, nor does a medium
+        without a source line. The content that gives no block is found by
+        `_blockless`.
     """
     removed = frozenset(
         element
         for selector in selectors
         for element in root.cssselect(selector)
     )
+    left = _left_out(root, removed)
     links: list[Spot] = []
     unresolved: list[Spot] = []
     tables: list[Spot] = []
+    media: list[int] = []
     for node in _elements(root):
+        if node.tag in _MEDIA_TAGS:
+            line = node.sourceline
+            if line is not None and node not in left:
+                media.append(line)
+            continue
         if node.tag == "a":
             href = node.get("href")
             if href is None or _has_name(node):
@@ -262,10 +359,12 @@ def content_spots(
             found, spot = tables, Spot(text, node.sourceline)
         else:
             continue
-        if not (
-            _is_removed(node, root, removed)
-            or in_svg(node)
-            or in_formula(node)
-        ):
+        if node not in left:
             found.append(spot)
-    return ContentSpots(tuple(links), tuple(unresolved), tuple(tables))
+    return ContentSpots(
+        tuple(links),
+        tuple(unresolved),
+        tuple(tables),
+        tuple(media),
+        tuple(_blockless(root, left, images=images)),
+    )

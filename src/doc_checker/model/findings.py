@@ -143,12 +143,35 @@ def _image_key(image: ImageRef) -> str:
     return f"{source.page} {source.index} {source.box}"
 
 
+def _mark_key(side: Side) -> str | None:
+    """Return where the marked piece of a side is, and its text, if any.
+
+    Args:
+        side: A side of a finding.
+
+    Returns:
+        The place of its first marked piece in the text of the side,
+        followed by the text of that piece; ``None`` without a marked
+        piece.
+    """
+    offset = 0
+    for segment in side.segments:
+        if segment.op == "mark":
+            return f"{offset}{_ID_SEPARATOR}{segment.text}"
+        offset += len(segment.text)
+    return None
+
+
 def finding_id(rule: str, ref: Side | None, new: Side | None) -> str:
     """Return a short identifier that is stable across runs.
 
     The text of a side with an image is followed by what tells the image
     apart, as `_image_key` gives it: two images that look alike on two
-    pages of a PDF have the same description.
+    pages of a PDF have the same description. The text of a side with a
+    marked piece is followed by its place and its text, as `_mark_key`
+    gives them: two findings of one block, such as two links of a
+    paragraph, mark two pieces of the same text. A side without a marked
+    piece, as those of a comparison, is identified by its text alone.
 
     Args:
         rule: Rule identifier.
@@ -166,6 +189,9 @@ def finding_id(rule: str, ref: Side | None, new: Side | None) -> str:
         text = side.text
         if side.image is not None:
             text += _ID_SEPARATOR + _image_key(side.image)
+        mark = _mark_key(side)
+        if mark is not None:
+            text += _ID_SEPARATOR + mark
         parts.extend((side.source.file, side.source.anchor or "", text))
     digest = hashlib.blake2b(
         _ID_SEPARATOR.join(parts).encode(),

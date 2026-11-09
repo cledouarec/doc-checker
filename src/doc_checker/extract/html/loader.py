@@ -7,10 +7,12 @@ read, the redirection pages and the base of the site, and whose images are
 read under the root of the site.
 """
 
+import posixpath
 from collections import Counter
 from dataclasses import replace
-from itertools import islice, starmap
+from itertools import chain, islice, starmap
 from typing import TYPE_CHECKING, Final, NamedTuple
+from urllib.parse import urlsplit
 
 from doc_checker.errors import InputError
 from doc_checker.extract.common import (
@@ -41,6 +43,8 @@ from doc_checker.extract.html.facts import (
 from doc_checker.extract.html.images import ImageResolver
 from doc_checker.extract.html.links import (
     LinkResolver,
+    clean_href,
+    is_external,
     page_exists,
     site_base,
 )
@@ -68,7 +72,7 @@ from doc_checker.text.lang import AUTO, declared_language, resolve_language
 from doc_checker.text.normalize import printable
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
     from lxml.html import HtmlElement
@@ -151,13 +155,15 @@ def _spots(
     page: HtmlPage,
     profile: Profile,
     cfg: HtmlConfig,
+    *,
+    images: bool,
 ) -> ContentSpots:
     """Return the places of the content that the audit points at.
 
     It is read before the chrome of the page is removed.
     """
     root, selectors = _scope(page, profile, cfg)
-    return content_spots(root, selectors)
+    return content_spots(root, selectors, images=images)
 
 
 def _raw_blocks(
@@ -382,35 +388,110 @@ def _read_page(page: HtmlPage) -> _PageRead:
     )
 
 
+def _page_resolver(
+    resolve: LinkResolver,
+    read: Sequence[_PageRead],
+) -> LinkResolver:
+    """Return what resolves the links of whole pages, for the audit.
+
+    A site served under a base may write it in its navigation only: the
+    base of the links of the whole pages is found from those links, the
+    navigation included, as `site_base` finds it. The resolver of the links
+    of the blocks keeps the base found from the content.
+
+    Args:
+        resolve: The resolver of the links of the blocks.
+        read: What the audit read of the whole of each page.
+
+    Returns:
+        The resolver, with the redirections and the existence check of
+        ``resolve``.
+    """
+    hrefs = chain.from_iterable(seen.hrefs for seen in read)
+    return replace(resolve, base=site_base(hrefs, resolve.exists))
+
+
+def _links_to(
+    resolve: LinkResolver,
+    hrefs: Iterable[str],
+    page: str,
+    known: dict[tuple[str, str], str | None],
+) -> frozenset[str]:
+    """Return the other pages of the site that the links of a page lead to.
+
+    A target with a path leads to the same page from every page of a
+    folder, so it is resolved once per folder and kept in ``known``; a
+    target without a path leads to the page that holds it.
+
+    Args:
+        resolve: What resolves the links of whole pages.
+        hrefs: The targets of the links of the page, without fragment.
+        page: Site relative path of the page.
+        known: The page each target leads to from each folder, if any, as
+            `_target` tells, filled as the targets are resolved.
+
+    Returns:
+        The pages of the site that the links lead to, but the page itself.
+    """
+    folder = posixpath.dirname(page)
+    targets: set[str] = set()
+    for href in hrefs:
+        key = (folder, href)
+        if key not in known:
+            known[key] = _target(resolve, href, page)
+        target = known[key]
+        if target is not None and target != page:
+            targets.add(target)
+    return frozenset(targets)
+
+
+def _target(resolve: LinkResolver, href: str, page: str) -> str | None:
+    """Return the page of the site a target leads to from a folder, if any.
+
+    Args:
+        resolve: What resolves the links of whole pages.
+        href: The target, without fragment.
+        page: Site relative path of a page of the folder.
+
+    Returns:
+        The page of the site; ``None`` for a target that leads out of the
+        site, or without a path, to the page that holds it.
+    """
+    cleaned = clean_href(href)
+    if not is_external(cleaned) and not urlsplit(cleaned).path:
+        return None
+    link = resolve.link("", href, page)
+    return link.page if link is not None and link.url is None else None
+
+
 def _page_facts(
     ordered: Sequence[HtmlPage],
     read: Sequence[_PageRead],
     spots: Sequence[ContentSpots],
     resolve: LinkResolver,
 ) -> tuple[HtmlPageFacts, ...]:
-    """Return the facts of each page, the targets of its links resolved."""
+    """Return the facts of each page, the targets of its links resolved.
+
+    The targets are resolved by `_page_resolver`, from ``resolve``, as
+    `_links_to` does.
+    """
+    resolve = _page_resolver(resolve, read)
+    known: dict[tuple[str, str], str | None] = {}
     facts = []
     for page, seen, found in zip(ordered, read, spots, strict=True):
         hrefs = dict.fromkeys(href.partition("#")[0] for href in seen.hrefs)
-        links = (resolve.link("", href, page.rel_path) for href in hrefs)
-        targets = {
-            link.page
-            for link in links
-            if link is not None
-            and link.url is None
-            and link.page is not None
-            and link.page != page.rel_path
-        }
         facts.append(
             HtmlPageFacts(
                 file=page.rel_path,
                 lang=seen.lang,
                 title=seen.title,
                 ids=seen.ids,
-                links_to=frozenset(targets),
+                links_to=_links_to(resolve, hrefs, page.rel_path, known),
                 empty_links=found.empty_links,
                 unresolved=found.unresolved,
                 bare_tables=found.bare_tables,
+                media=found.media,
+                blockless=found.blockless,
             ),
         )
     return tuple(facts)
@@ -477,7 +558,10 @@ def load_html(
     read = [_read_page(page) for page in ordered] if audit else []
     deep = _pruned(ordered)
     spots = (
-        [_spots(page, profiles[page.rel_path], cfg) for page in ordered]
+        [
+            _spots(page, profiles[page.rel_path], cfg, images=images)
+            for page in ordered
+        ]
         if audit
         else []
     )
