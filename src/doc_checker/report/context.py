@@ -315,6 +315,7 @@ def _audit_inputs(result: AuditResult) -> list[tuple[str, tuple[str, ...]]]:
         ("Tagged", (_TAGGED[doc.tagged],)),
         ("Blocks", (str(stats.blocks),)),
         ("Images", (images,)),
+        ("Words", (NOT_RUN if stats.words is None else str(stats.words),)),
     ]
 
 

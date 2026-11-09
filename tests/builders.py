@@ -1454,3 +1454,14 @@ def image_audit_result() -> AuditResult:
     block = _data_image_block(blurred(drawing("setup"), 2.0))
     doc = make_audit_document(block)
     return audit_document(doc, Config(checks=("images",)))
+
+
+def sentence(count: int) -> str:
+    """Return an English sentence of exactly ``count`` words.
+
+    No word is repeated next to itself; the sentence ends with a dot.
+    """
+    base = ["The", "agent", "reads", "each", "file", "of", "the", "folder"]
+    tail = ["and", "then", "it", "stops", "for", "good", "now"]
+    words = base * (count // len(base)) + tail[: count % len(base)]
+    return " ".join(words) + "."

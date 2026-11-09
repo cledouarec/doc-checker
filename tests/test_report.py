@@ -847,11 +847,13 @@ def test_audit_reports_name_the_families_that_ran(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert "**Checks:** - \xb7 **Profile:** screen" in text
+    assert "| Words | - |" in text
     (_, counts, *_) = click.unstyle(render_audit_summary(unread, [])).split(
         "\n",
     )
     assert counts == (
-        "blocks 1 | images not read | links - | checks - | profile screen"
+        "blocks 1 | images not read | links - | words - | checks - |"
+        " profile screen"
     )
 
 
@@ -862,8 +864,8 @@ def test_audit_terminal_summary(tmp_path: Path) -> None:
     ).splitlines()
     assert lines[0].startswith("audit  doc=doc (1 pages, generic)")
     assert lines[1] == (
-        "blocks 1 | images 0 | links 0 | checks images, structure, a11y, text"
-        " | profile screen"
+        "blocks 1 | images 0 | links 0 | words 5 | checks images,"
+        " structure, a11y, text | profile screen"
     )
     assert lines[2] == "findings: 0 critical, 1 major, 0 minor, 0 info"
     assert lines[3].startswith("  MAJOR structure.unresolved_reference")
@@ -891,7 +893,7 @@ def test_audit_markdown_inputs_tell_the_document(tmp_path: Path) -> None:
         "## Inputs\n\n| | Document |\n|---|---|\n| Path | `doc` |\n"
         "| Format | html |\n| Pages | 1 |\n| Generator | generic |\n"
         "| Language | en |\n| Tagged | - |\n| Blocks | 1 |\n"
-        "| Images | 0 |\n\n**Checks:** "
+        "| Images | 0 |\n| Words | 5 |\n\n**Checks:** "
     ) in text
     pdf = make_audit_document(make_block(PARAGRAPHS[0]), fmt="pdf")
     for tagged, told in ((True, "yes"), (False, "no")):
