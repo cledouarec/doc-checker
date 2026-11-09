@@ -24,6 +24,7 @@ from tests.pdf_builders import (
     build_figure_list_pdf,
     build_fpdf2_pdf,
     build_images_pdf,
+    build_inline_code_pdf,
     build_listing_pdf,
     build_ornaments_pdf,
     build_outline_pdf,
@@ -32,6 +33,7 @@ from tests.pdf_builders import (
     build_reportlab_pdf,
     build_scanned_pdf,
     build_shared_resources_pdf,
+    build_single_page_pdf,
     build_stacked_figures_pdf,
     build_turned_pdf,
 )
@@ -814,3 +816,38 @@ def test_pages_sharing_many_xobjects_load_quickly(tmp_path: Path) -> None:
     # took 32 s on a desktop.
     assert time.perf_counter() - start < 20.0
     assert (doc.normalization["image_chrome"], doc.warnings) == (1000, [])
+
+
+def test_monospaced_words_are_read_for_the_audit(tmp_path: Path) -> None:
+    """The words set in Courier are code words, for the audit only."""
+    path = build_inline_code_pdf(
+        tmp_path / "code.pdf",
+        [("Run ", False), ("tlmgr update", True), (" now.", False)],
+    )
+    audited = load_pdf(path, PdfConfig(), lang="auto", audit=True)
+    assert audited.code_words == frozenset({"tlmgr", "update"})
+    assert _load(path).code_words == frozenset()
+    assert [b.text for b in audited.blocks] == ["Run tlmgr update now."]
+
+
+def test_code_fonts_give_code_words_for_the_audit(tmp_path: Path) -> None:
+    """The typewriter font of cm-super sets code, for the audit only."""
+    # pdfTeX does not set the fixed pitch flag of its fonts, and MONO_NAME
+    # does not know that name: the other commands read no monospaced font.
+    path = build_single_page_pdf(
+        tmp_path / "sftt.pdf",
+        "BT /F1 12 Tf 20 100 Td (tlmgr update) Tj ET",
+        font="<< /Type /Font /Subtype /Type1 /BaseFont /SFTT1000 >>",
+    )
+    with reader.open_pdf(path) as pdf:
+        chars = reader.read_page(pdf, 0, images=False).chars
+    assert {(c.mono, c.code) for c in chars if not c.text.isspace()} == {
+        (False, True),
+    }
+    audited = load_pdf(path, PdfConfig(), lang="auto", audit=True)
+    plain = _load(path)
+    assert audited.code_words == frozenset({"tlmgr", "update"})
+    assert plain.code_words == frozenset()
+    assert [(b.kind, b.text) for b in plain.blocks] == [
+        (BlockKind.PARAGRAPH, "tlmgr update"),
+    ]

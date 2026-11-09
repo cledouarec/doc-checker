@@ -217,6 +217,8 @@ class Block:
         links: Links of the block, in document order.
         anchors: Identifiers that designate the block, in document order.
         image: The image of an `IMAGE` block.
+        code_spans: Texts of the inline code of the block, in order, as its
+            display text shows them.
     """
 
     kind: BlockKind
@@ -231,6 +233,7 @@ class Block:
     links: tuple[Link, ...] = ()
     anchors: tuple[str, ...] = ()
     image: ImageRef | None = None
+    code_spans: tuple[str, ...] = ()
 
 
 def carry_anchors(
@@ -292,6 +295,8 @@ class Document:
         pdf_pages: Facts of each PDF page, in order.
         tags: Structure tree of a PDF. The outline, the pages and the tree
             are read only for the audit.
+        code_words: Words of a PDF set in a monospaced font; read only for
+            the audit.
     """
 
     path: Path
@@ -312,6 +317,7 @@ class Document:
     html_pages: tuple[HtmlPageFacts, ...] = ()
     pdf_pages: tuple[PdfPageFacts, ...] = ()
     tags: TagTree | None = None
+    code_words: frozenset[str] = frozenset()
 
     def resolve(self, source: SourceRef) -> Path:
         """Return the filesystem path of a source reference.

@@ -41,7 +41,9 @@ _SPECIAL_SPACE_RE: Final = re.compile(
     r"[\xa0\U0000202f\U00002007\U00002009\U0000200a]",
 )
 _ANCHOR_GLYPH_RE: Final = re.compile(r"[\xb6\U0001f517]")
-_SPACE_BEFORE_RE: Final = re.compile(r"[ ]+([;:!?\xbb])")
+# A space before a high punctuation mark. A match starts only at the start
+# of a run of spaces, so a long run that no such mark follows is read once.
+_SPACE_BEFORE_RE: Final = re.compile(r"(?<![ ])[ ]+([;:!?\xbb])")
 _SPACE_AFTER_RE: Final = re.compile(r"(\xab)[ ]+")
 _SINGLE_QUOTE_RE: Final = re.compile(
     r"[\U00002018-\U0000201b\U00002039\U0000203a]",

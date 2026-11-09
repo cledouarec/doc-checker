@@ -181,6 +181,24 @@ def test_declared_language_must_be_a_language_tag(
     assert doc.declared_lang == expected
 
 
+def test_inline_code_reaches_the_block(tmp_path: Path) -> None:
+    """Inline code is kept as its block shows it, but for blank codes."""
+    page = tmp_path / "a.html"
+    page.write_text(
+        "<html><body><p>Le fichier <code>orbit.toml</code>\xa0: voir.</p>"
+        "<p>Le <code>\U0000fb01chier</code> et <code>\U0000200b</code>.</p>"
+        "<p>Un <code>&nbsp;</code> et <code>\U0000200b \U0000200b</code>.</p>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    doc = load_html(page, HtmlConfig(), lang="auto")
+    assert [(b.text, b.code_spans) for b in doc.blocks] == [
+        ("Le fichier orbit.toml\xa0: voir.", ("orbit.toml",)),
+        ("Le fichier et .", ("fichier",)),
+        ("Un \xa0 et  .", ()),
+    ]
+
+
 def test_builders_render_links(tmp_path: Path) -> None:
     """Each HTML builder links the sections, PDF texts keep the words."""
     sphinx = build_sphinx_like(SAMPLE_EN, tmp_path / "s", split="chapters")

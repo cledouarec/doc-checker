@@ -137,3 +137,39 @@ def test_a_long_pattern_is_cut_in_the_detail() -> None:
     pattern = "x" * 200
     group = group_findings([_finding(f"w{i}", pattern) for i in range(5)])[0]
     assert group.detail == "5 occurrences of " + "x" * 80 + "\U00002026"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    ["text.unknown_word", "text.unknown_name", "text.jargon"],
+)
+def test_spelling_findings_group_from_two_occurrences(rule: str) -> None:
+    """Two spelling findings alike make a group; two other findings do not."""
+    spelling = {"rule": rule, "severity": Severity.MINOR}
+    repeated = {"rule": "text.repeated_word", "severity": Severity.MINOR}
+    findings = [
+        _finding("recieve", "recieve", **spelling),
+        _finding("recieve", "recieve", **spelling),
+        _finding("the", "the", **repeated),
+        _finding("the", "the", **repeated),
+    ]
+    grouped = group_findings(findings)
+    assert [(f.rule, len(f.occurrences)) for f in grouped] == [
+        (rule, 2),
+        ("text.repeated_word", 0),
+        ("text.repeated_word", 0),
+    ]
+
+
+def test_a_single_spelling_finding_stays_alone() -> None:
+    """One unknown word is not grouped."""
+    only = _finding(
+        "recieve",
+        "recieve",
+        rule="text.unknown_word",
+        severity=Severity.MINOR,
+    )
+    grouped = group_findings([only])
+    assert [(f.rule, len(f.occurrences)) for f in grouped] == [
+        ("text.unknown_word", 0),
+    ]

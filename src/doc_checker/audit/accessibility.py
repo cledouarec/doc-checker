@@ -43,6 +43,7 @@ from doc_checker.model.facts import NO_STRUCTURE_TREE
 from doc_checker.model.findings import Severity
 from doc_checker.text.lang import (
     LANG_SAMPLE_BLOCKS,
+    LANGUAGE_NAMES,
     declared_language,
     strong_language,
 )
@@ -116,8 +117,6 @@ _NO_TREE: Final = (
     " headings, lists, tables or figures"
 )
 _FILE_NAME: Final = "file name"
-# The names of the languages that a text can plainly read as.
-_LANGUAGES: Final = {"fr": "French", "en": "English"}
 _SUBTAG: Final = "-"
 _MORE_PAGES: Final = f", {ELLIPSIS}"
 
@@ -150,6 +149,24 @@ def _is_untagged(doc: Document) -> bool:
     )
 
 
+def prose_sample(doc: Document) -> str:
+    """Return the prose whose text tells the language of a document.
+
+    Args:
+        doc: The document.
+
+    Returns:
+        The texts of its first `LANG_SAMPLE_BLOCKS` blocks of `PROSE_KINDS`,
+        joined by spaces.
+    """
+    return " ".join(
+        islice(
+            (block.text for block in doc.blocks if block.kind in PROSE_KINDS),
+            LANG_SAMPLE_BLOCKS,
+        ),
+    )
+
+
 def _language_mismatch(doc: Document, side: Side) -> Draft | None:
     """Return the draft of a document whose prose reads as another language.
 
@@ -158,28 +175,21 @@ def _language_mismatch(doc: Document, side: Side) -> Draft | None:
         side: The side of a finding about the whole document.
 
     Returns:
-        The draft when the document declares French or English and the
-        text of its first `LANG_SAMPLE_BLOCKS` blocks of `PROSE_KINDS` plainly
-        reads as the other language; else ``None``.
+        The draft when the document declares French or English and its
+        `prose_sample` plainly reads as the other language; else ``None``.
     """
     declared = doc.declared_lang
     if declared is None:
         return None
     primary = declared.partition(_SUBTAG)[0].casefold()
-    if primary not in _LANGUAGES:
+    if primary not in LANGUAGE_NAMES:
         return None
-    sample = " ".join(
-        islice(
-            (block.text for block in doc.blocks if block.kind in PROSE_KINDS),
-            LANG_SAMPLE_BLOCKS,
-        ),
-    )
-    found = strong_language(sample)
+    found = strong_language(prose_sample(doc))
     if found is None or found == primary:
         return None
     detail = (
         f'the document declares "{quote(declared)}" but its text reads as'
-        f" {_LANGUAGES[found]}"
+        f" {LANGUAGE_NAMES[found]}"
     )
     return Draft(_LANG_MISMATCH, None, side, None, detail)
 

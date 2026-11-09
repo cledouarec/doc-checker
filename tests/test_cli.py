@@ -285,11 +285,14 @@ def test_audit_of_an_untagged_pdf(tmp_path: Path) -> None:
 
 
 def test_audit_unknown_check_exits_2(tmp_path: Path) -> None:
-    """The text checks come in a later version: a usage error now."""
+    """An unknown check family is a usage error."""
     site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
-    result = CliRunner().invoke(main, ["audit", str(site), "--checks", "text"])
+    result = CliRunner().invoke(
+        main,
+        ["audit", str(site), "--checks", "grammar"],
+    )
     assert result.exit_code == 2
-    assert "unknown check 'text'" in result.output
+    assert "unknown check 'grammar'" in result.output
 
 
 def test_audit_unreadable_input_exits_3(tmp_path: Path) -> None:
@@ -300,14 +303,17 @@ def test_audit_unreadable_input_exits_3(tmp_path: Path) -> None:
 
 
 AUDIT_SUMMARY_CASES = [
-    ([], "checks images, structure, a11y | profile screen"),
-    (["--profile", "print"], "checks images, structure, a11y | profile print"),
+    ([], "checks images, structure, a11y, text | profile screen"),
+    (
+        ["--profile", "print"],
+        "checks images, structure, a11y, text | profile print",
+    ),
     (["--checks", "a11y,images"], "checks a11y, images | profile screen"),
     (
         ["--checks", "a11y,a11y,structure"],
         "| checks a11y, structure | profile",
     ),
-    (["--no-images"], "| checks structure, a11y | profile screen"),
+    (["--no-images"], "| checks structure, a11y, text | profile screen"),
     (["--checks", "a11y"], "| links - | checks a11y | profile screen"),
     (["--checks", "images", "--no-images"], "| links - | checks - |"),
 ]

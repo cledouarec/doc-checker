@@ -12,3 +12,7 @@ class ConfigError(DocCheckerError):
 
 class InputError(DocCheckerError):
     """Unreadable or unsupported input document."""
+
+
+class DictionaryError(DocCheckerError):
+    """A bundled dictionary that cannot be loaded."""

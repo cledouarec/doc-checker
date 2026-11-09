@@ -10,6 +10,7 @@ from doc_checker.audit.accessibility import (
     GENERIC_LINK_TEXTS,
     UNMAPPED_PAGES_SHOWN,
     accessibility_drafts,
+    prose_sample,
 )
 from doc_checker.audit.engine import audit_document
 from doc_checker.compare.aggregate import PATTERN_MAX_CHARS
@@ -401,6 +402,20 @@ def test_only_the_first_prose_blocks_tell_the_language() -> None:
     notes = [make_block("Note.") for _ in range(LANG_SAMPLE_BLOCKS)]
     late = make_audit_document(*notes, *french)
     assert accessibility_drafts(late, THRESHOLDS) == []
+
+
+def test_prose_sample_joins_the_first_prose_blocks() -> None:
+    """Headings and paragraphs fill the sample, code and tables do not."""
+    doc = make_audit_document(
+        make_heading("Title", 1),
+        make_block("x = 1", BlockKind.CODE),
+        make_block("a | b", BlockKind.TABLE),
+        *(make_block(f"Note {k}.") for k in range(LANG_SAMPLE_BLOCKS)),
+    )
+    sample = prose_sample(doc)
+    assert sample.startswith("Title Note 0. Note 1.")
+    assert sample.endswith(f" Note {LANG_SAMPLE_BLOCKS - 2}.")
+    assert not prose_sample(make_audit_document())
 
 
 def test_an_empty_href_is_quoted() -> None:

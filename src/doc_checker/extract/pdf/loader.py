@@ -122,6 +122,8 @@ class _Page:
             `MAX_PAGE_LINKS` of the reader, those after them not read.
         untexted_links: Number of its links whose text was not read, for
             `LINK_TEXT_WORK` of the reader.
+        code_words: Its words set in a monospaced font, as
+            `monospaced_words` of the reader finds them, if they were read.
     """
 
     label: str
@@ -136,6 +138,7 @@ class _Page:
     links: tuple[PdfLink, ...] = ()
     more_links: bool = False
     untexted_links: int = 0
+    code_words: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,8 +287,9 @@ def _read(
     """Read the catalog, the outline, the metadata and the pages of a PDF.
 
     The pages are read one at a time, and each one keeps its segments, its
-    images and its links only, not its characters. The links are read for
-    the audit only, `MAX_DOCUMENT_LINKS` at most in the whole document.
+    images and its links only, not its characters. The links and the words
+    set in a monospaced font are read for the audit only, the links
+    `MAX_DOCUMENT_LINKS` at most in the whole document.
 
     Args:
         path: The PDF file.
@@ -295,7 +299,7 @@ def _read(
             characters left out for their angle, and `figure_text` by the
             characters left out as drawn in a vector figure.
         images: Whether the images are read.
-        audit: Whether the links are read.
+        audit: Whether the links and the monospaced words are read.
 
     Returns:
         What is read from the file.
@@ -336,6 +340,11 @@ def _read(
                     links=page.links,
                     more_links=more_links,
                     untexted_links=page.untexted_links,
+                    code_words=(
+                        reader.monospaced_words(page.chars)
+                        if audit
+                        else frozenset()
+                    ),
                 ),
             )
     return _PdfFile(
@@ -931,8 +940,9 @@ def load_pdf(
         lang: Language requested by the user, or ``"auto"``.
         images: Whether the raster images give blocks and are read.
         audit: Whether to read the facts that only the audit uses: the
-            characters, the scans and the links of the pages, and the
-            structure tree of a document that declares its tags.
+            characters, the scans, the links and the monospaced words of
+            the pages, and the structure tree of a document that declares
+            its tags.
 
     Returns:
         The document, its blocks in reading order. Its chrome lists the texts
@@ -943,8 +953,8 @@ def load_pdf(
         whose text was not read, then the pages numbered rather than
         labelled, then the bookmarks that were not read, then the images
         that could not be read, then why the structure tree was not read in
-        full. Its title and its outline are always read, its page facts and
-        its structure tree only for the audit.
+        full. Its title and its outline are always read, its page facts,
+        its structure tree and its code words only for the audit.
     """
     counter: Counter[str] = Counter()
     pdf = _read(path, counter, images=images, audit=audit)
@@ -1007,4 +1017,5 @@ def load_pdf(
         outline=_outline(pdf.bookmarks),
         pdf_pages=_page_facts(pdf, kept) if audit else (),
         tags=tags,
+        code_words=frozenset().union(*(page.code_words for page in pdf.pages)),
     )

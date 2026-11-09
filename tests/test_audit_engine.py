@@ -224,7 +224,11 @@ def test_stats_tell_the_families_that_ran() -> None:
     """The images family does not run when the images are not read."""
     doc = make_audit_document(make_block("Text."))
     unread = replace(Config(), images=False)
-    assert audit_document(doc, unread).stats.checks == ("structure", "a11y")
+    assert audit_document(doc, unread).stats.checks == (
+        "structure",
+        "a11y",
+        "text",
+    )
     alone = replace(Config(checks=("images",)), images=False)
     stats = audit_document(doc, alone).stats
     assert (stats.checks, stats.links) == ((), None)

@@ -95,6 +95,7 @@ _SPECS: Final = (
         Severity.INFO,
         "Number format changed",
     ),
+    RuleSpec("text.typo_fixed", _TEXT, Severity.INFO, "Typo corrected"),
     RuleSpec(
         "structure.heading_lost",
         _STRUCTURE,
@@ -348,6 +349,59 @@ _SPECS: Final = (
         _A11Y,
         Severity.MINOR,
         "Link text says nothing",
+    ),
+    RuleSpec("text.unknown_word", _TEXT, Severity.MINOR, "Unknown word"),
+    RuleSpec(
+        "text.unknown_name",
+        _TEXT,
+        Severity.INFO,
+        "Unknown capitalized word",
+    ),
+    RuleSpec("text.jargon", _TEXT, Severity.INFO, "Frequent unknown word"),
+    RuleSpec(
+        "text.space_missing",
+        _TEXT,
+        Severity.MINOR,
+        "Missing space at punctuation",
+    ),
+    RuleSpec(
+        "text.space_breakable",
+        _TEXT,
+        Severity.INFO,
+        "Breakable space at punctuation",
+    ),
+    RuleSpec(
+        "text.space_before_punctuation",
+        _TEXT,
+        Severity.MINOR,
+        "Space before punctuation",
+    ),
+    RuleSpec(
+        "text.quotes",
+        _TEXT,
+        Severity.INFO,
+        "Quotation marks of another language",
+    ),
+    RuleSpec("text.ordinal", _TEXT, Severity.MINOR, "Ordinal misspelled"),
+    RuleSpec(
+        "text.unit_space",
+        _TEXT,
+        Severity.MINOR,
+        "Number glued to its unit",
+    ),
+    RuleSpec(
+        "text.double_punctuation",
+        _TEXT,
+        Severity.MINOR,
+        "Doubled punctuation",
+    ),
+    RuleSpec("text.repeated_word", _TEXT, Severity.MINOR, "Repeated word"),
+    RuleSpec("text.long_sentence", _TEXT, Severity.MINOR, "Long sentence"),
+    RuleSpec(
+        "text.block_language",
+        _TEXT,
+        Severity.INFO,
+        "Block in another language",
     ),
 )
 

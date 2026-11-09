@@ -11,7 +11,8 @@ whether images are read or not, and the text drawn in them is left out and
 counted; when images are read, each figure is rendered for its signature, and
 the render dropped. Its link annotations are read on demand, with the text
 under them and where they lead. Pages are read one at a time, so that the
-caller never holds the characters of a whole document.
+caller never holds the characters of a whole document; `monospaced_words`
+finds the words that a monospaced font sets among the characters of a page.
 """
 
 import ctypes
@@ -49,7 +50,8 @@ from doc_checker.images.pixels import (
 from doc_checker.images.refs import content_digest, pixels_ref, unreadable_ref
 from doc_checker.model.document import PixelSource
 from doc_checker.model.facts import PdfLink
-from doc_checker.text.normalize import printable
+from doc_checker.spell.words import EDGE
+from doc_checker.text.normalize import normalize_display, printable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -73,6 +75,24 @@ BOLD_NAME: Final = re.compile(
     r"bold|black|heavy|semibold|demi|cmbx",
     re.IGNORECASE,
 )
+# The names of the code fonts that neither the fixed pitch flag, which pdfTeX
+# leaves unset, nor `MONO_NAME` tell, from the start of the name: the
+# typewriter fonts of cm-super (upright, slanted, italic, caps), of Computer
+# Modern, of the CS fonts, of txfonts and newtx, of kpfonts, the URW Courier
+# of TeX, and a few code fonts. Only the audit reads them: as `MONO_NAME`
+# finds the code blocks, a wider one would change what the other commands
+# read.
+CODE_FONT_NAME: Final = re.compile(
+    r"^(?:sf(?:tt|st|it|tc)\d|cm(?:sl|i)tt\d|cmtcsc\d|cs(?:sl|i)?tt\d"
+    r"|(?:t1x|tx|newtx)b?tt|nimbusmonl|tt-kp|anonymouspro|hack\b|monaspace)",
+    re.IGNORECASE,
+)
+# How far a character of a monospaced word may stand from the one before it,
+# in sizes of the character: its baseline may move by `MONO_SHIFT`, and its
+# box start left of the end of the box before it by `MONO_OVERLAP`, as the
+# boxes of PDFium are those of the glyphs, which may overhang their advance.
+MONO_SHIFT: Final = 0.5
+MONO_OVERLAP: Final = 0.5
 TURN_TOLERANCE: Final = 2.0  # Largest gap to a right angle, in degrees.
 LABEL_LIMIT: Final = 40  # Most characters of a page label.
 METADATA_LIMIT: Final = 200  # Most characters of a metadata value.
@@ -158,8 +178,9 @@ _OTHER_FILE_ACTIONS: Final = frozenset(
 # and the y of its origin, in points from the lower left corner of the crop
 # box.
 type _Box = tuple[float, float, float, float, float, float]
-# The effective size, the mono flag and the bold flag of a character.
-type _Style = tuple[float, bool, bool]
+# The effective size, the mono flag, the bold flag and the code flag of a
+# character.
+type _Style = tuple[float, bool, bool, bool]
 # The style of a character and its quarter turns, None for text at an angle.
 type _Look = tuple[_Style, int | None]
 # A character before its page is turned upright: its text, its box, its style,
@@ -208,6 +229,8 @@ class PdfChar:
         size: Effective font size, in points.
         mono: Whether the font is monospaced.
         bold: Whether the font is bold.
+        code: Whether the font is a code font that only its name tells, as
+            `is_code_font` does; only the audit reads it.
     """
 
     text: str
@@ -217,6 +240,7 @@ class PdfChar:
     size: float
     mono: bool
     bold: bool
+    code: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +354,7 @@ class _ObjectInfo:
 
     mono: bool
     bold: bool
+    code: bool
     artifact: bool
     turn: int | None
 
@@ -358,6 +383,20 @@ def font_style(name: str, flags: int, weight: int) -> tuple[bool, bool]:
     return mono, bold
 
 
+def is_code_font(name: str) -> bool:
+    """Tell whether a font is a code font by its name, `CODE_FONT_NAME`.
+
+    Args:
+        name: Name of the font, with or without the ``ABCDEF+`` prefix of
+            subset fonts.
+
+    Returns:
+        Whether the name, without that prefix, starts as the name of a code
+        font.
+    """
+    return bool(CODE_FONT_NAME.search(_SUBSET_PREFIX.sub("", name)))
+
+
 def char_text(code: int, *, hyphen: bool, unmapped: bool) -> str:
     """Return the text of a character reported by PDFium.
 
@@ -375,6 +414,60 @@ def char_text(code: int, *, hyphen: bool, unmapped: bool) -> str:
     if hyphen and code == _HYPHEN_CODE:
         return "-"
     return chr(code)
+
+
+def _ends_run(last: PdfChar, char: PdfChar) -> bool:
+    """Return whether a character cannot follow another in a word.
+
+    Args:
+        last: The last character of the word.
+        char: The character after it, in the order of PDFium.
+
+    Returns:
+        Whether the baseline moves by more than `MONO_SHIFT`, or the box
+        starts left of the end of the box before it by more than
+        `MONO_OVERLAP`, in sizes of the character: the order of PDFium goes
+        from the end of a line to the start of the next one with no blank.
+    """
+    return (
+        abs(char.baseline - last.baseline) > MONO_SHIFT * char.size
+        or char.x0 < last.x1 - MONO_OVERLAP * char.size
+    )
+
+
+def monospaced_words(chars: Sequence[PdfChar]) -> frozenset[str]:
+    """Return the words of a page that a monospaced font sets.
+
+    A word is a run of characters, in the order of PDFium, each in a
+    monospaced font or a code font and not a blank. A run ends before any
+    other character, and where the next character cannot follow it, as
+    `_ends_run` tells.
+    The words are normalized as the text of a block is, by
+    `normalize_display`, then made printable, and lose the `EDGE` of their
+    edges; empty ones are left out.
+
+    Args:
+        chars: The characters of a page, as `read_page` reads them.
+
+    Returns:
+        The words.
+    """
+    runs: list[list[str]] = []
+    last: PdfChar | None = None  # The last character of the current run.
+    for char in chars:
+        if not (char.mono or char.code) or char.text.isspace():
+            last = None
+            continue
+        if last is None or _ends_run(last, char):
+            runs.append([])
+        runs[-1].append(char.text)
+        last = char
+    text = normalize_display(" ".join("".join(run) for run in runs), Counter())
+    return frozenset(
+        word
+        for piece in printable(text).split(" ")
+        if (word := piece.strip(EDGE))
+    )
 
 
 def open_pdf(path: Path) -> pdfium.PdfDocument:
@@ -460,10 +553,12 @@ def _object_info(
         return None
     address = ctypes.addressof(obj.contents)
     if address not in cache:
-        mono, bold = font_style(*_font(textpage, index))
+        name, flags, weight = _font(textpage, index)
+        mono, bold = font_style(name, flags, weight)
         cache[address] = _ObjectInfo(
             mono,
             bold,
+            code=is_code_font(name),
             artifact=_is_artifact(obj),
             turn=_turn(textpage, index),
         )
@@ -612,13 +707,14 @@ def _look(
             kept, if any.
 
     Returns:
-        The size, the mono flag and the bold flag of the character, and its
+        The size, the mono, bold and code flags of the character, and its
         quarter turns as `_turn` tells them, or ``None`` for a generated
         character that follows no kept character, and has to be left out.
     """
     if info is None or pdfium_c.FPDFText_IsGenerated(textpage, index) == 1:
         return previous
-    return (_effective_size(textpage, index), info.mono, info.bold), info.turn
+    size = _effective_size(textpage, index)
+    return (size, info.mono, info.bold, info.code), info.turn
 
 
 def _text_at(

@@ -23,6 +23,7 @@ dependencies = [
     "pypdf>=6.21",
     "pypdfium2>=5.14",
     "rapidfuzz>=3.14",
+    "spylls>=0.1.7,<0.2",
 ]
 
 [project.scripts]
