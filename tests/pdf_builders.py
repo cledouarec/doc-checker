@@ -15,7 +15,7 @@ import io
 import math
 import re
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from itertools import chain, pairwise
 from typing import TYPE_CHECKING, Final, override
@@ -784,21 +784,40 @@ def build_oversized_image_pdf(out: Path, *, header: bool = False) -> Path:
     return out
 
 
-def _write_objects(out: Path, objects: Sequence[bytes]) -> Path:
-    """Write a PDF of objects numbered from 1, the first being the catalog."""
-    data = b"%PDF-1.7\n"
+def _write_objects(
+    out: Path,
+    objects: Sequence[bytes],
+    *,
+    trailer: str = "",
+) -> Path:
+    """Write a PDF of objects numbered from 1, the first being the catalog.
+
+    Args:
+        out: The PDF file to write.
+        objects: The body of each object, in order.
+        trailer: Entries to add to the dictionary of the trailer, such as
+            ``/Info 9 0 R``.
+
+    Returns:
+        The PDF file.
+    """
+    # A bytearray grows in place, where bytes would be copied for each object.
+    data = bytearray(b"%PDF-1.7\n")
     offsets = []
     for number, body in enumerate(objects, 1):
         offsets.append(len(data))
         data += f"{number} 0 obj\n".encode("ascii") + body + b"\nendobj\n"
     count = len(objects) + 1
     entries = "".join(f"{offset:010d} 00000 n \n" for offset in offsets)
-    trailer = (
+    dictionary = f"/Size {count} /Root 1 0 R"
+    if trailer:
+        dictionary += f" {trailer}"
+    end = (
         f"xref\n0 {count}\n0000000000 65535 f \n{entries}"
-        f"trailer\n<< /Size {count} /Root 1 0 R >>\n"
+        f"trailer\n<< {dictionary} >>\n"
         f"startxref\n{len(data)}\n%%EOF\n"
     )
-    out.write_bytes(data + trailer.encode("ascii"))
+    out.write_bytes(data + end.encode("ascii"))
     return out
 
 
@@ -1384,6 +1403,695 @@ def build_scanned_pdf(out: Path, *, pages: int = 2) -> Path:
     image = ImageReader(scan_image())
     for _ in range(pages):
         canvas.drawImage(image, 0, 0, *A4)
+        canvas.showPage()
+    canvas.save()
+    return out
+
+
+# Layout of the PDF of links, in points: the baseline of the first line and
+# the distance between two lines.
+_LINKS_TOP: Final = 720
+_LINKS_LEADING: Final = 24
+# The entry of a link annotation for each kind of action but ``page``, with
+# the value of the action in place of ``{}``.
+_LINK_ENTRIES: Final = {
+    "name": "/Dest ({})",
+    "uri": "/A << /S /URI /URI ({}) >>",
+    "launch": "/A << /S /Launch /F ({}) >>",
+    "gotor": "/A << /S /GoToR /F ({}) /D [0 /Fit] >>",
+    "gotoe": "/A << /S /GoToE /T << /R /C /N ({}) >> /D [0 /Fit] >>",
+    "named": "/A << /S /Named /N /{} >>",
+}
+
+
+def _link_entry(action: str, pages: Sequence[int]) -> str:
+    r"""Return the entry of a link annotation that does an action.
+
+    Args:
+        action: ``page:N`` for a destination to the page N, from 1;
+            ``name:NAME`` for a named destination; ``uri:URL``,
+            ``launch:PATH`` or ``gotor:PATH`` for an action of that kind;
+            ``gotoe:NAME`` for a GoToE action to the first page of the
+            attachment NAME; ``named:NAME`` for a Named action, such as
+            ``NextPage``; ``none`` for neither destination nor action. The
+            names, the URL and the path are in ASCII, without parentheses,
+            and written as they are in a literal string, so that ``\033``
+            is an escape.
+        pages: The object numbers of the pages, in order. A page beyond them
+            is written as its number from 0, as a remote destination is.
+
+    Returns:
+        The ``/Dest`` or ``/A`` entry, or ``""`` for ``none``.
+
+    Raises:
+        ValueError: If the kind of the action is none of these.
+    """
+    kind, _, value = action.partition(":")
+    if kind == "page":
+        number = int(value)
+        page = (
+            f"{pages[number - 1]} 0 R"
+            if number <= len(pages)
+            else str(number - 1)
+        )
+        return f"/Dest [{page} /Fit]"
+    if kind == "none":
+        return ""
+    if kind not in _LINK_ENTRIES:
+        raise ValueError(action)
+    return _LINK_ENTRIES[kind].format(value)
+
+
+def build_linked_pdf(out: Path, links: Sequence[tuple[str, str]]) -> Path:
+    """Write two US Letter pages, the first one a line for each link.
+
+    Each line shows the text of its link in Helvetica 11, 24 pt under the one
+    before it, and a link annotation without border covers the line, and only
+    it. The second page reads ``Target page.``, and the named destination
+    ``target`` leads to it.
+
+    Args:
+        out: The PDF file to write.
+        links: The text of each link, in ASCII and without parentheses or
+            backslashes, and its action, as `_link_entry` takes it.
+
+    Returns:
+        The PDF file.
+    """
+    pages = [3, 4]
+    shown = []
+    annots = []
+    for number, (text, action) in enumerate(links):
+        y = _LINKS_TOP - _LINKS_LEADING * number
+        shown.append(_show_text(text, 72, y))
+        annots.append(
+            f"<< /Type /Annot /Subtype /Link"
+            f" /Rect [70 {y - 4} {76 + 7 * len(text)} {y + 13}]"
+            f" /Border [0 0 0] {_link_entry(action, pages)} >>",
+        )
+    page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+    resources = "/Resources << /Font << /F1 5 0 R >> >>"
+    objects = [
+        (
+            "<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names"
+            f" [(target) [{pages[1]} 0 R /Fit]] >> >> >>"
+        ),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        f"{page} {resources} /Contents 6 0 R /Annots [{' '.join(annots)}] >>",
+        f"{page} {resources} /Contents 7 0 R >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        pdf_stream("\n".join(shown)),
+        pdf_stream(_show_text("Target page.", 72, _LINKS_TOP)),
+    ]
+    return _write_objects(out, [o.encode("ascii") for o in objects])
+
+
+def build_shared_link_pdf(
+    out: Path,
+    *,
+    pages: int,
+    references: int,
+    action: str,
+) -> Path:
+    """Write US Letter pages whose links are all one link annotation.
+
+    Each page shows ``Shared link``, and its annotations are as many
+    references to a single annotation object, which covers that line.
+
+    Args:
+        out: The PDF file to write.
+        pages: The number of pages.
+        references: The number of references to the annotation on each page.
+        action: The action of the annotation, as `_link_entry` takes it.
+
+    Returns:
+        The PDF file.
+    """
+    numbers = [6 + page for page in range(pages)]
+    kids = " ".join(f"{number} 0 R" for number in numbers)
+    annots = " ".join(["5 0 R"] * references)
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        pdf_stream(_show_text("Shared link", 72, _LINKS_TOP)),
+        (
+            "<< /Type /Annot /Subtype /Link /Rect [70 716 160 733]"
+            f" /Border [0 0 0] {_link_entry(action, numbers)} >>"
+        ),
+    ]
+    objects += [
+        (
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+            " /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R"
+            f" /Annots [{annots}] >>"
+        )
+        for _ in numbers
+    ]
+    return _write_objects(out, [o.encode("ascii") for o in objects])
+
+
+def build_outline_pdf(
+    out: Path,
+    bookmarks: Sequence[tuple[str, int | None]],
+    *,
+    info_title: str = "(Outline)",
+    label: str | None = None,
+    cycle: bool = False,
+) -> Path:
+    r"""Write a one page US Letter PDF with an outline of top bookmarks.
+
+    The strings are written in the PDF as they are given: a literal such as
+    ``(Intro)`` or ``(a\007b)``, or a hexadecimal string such as
+    ``<FEFF0041>``.
+
+    Args:
+        out: The PDF file to write.
+        bookmarks: The title of each bookmark, and the page it leads to,
+            from 1, or ``None`` for a bookmark without destination. A page
+            beyond the first is written as its number from 0.
+        info_title: The title of the document information dictionary.
+        label: The prefix of the label of the page, if it has one.
+        cycle: Whether the first bookmark follows the last one again.
+
+    Returns:
+        The PDF file.
+    """
+    first = 7
+    last = first + len(bookmarks) - 1
+    labels = ""
+    if label is not None:
+        labels = f" /PageLabels << /Nums [0 << /P {label} >>] >>"
+    objects = [
+        f"<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R{labels} >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+            " /Resources << /Font << /F1 6 0 R >> >> /Contents 4 0 R >>"
+        ),
+        pdf_stream(_show_text("Hello there.", 72, _LINKS_TOP)),
+        (
+            f"<< /Type /Outlines /First {first} 0 R /Last {last} 0 R"
+            f" /Count {len(bookmarks)} >>"
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    for number, (title, page) in enumerate(bookmarks, first):
+        entries = f"/Title {title} /Parent 5 0 R"
+        if number > first:
+            entries += f" /Prev {number - 1} 0 R"
+        if number < last:
+            entries += f" /Next {number + 1} 0 R"
+        elif cycle:
+            entries += f" /Next {first} 0 R"
+        if page is not None:
+            target = "3 0 R" if page == 1 else str(page - 1)
+            entries += f" /Dest [{target} /Fit]"
+        objects.append(f"<< {entries} >>")
+    objects.append(f"<< /Title {info_title} >>")
+    return _write_objects(
+        out,
+        [o.encode("ascii") for o in objects],
+        trailer=f"/Info {len(objects)} 0 R",
+    )
+
+
+# Layout of the first page of the tagged PDF, in points: the baseline of its
+# first line, the distance between two lines, the left edge of each column of
+# its table, the height of its figure and the baseline of its fillers.
+_TAGGED_TOP: Final = 760
+_TAGGED_LEADING: Final = 20
+_TAGGED_COLUMNS: Final = (72, 200)
+_TAGGED_FIGURE_HEIGHT: Final = 100
+_FILLER_BASELINE: Final = 40
+_TAGGED_ROWS: Final = (("Option", "Default"), ("timeout", "30"))
+# The object numbers of the two pages of the tagged PDF, and the count of its
+# objects before its annotations: the catalog, the page tree, the pages, the
+# font, the content streams of the pages and the document information.
+_TAGGED_PAGES: Final = (3, 4)
+_TAGGED_HEAD: Final = 8
+
+
+@dataclass
+class _Tagging:
+    """The objects of `build_tagged_pdf`, and the content of its first page.
+
+    Attributes:
+        tagged: Whether the content is marked and the structure written.
+        types: The type written for each standard type that is renamed.
+        objects: The body of each object, numbered from 1, or ``""`` for an
+            object reserved and not yet written.
+        content: The operators of the first page, in order.
+        owners: The object number of the element of each marked content of
+            the first page, by MCID.
+        y: The baseline of the next line of the first page.
+    """
+
+    tagged: bool
+    types: Mapping[str, str]
+    objects: list[str] = field(default_factory=list)
+    content: list[str] = field(default_factory=list)
+    owners: list[int] = field(default_factory=list)
+    y: int = _TAGGED_TOP
+
+    def reserve(self) -> int:
+        """Reserve the number of the next object."""
+        self.objects.append("")
+        return len(self.objects)
+
+    def new(self) -> int:
+        """Reserve the number of a structure element; 0 if not tagged."""
+        return self.reserve() if self.tagged else 0
+
+    def line(self, height: int = _TAGGED_LEADING) -> int:
+        """Return the baseline of the next line, then go down by a height."""
+        y = self.y
+        self.y -= height
+        return y
+
+    def show(self, kind: str, owner: int, operators: str) -> str:
+        """Add operators to the first page, as content of an element.
+
+        Args:
+            kind: The standard type of the element.
+            owner: The object number of the element.
+            operators: The operators that draw the content.
+
+        Returns:
+            The MCID of the marked content, or ``""`` if not tagged.
+        """
+        if not self.tagged:
+            self.content.append(operators)
+            return ""
+        mcid = len(self.owners)
+        self.owners.append(owner)
+        tag = self.types.get(kind, kind)
+        self.content.append(f"/{tag} <</MCID {mcid}>> BDC\n{operators}\nEMC")
+        return str(mcid)
+
+    def element(  # ruff: ignore[too-many-arguments] - one keyword per entry of the element
+        self,
+        number: int,
+        kind: str,
+        *,
+        parent: int,
+        kids: str,
+        page: int = _TAGGED_PAGES[0],
+        extra: str = "",
+    ) -> None:
+        """Write a structure element, if tagged.
+
+        Args:
+            number: The object number of the element.
+            kind: Its standard type, written renamed if `types` renames it.
+            parent: The object number of its parent.
+            kids: Its ``/K`` entry.
+            page: The object number of its page.
+            extra: More entries, each after a space.
+        """
+        if self.tagged:
+            self.objects[number - 1] = (
+                f"<< /Type /StructElem /S /{self.types.get(kind, kind)}"
+                f" /P {parent} 0 R /Pg {page} 0 R /K {kids}{extra} >>"
+            )
+
+
+def _sized_text(text: str, y: int, size: int, x: int = 72) -> str:
+    """Return the operators that draw a text in Helvetica of a size."""
+    return f"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET"
+
+
+def _tagged_headings(
+    tagging: _Tagging,
+    document: int,
+    headings: Sequence[tuple[int, str]],
+    *,
+    nesting: int,
+    cycle: bool,
+) -> list[int]:
+    """Write each heading of the tagged PDF and the paragraph after it.
+
+    Args:
+        tagging: The objects and the first page.
+        document: The object number of the ``Document`` element.
+        headings: The level and the title of each heading.
+        nesting: How many ``Div`` elements wrap the first heading.
+        cycle: Whether the first heading holds the ``Document`` element.
+
+    Returns:
+        The elements, in order, that the ``Document`` element holds.
+    """
+    kids: list[int] = []
+    for index, (level, title) in enumerate(headings):
+        heading = tagging.new()
+        divs = [tagging.new() for _ in range(nesting if index == 0 else 0)]
+        chain = [document, *divs]
+        inners = [*divs, heading][1:]
+        for outer, div, inner in zip(chain[:-1], divs, inners, strict=True):
+            tagging.element(div, "Div", parent=outer, kids=f"{inner} 0 R")
+        kind = f"H{level}"
+        text = _sized_text(title, tagging.line(), 14)
+        mcid = tagging.show(kind, heading, text)
+        held = f"[{mcid} {document} 0 R]" if cycle and index == 0 else mcid
+        tagging.element(heading, kind, parent=chain[-1], kids=held)
+        paragraph = tagging.new()
+        about = f"Some text about {title} here."
+        text = _sized_text(about, tagging.line(), 11)
+        mcid = tagging.show("P", paragraph, text)
+        tagging.element(paragraph, "P", parent=document, kids=mcid)
+        kids += [chain[1] if divs else heading, paragraph]
+    return kids
+
+
+def _tagged_figure(
+    tagging: _Tagging,
+    document: int,
+    alt: str | None,
+) -> int:
+    """Write the figure of the tagged PDF: a blue rectangle and a red curve.
+
+    Args:
+        tagging: The objects and the first page.
+        document: The object number of the ``Document`` element.
+        alt: Its ``/Alt``, as `build_tagged_pdf` takes it.
+
+    Returns:
+        The object number of the ``Figure`` element.
+    """
+    figure = tagging.new()
+    top = tagging.line(_TAGGED_FIGURE_HEIGHT + _TAGGED_LEADING)
+    bottom = top - _TAGGED_FIGURE_HEIGHT
+    drawn = (
+        f"0 0 1 rg 72 {bottom} 200 {_TAGGED_FIGURE_HEIGHT} re f\n"
+        f"1 0 0 rg 300 {bottom} m 340 {top} 400 {top} 440 {bottom} c f"
+    )
+    mcid = tagging.show("Figure", figure, drawn)
+    extra = ""
+    if alt is not None:
+        extra = f" /Alt {alt}" if alt.startswith("<") else f" /Alt ({alt})"
+    tagging.element(figure, "Figure", parent=document, kids=mcid, extra=extra)
+    return figure
+
+
+def _tagged_table(tagging: _Tagging, document: int, *, headers: bool) -> int:
+    """Write the table of the tagged PDF: two rows of two cells.
+
+    Args:
+        tagging: The objects and the first page.
+        document: The object number of the ``Document`` element.
+        headers: Whether the cells of the first row are ``TH`` elements,
+            rather than ``TD`` ones.
+
+    Returns:
+        The object number of the ``Table`` element.
+    """
+    table = tagging.new()
+    rows = []
+    for index, texts in enumerate(_TAGGED_ROWS):
+        row = tagging.new()
+        kind = "TH" if headers and index == 0 else "TD"
+        y = tagging.line()
+        cells = []
+        for x, text in zip(_TAGGED_COLUMNS, texts, strict=True):
+            cell = tagging.new()
+            mcid = tagging.show(kind, cell, _sized_text(text, y, 11, x))
+            tagging.element(cell, kind, parent=row, kids=mcid)
+            cells.append(f"{cell} 0 R")
+        tagging.element(row, "TR", parent=table, kids=f"[{' '.join(cells)}]")
+        rows.append(f"{row} 0 R")
+    tagging.element(
+        table,
+        "Table",
+        parent=document,
+        kids=f"[{' '.join(rows)}]",
+    )
+    return table
+
+
+def _tagged_links(
+    tagging: _Tagging,
+    document: int,
+    links: Sequence[tuple[str, str]],
+    annots: Sequence[int],
+) -> list[int]:
+    """Write the lines of the links of the tagged PDF, and their annotations.
+
+    Args:
+        tagging: The objects and the first page.
+        document: The object number of the ``Document`` element.
+        links: The text and the action of each link, as `build_linked_pdf`
+            takes them.
+        annots: The object number of the annotation of each link.
+
+    Returns:
+        The object numbers of the ``Link`` elements.
+    """
+    elements = []
+    pairs = zip(links, annots, strict=True)
+    for key, ((text, action), annot) in enumerate(pairs, 2):
+        link = tagging.new()
+        y = tagging.line(_LINKS_LEADING)
+        mcid = tagging.show("Link", link, _show_text(text, 72, y))
+        parent = f" /StructParent {key}" if tagging.tagged else ""
+        tagging.objects[annot - 1] = (
+            f"<< /Type /Annot /Subtype /Link"
+            f" /Rect [70 {y - 4} {76 + 7 * len(text)} {y + 13}]"
+            f" /Border [0 0 0] {_link_entry(action, _TAGGED_PAGES)}{parent} >>"
+        )
+        tagging.element(
+            link,
+            "Link",
+            parent=document,
+            kids=f"[{mcid} << /Type /OBJR /Obj {annot} 0 R >>]",
+        )
+        elements.append(link)
+    return elements
+
+
+def _tagged_root(
+    tagging: _Tagging,
+    document: int,
+    *,
+    second: int,
+    linked: Sequence[int],
+    role_map: Mapping[str, str] | None,
+) -> str:
+    """Return the root of the structure tree of the tagged PDF.
+
+    Args:
+        tagging: The objects and the first page.
+        document: The object number of the ``Document`` element.
+        second: The object number of the element of the second page.
+        linked: The object number of the element of each annotation.
+        role_map: The ``/RoleMap``, if any.
+
+    Returns:
+        The root. Its parent tree gives the key 0 to the first page, 1 to the
+        second, and the next ones to the annotations, in order.
+    """
+    owners = " ".join(f"{owner} 0 R" for owner in tagging.owners)
+    nums = [f"0 [{owners}]", f"1 [{second} 0 R]"]
+    nums += [f"{key} {link} 0 R" for key, link in enumerate(linked, 2)]
+    roles = ""
+    if role_map is not None:
+        pairs = " ".join(f"/{key} /{value}" for key, value in role_map.items())
+        roles = f" /RoleMap << {pairs} >>"
+    return (
+        f"<< /Type /StructTreeRoot /K {document} 0 R"
+        f" /ParentTree << /Nums [{' '.join(nums)}] >>"
+        f" /ParentTreeNextKey {len(nums)}{roles} >>"
+    )
+
+
+def _tagged_head(
+    tagging: _Tagging,
+    entries: str,
+    annots: Sequence[int],
+    title: str | None,
+) -> list[str]:
+    """Return the objects of the tagged PDF before its annotations.
+
+    Args:
+        tagging: The objects and the first page.
+        entries: More entries of the catalog, each after a space.
+        annots: The object numbers of the annotations of the first page.
+        title: The title of the document information, if any.
+
+    Returns:
+        The catalog, the page tree, the two pages, the font, the content
+        streams of the pages and the document information.
+    """
+    page = (
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+        " /Resources << /Font << /F1 5 0 R >> >>"
+    )
+    first = f"{page} /Contents 6 0 R"
+    if annots:
+        first += f" /Annots [{' '.join(f'{a} 0 R' for a in annots)}]"
+    second = f"{page} /Contents 7 0 R"
+    target = _show_text("Target page.", 72, _LINKS_TOP)
+    if tagging.tagged:
+        first += " /StructParents 0"
+        second += " /StructParents 1"
+        target = f"/P <</MCID 0>> BDC\n{target}\nEMC"
+    return [
+        (
+            "<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names"
+            f" [(target) [{_TAGGED_PAGES[1]} 0 R /Fit]] >> >>{entries} >>"
+        ),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        f"{first} >>",
+        f"{second} >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        pdf_stream("\n".join(tagging.content)),
+        pdf_stream(target),
+        f"<< /Title ({title}) >>" if title else "<< >>",
+    ]
+
+
+def build_tagged_pdf(  # ruff: ignore[too-many-arguments] - one keyword per feature of the structure
+    out: Path,
+    *,
+    headings: Sequence[tuple[int, str]] = ((1, "Guide"), (2, "Install")),
+    figure_alt: str | None = "A diagram",
+    table_headers: bool = True,
+    lang: str | None = "en-US",
+    title: str | None = "Guide",
+    links: Sequence[tuple[str, str]] = (),
+    role_map: Mapping[str, str] | None = None,
+    types: Mapping[str, str] | None = None,
+    paragraphs: int = 0,
+    nesting: int = 0,
+    cycle: bool = False,
+    tagged: bool = True,
+) -> Path:
+    r"""Write a tagged PDF of two US Letter pages, in Helvetica.
+
+    The first page shows each heading in 14 pt, then the paragraph ``Some
+    text about TITLE here.`` in 11 pt, from the top down; then a figure, a
+    blue rectangle of 200 by 100 pt and a red curve; then a table of two
+    rows, ``Option | Default`` and ``timeout | 30``; then a line for each
+    link, under a link annotation, as `build_linked_pdf` writes them; and
+    the fillers ``Filler k.`` in 6 pt, all on one baseline. The second page
+    reads ``Target page.``, and the named destination ``target`` leads to
+    it.
+
+    Tagged, each of these is marked content, and the structure tree holds a
+    ``Document`` element, which holds the element of each of them in order,
+    each with its parent, its page and its content: a heading ``Hn``, a
+    ``P``, the ``Figure``, the ``Table`` of ``TR`` rows of ``TH`` or ``TD``
+    cells, a ``Link`` with its content and a reference to its annotation,
+    then the ``P`` of the second page. The parent tree maps the content of
+    each page and each annotation to its element. Untagged, the PDF has the
+    same content, language and title, without marks, tree or ``MarkInfo``.
+
+    Args:
+        out: The PDF file to write.
+        headings: The level and the title of each heading, in ASCII without
+            parentheses or backslashes.
+        figure_alt: The ``/Alt`` of the figure: an ASCII text without
+            parentheses, written as it is in a literal string, so that
+            ``\007`` is an escape; or a hexadecimal string written as it is,
+            such as ``<FEFF0041>``; or ``None`` for none.
+        table_headers: Whether the first row of the table is of ``TH``
+            cells, rather than ``TD`` ones.
+        lang: The ``/Lang`` of the catalog, if any.
+        title: The title of the document information, if any.
+        links: The text of each link and its action, as `build_linked_pdf`
+            takes them.
+        role_map: The ``/RoleMap`` of the structure tree, if any.
+        types: The type written for each standard type that is renamed,
+            such as ``{"H2": "Title2"}``.
+        paragraphs: How many fillers follow the links.
+        nesting: How many ``Div`` elements wrap the first heading.
+        cycle: Whether the first heading holds the ``Document`` element,
+            after its content.
+        tagged: Whether the PDF is tagged.
+
+    Returns:
+        The PDF file.
+    """
+    tagging = _Tagging(tagged=tagged, types=types or {})
+    for _ in range(_TAGGED_HEAD):
+        tagging.reserve()
+    annots = [tagging.reserve() for _ in links]
+    root, document = tagging.new(), tagging.new()
+    kids = _tagged_headings(
+        tagging,
+        document,
+        headings,
+        nesting=nesting,
+        cycle=cycle,
+    )
+    kids.append(_tagged_figure(tagging, document, figure_alt))
+    kids.append(_tagged_table(tagging, document, headers=table_headers))
+    linked = _tagged_links(tagging, document, links, annots)
+    kids += linked
+    for number in range(1, paragraphs + 1):
+        filler = tagging.new()
+        text = _sized_text(f"Filler {number}.", _FILLER_BASELINE, 6)
+        mcid = tagging.show("P", filler, text)
+        tagging.element(filler, "P", parent=document, kids=mcid)
+        kids.append(filler)
+    last = tagging.new()
+    tagging.element(last, "P", parent=document, kids="0", page=4)
+    kids.append(last)
+    tagging.element(
+        document,
+        "Document",
+        parent=root,
+        kids=f"[{' '.join(f'{kid} 0 R' for kid in kids)}]",
+    )
+    if tagged:
+        tagging.objects[root - 1] = _tagged_root(
+            tagging,
+            document,
+            second=last,
+            linked=linked,
+            role_map=role_map,
+        )
+    entries = f" /Lang ({lang})" if lang else ""
+    if tagged:
+        entries += f" /MarkInfo << /Marked true >> /StructTreeRoot {root} 0 R"
+    tagging.objects[:_TAGGED_HEAD] = _tagged_head(
+        tagging,
+        entries,
+        annots,
+        title,
+    )
+    return _write_objects(
+        out,
+        [o.encode("ascii") for o in tagging.objects],
+        trailer="/Info 8 0 R" if title else "",
+    )
+
+
+def build_many_links_pdf(out: Path, *, pages: int, per_page: int) -> Path:
+    """Write A4 pages of lines that each link to a web page.
+
+    The line ``Link n``, with n counted from 1 across the document, links to
+    ``https://example.org/n``, with an annotation over the line.
+
+    Args:
+        out: The PDF file to write.
+        pages: The number of pages.
+        per_page: The number of lines, and of links, on each page.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    number = 0
+    for _ in range(pages):
+        canvas.setFont("Helvetica", 10)
+        for line in range(per_page):
+            number += 1
+            y = _H - 60 - 18 * line
+            canvas.drawString(72, y, f"Link {number}")
+            canvas.linkURL(
+                f"https://example.org/{number}",
+                (70, y - 3, 140, y + 10),
+            )
         canvas.showPage()
     canvas.save()
     return out

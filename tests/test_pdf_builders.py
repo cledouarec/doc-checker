@@ -3,11 +3,13 @@
 
 from typing import TYPE_CHECKING
 
+import pytest
 from pypdf import PdfReader
 
 from tests.builders import SAMPLE_EN, SAMPLE_FR
 from tests.pdf_builders import (
     build_fpdf2_pdf,
+    build_linked_pdf,
     build_raw_pdf,
     build_reportlab_pdf,
     build_scanned_pdf,
@@ -216,3 +218,9 @@ def test_make_line() -> None:
         True,
         True,
     )
+
+
+def test_linked_pdf_refuses_an_unknown_action(tmp_path: Path) -> None:
+    """A link action of no known kind is an error, not a link without one."""
+    with pytest.raises(ValueError, match="urI:x"):
+        build_linked_pdf(tmp_path / "a.pdf", [("one", "urI:x")])

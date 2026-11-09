@@ -1,5 +1,5 @@
 # Copyright 2026 Christophe Le Douarec
-"""Read the characters, images, bookmarks and metadata of PDF documents.
+"""Read the characters, images, links, bookmarks and metadata of PDFs.
 
 PDFium does the reading. Each character keeps its position and its style, so
 that the next steps can rebuild lines, blocks and headings. A page is read
@@ -9,17 +9,25 @@ out. Its raster images keep their box on the upright page and their
 signature, their pixels being dropped once read. Its vector figures are found
 whether images are read or not, and the text drawn in them is left out and
 counted; when images are read, each figure is rendered for its signature, and
-the render dropped. Pages are read one at a time, so that the caller never
-holds the characters of a whole document.
+the render dropped. Its link annotations are read on demand, with the text
+under them and where they lead. Pages are read one at a time, so that the
+caller never holds the characters of a whole document.
 """
 
 import ctypes
+import logging
 import math
+import ntpath
+import posixpath
 import re
+import sys
 from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final
+from functools import partial
+from itertools import islice
+from pathlib import PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING, Final, Literal
 
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
@@ -40,14 +48,16 @@ from doc_checker.images.pixels import (
 )
 from doc_checker.images.refs import content_digest, pixels_ref, unreadable_ref
 from doc_checker.model.document import PixelSource
+from doc_checker.model.facts import PdfLink
 from doc_checker.text.normalize import printable
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from doc_checker.extract.pdf.figures import VectorFigure
     from doc_checker.model.document import ImageRef
+    from doc_checker.model.facts import LinkAction
 
 FIXED_PITCH_FLAG: Final = 1
 FORCE_BOLD_FLAG: Final = 1 << 18
@@ -67,6 +77,32 @@ TURN_TOLERANCE: Final = 2.0  # Largest gap to a right angle, in degrees.
 LABEL_LIMIT: Final = 40  # Most characters of a page label.
 METADATA_LIMIT: Final = 200  # Most characters of a metadata value.
 MAX_PAGE_FIGURES: Final = 64  # Most vector figures rendered on a page.
+MAX_PAGE_LINKS: Final = 10_000  # Most link annotations read on a page.
+LINK_TEXT_LIMIT: Final = 200  # Most characters of the text of a link.
+# Most bytes of the URI or the file path of a link that are read: a longer
+# one is left unread, as no file path is that long, so that a string that
+# many links share cannot make the reading copy it again and again.
+LINK_TARGET_LIMIT: Final = 2_048
+# Most characters of a page that the texts of its links examine: PDFium tests
+# every character of the page for the text of each link, so the links after
+# the first `LINK_TEXT_WORK` divided by the characters of the page keep no
+# text.
+LINK_TEXT_WORK: Final = 20_000_000
+MAX_BOOKMARKS: Final = 100_000  # Most bookmarks read in an outline.
+# Most bytes of the titles of an outline that PDFium is asked for: it decodes
+# a title whole to tell its size, kept or not, so that one long title that
+# many bookmarks share would cost its size again for each of them.
+OUTLINE_TITLE_WORK: Final = 16_000_000
+# Most bytes, in UTF-16, of a string of the document that is read: a longer
+# one is left unread, as an empty string, so that a string that many objects
+# share cannot make the reading copy it again and again.
+BOOKMARK_TITLE_BYTES: Final = 4_096  # Of the title of a bookmark.
+METADATA_BYTES: Final = 4_096  # Of a value of the document information.
+LABEL_BYTES: Final = 1_024  # Of the label of a page.
+# Most bytes of the page labels of a document that PDFium is asked for: it
+# builds a label whole to tell its size, kept or not, so that one long prefix
+# that many pages share would cost its size again for each of them.
+PAGE_LABEL_WORK: Final = 16_000_000
 
 _SUBSET_PREFIX: Final = re.compile(r"^[A-Z]{6}\+")
 _LINE_BREAKS: Final = frozenset({0x0A, 0x0D})
@@ -95,6 +131,28 @@ _QUARTER_TURN: Final = 90.0  # Degrees in a quarter turn.
 _QUARTERS: Final = 4  # Quarter turns in a full turn.
 _FLIPPED: Final = 2  # Quarter turns that a negative font size adds.
 _VECTOR_FORMAT: Final = "vector"  # The format of a vector figure.
+# The text of a link is read up to these UTF-16 units, enough for
+# `LINK_TEXT_LIMIT` characters once the runs of blanks are reduced.
+_LINK_TEXT_UNITS: Final = 4 * LINK_TEXT_LIMIT
+# A URL scheme, which a file path of a link may start with: two letters at
+# least, so that a drive letter is not one.
+_SCHEME: Final = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
+_ROOTS: Final = ("/", "\\")  # What a path from a root starts with.
+# The parent folder, which a normalized path out of its folder starts with,
+# as its whole first component.
+_PARENT: Final = ".."
+_PARENT_PREFIXES: Final = ("../", "..\\")
+# The platforms on which PDFium gives a file path in a form of its own, as
+# `sys.platform` names them.
+_WINDOWS: Final = "win32"
+_MACOS: Final = "darwin"
+_UTF8: Final = "utf-8"
+_UTF16: Final = "utf-16-le"
+_NUL_BYTES: Final = {_UTF8: 1, _UTF16: 2}  # Bytes of a final NUL, by encoding.
+# The actions whose destination is a page of another file.
+_OTHER_FILE_ACTIONS: Final = frozenset(
+    {pdfium_c.PDFACTION_REMOTEGOTO, pdfium_c.PDFACTION_EMBEDDEDGOTO},
+)
 
 # The left, right, bottom and top edges of the box of a character, then the x
 # and the y of its origin, in points from the lower left corner of the crop
@@ -109,6 +167,24 @@ type _Look = tuple[_Style, int | None]
 # mapping, and whether it has no text object, as the space that PDFium
 # generates between two objects.
 type _Pending = tuple[str, _Box, _Style, int | None, bool, bool]
+# A call to PDFium that copies a string into a buffer of a given size in
+# bytes, if there is one, and returns the size of the string.
+type _StringReader = Callable[[ctypes.Array[ctypes.c_char] | None, int], int]
+# Where a link leads: the kind of its action, its target, and whether it is
+# valid, as `read_links` tells them.
+type LinkTarget = tuple[LinkAction, str, bool | None]
+# The targets of the link annotations of a document already resolved, by
+# address of their dictionary.
+type LinkTargets = dict[int, LinkTarget]
+# Why the walk of an outline stopped before its end: `MAX_BOOKMARKS`, or
+# `OUTLINE_TITLE_WORK`; None if it read the whole outline.
+type OutlineCut = Literal["bookmarks", "titles"] | None
+
+# pypdfium2 logs the cycles and the depth cuts of an outline, which are no
+# concern of the user of a command line: its messages are dropped.
+_PYPDFIUM_LOGGER: Final = logging.getLogger("pypdfium2")
+_PYPDFIUM_LOGGER.addHandler(logging.NullHandler())
+_PYPDFIUM_LOGGER.propagate = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +280,11 @@ class PdfPageText:
             in a vector figure.
         unrendered: Number of vector figures not rendered because they come
             after the first `MAX_PAGE_FIGURES` of the page.
+        links: The link annotations of the page, in the order of PDFium, as
+            `read_links` reads them, if they were read.
+        more_links: Whether other link annotations follow the last one read.
+        untexted_links: Number of these links whose text was not read, as
+            they come after the work that `LINK_TEXT_WORK` allows.
     """
 
     index: int
@@ -218,6 +299,9 @@ class PdfPageText:
     images: tuple[PdfImage, ...] = ()
     figure_chars: int = 0
     unrendered: int = 0
+    links: tuple[PdfLink, ...] = ()
+    more_links: bool = False
+    untexted_links: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1261,32 +1345,413 @@ def _page_images(
     return coverage, tuple(images)
 
 
-def _page_label(pdf: pdfium.PdfDocument, index: int) -> str:
-    """Return the printable label of a page, else its number from 1."""
-    label = printable(pdf.get_page_label(index), limit=LABEL_LIMIT)
-    return label or str(index + 1)
+def _link_text(
+    textpage: pdfium.PdfTextPage,
+    link: pdfium_c.FPDF_LINK,
+    buffer: ctypes.Array[ctypes.c_ushort],
+) -> str:
+    """Return the text under a link annotation.
+
+    Args:
+        textpage: The text page of the page of the link.
+        link: The link annotation.
+        buffer: Room for the first UTF-16 units of the text, which this
+            overwrites.
+
+    Returns:
+        The printable text in the box of the annotation, its runs of blanks
+        reduced to one space, and cut at `LINK_TEXT_LIMIT` characters; or
+        ``""`` if the box cannot be read.
+    """
+    rect = pdfium_c.FS_RECTF()
+    if not pdfium_c.FPDFLink_GetAnnotRect(link, rect):
+        return ""
+    left, right = sorted((rect.left, rect.right))
+    bottom, top = sorted((rect.bottom, rect.top))
+    units = pdfium_c.FPDFText_GetBoundedText(
+        textpage.raw,
+        left,
+        top,
+        right,
+        bottom,
+        buffer,
+        len(buffer),
+    )
+    data = bytes(buffer)[: 2 * max(0, units)]
+    text = data.decode("utf-16-le", errors="replace")
+    return printable(text, limit=LINK_TEXT_LIMIT)
+
+
+def _goto(pdf: pdfium.PdfDocument, dest: pdfium_c.FPDF_DEST) -> LinkTarget:
+    """Return the page of the document that a destination leads to.
+
+    Args:
+        pdf: The document.
+        dest: The destination, which is not null.
+
+    Returns:
+        ``goto``, the page as ``page N`` with N from 1, and whether the
+        document has that page.
+    """
+    index = pdfium_c.FPDFDest_GetDestPageIndex(pdf.raw, dest)
+    return "goto", f"page {index + 1}", 0 <= index < len(pdf)
+
+
+def _sized_string(
+    read: _StringReader,
+    *,
+    limit: int,
+    encoding: str,
+) -> tuple[str, int]:
+    """Read a string that PDFium copies, such as a URI or a title.
+
+    PDFium copies a string whole or not at all, so the size is asked first,
+    and a string over the limit is never copied.
+
+    Args:
+        read: Calls PDFium with a buffer and its size in bytes, and returns
+            the size of the string with its final NUL; without a buffer, it
+            only returns that size.
+        limit: The most bytes of the string to read, its NUL left out.
+        encoding: The encoding of the string: ``utf-8`` or ``utf-16-le``.
+
+    Returns:
+        The string, each byte or half character that cannot be decoded
+        replaced by U+FFFD, or ``""`` if it is empty, cannot be read, or has
+        more bytes than the limit; and the size that PDFium told, in bytes
+        with the NUL.
+    """
+    nul = _NUL_BYTES[encoding]
+    size = read(None, 0)
+    if not nul < size <= limit + nul:
+        return "", size
+    buffer = ctypes.create_string_buffer(size)
+    if read(buffer, size) != size:
+        return "", size
+    return buffer.raw[: size - nul].decode(encoding, errors="replace"), size
+
+
+def _pdfium_string(read: _StringReader, *, limit: int, encoding: str) -> str:
+    """Read a string that PDFium copies, as `_sized_string` does.
+
+    Args:
+        read: Calls PDFium, as `_sized_string` takes it.
+        limit: The most bytes of the string to read, its NUL left out.
+        encoding: The encoding of the string: ``utf-8`` or ``utf-16-le``.
+
+    Returns:
+        The string, as `_sized_string` returns it.
+    """
+    return _sized_string(read, limit=limit, encoding=encoding)[0]
+
+
+def _file_exists(folder: Path, path: str) -> bool | None:
+    """Tell whether the file that a link opens exists, if it is checked.
+
+    Only a path relative to the folder of the PDF and that stays in it is
+    checked, so that a document can neither probe the files of the machine
+    nor make a check go through the network: a path with a URL scheme, a
+    drive or a root, as POSIX or Windows tell them, or that leads out of the
+    folder once ``..`` is resolved, as either tells it, is not. A name that
+    only starts with two dots, such as ``..notes.pdf``, stays in the folder.
+
+    Args:
+        folder: The folder of the PDF.
+        path: The path of the file, with slashes.
+
+    Returns:
+        Whether the file exists, or ``None`` for an empty path, a path that
+        is not checked, or a path that cannot be checked.
+    """
+    if not path or _SCHEME.match(path) or path.startswith(_ROOTS):
+        return None
+    # A Windows anchor is a drive, a root, or both, as an absolute path has.
+    if PurePosixPath(path).is_absolute() or PureWindowsPath(path).anchor:
+        return None
+    for normalized in (posixpath.normpath(path), ntpath.normpath(path)):
+        if normalized == _PARENT or normalized.startswith(_PARENT_PREFIXES):
+            return None
+    try:
+        return (folder / path).exists()
+    except OSError, ValueError:
+        return None
+
+
+def pdf_file_path(raw: str, platform: str = sys.platform) -> str:
+    r"""Undo the form that PDFium gives the path of a file on its platform.
+
+    PDFium writes the file specification of an action as a path of the
+    platform it runs on. On Windows, its slashes become backslashes, a
+    leading pair of slashes loses one, a leading ``/X/`` becomes ``X:\``,
+    and another leading slash gains a backslash before it. On macOS, its
+    slashes become colons, and a leading ``/Mac`` loses its slash.
+    Elsewhere, the path is left as it is.
+
+    Args:
+        raw: The path as PDFium gives it.
+        platform: The platform PDFium runs on, as `sys.platform` names it.
+
+    Returns:
+        The path with slashes. On Windows, a leading pair of backslashes
+        becomes one slash, a single leading backslash two slashes, and each
+        other backslash a slash, so that ``/X/`` comes back as ``X:/``. On
+        macOS, each colon becomes a slash. Elsewhere, the path as it is.
+    """
+    if platform == _WINDOWS:
+        if raw.startswith("\\\\"):
+            raw = "/" + raw[2:]
+        elif raw.startswith("\\"):
+            raw = "//" + raw[1:]
+        return raw.replace("\\", "/")
+    if platform == _MACOS:
+        return raw.replace(":", "/")
+    return raw
+
+
+def file_link_target(
+    raw: str,
+    folder: Path,
+    platform: str = sys.platform,
+) -> tuple[str, bool | None]:
+    """Return the path that a GoToR or a Launch action opens, and its check.
+
+    Args:
+        raw: The path as PDFium gives it, as `pdf_file_path` takes it.
+        folder: The folder of the PDF, from which a relative path is
+            checked.
+        platform: The platform PDFium runs on, as `sys.platform` names it.
+
+    Returns:
+        The printable path with slashes, and whether its file exists, as
+        `_file_exists` tells. On macOS, a path that PDFium gives with a
+        colon is never checked, as a folder cannot be told there from a URL
+        scheme.
+    """
+    path = pdf_file_path(raw, platform)
+    if platform == _MACOS and ":" in raw:
+        return printable(path), None
+    return printable(path), _file_exists(folder, path)
+
+
+def _link_target(
+    pdf: pdfium.PdfDocument,
+    link: pdfium_c.FPDF_LINK,
+    folder: Path,
+) -> LinkTarget:
+    """Tell where a link annotation leads, and whether it can go there.
+
+    The destination of a link, or else of its GoTo action, is a page of the
+    document. PDFium also gives the destination of a GoToR or a GoToE
+    action, which is a page of another file: a link with such an action is
+    taken for its action.
+
+    Args:
+        pdf: The document.
+        link: The link annotation.
+        folder: The folder of the PDF, from which a relative file path is
+            checked.
+
+    Returns:
+        The kind of action, its target and whether it is valid: ``goto``,
+        the page as ``page N`` and whether the document has it, or ``""``
+        and false for a destination that leads nowhere; ``uri``, the URI and
+        ``None``; ``file``, the path of a GoToR or a Launch action and
+        whether the file exists, as `file_link_target` tells; ``none``,
+        ``""`` and false for a link without destination or action;
+        ``other``, ``""`` and ``None`` for another action. A URI or a path
+        of more than `LINK_TARGET_LIMIT` bytes is left unread, as ``""``.
+    """
+    action = pdfium_c.FPDFLink_GetAction(link)
+    kind = pdfium_c.FPDFAction_GetType(action) if action else None
+    if kind not in _OTHER_FILE_ACTIONS:
+        dest = pdfium_c.FPDFLink_GetDest(pdf.raw, link)
+        if dest:
+            return _goto(pdf, dest)
+    match kind:
+        case None:
+            return "none", "", False
+        case pdfium_c.PDFACTION_GOTO:
+            dest = pdfium_c.FPDFAction_GetDest(pdf.raw, action)
+            return _goto(pdf, dest) if dest else ("goto", "", False)
+        case pdfium_c.PDFACTION_URI:
+            uri = _pdfium_string(
+                partial(pdfium_c.FPDFAction_GetURIPath, pdf.raw, action),
+                limit=LINK_TARGET_LIMIT,
+                encoding=_UTF8,
+            )
+            return "uri", printable(uri), None
+        case pdfium_c.PDFACTION_REMOTEGOTO | pdfium_c.PDFACTION_LAUNCH:
+            path = _pdfium_string(
+                partial(pdfium_c.FPDFAction_GetFilePath, action),
+                limit=LINK_TARGET_LIMIT,
+                encoding=_UTF8,
+            )
+            return "file", *file_link_target(path, folder)
+        case _:
+            return "other", "", None
+
+
+def _resolved_target(
+    pdf: pdfium.PdfDocument,
+    link: pdfium_c.FPDF_LINK,
+    folder: Path,
+    targets: LinkTargets,
+) -> LinkTarget:
+    """Return where a link annotation leads, resolving it once only.
+
+    An annotation that many references share, on one page or on many, is
+    one dictionary of the document, so its address is its identity while the
+    document is open.
+
+    Args:
+        pdf: The document.
+        link: The link annotation.
+        folder: The folder of the PDF.
+        targets: The targets already resolved, which this fills.
+
+    Returns:
+        Its target, as `_link_target` tells it, shared by every reference.
+    """
+    address = ctypes.addressof(link.contents)
+    target = targets.get(address)
+    if target is None:
+        target = targets[address] = _link_target(pdf, link, folder)
+    return target
+
+
+def _text_quota(textpage: pdfium.PdfTextPage) -> int:
+    """Return how many links of a page get their text.
+
+    Args:
+        textpage: The text page of the page, open.
+
+    Returns:
+        `LINK_TEXT_WORK`, as the module holds it when called, divided by the
+        number of characters of the page, as each text examines them all.
+    """
+    chars = pdfium_c.FPDFText_CountChars(textpage.raw)
+    return LINK_TEXT_WORK // max(1, chars)
+
+
+def read_links(  # ruff: ignore[too-many-arguments] - one keyword per bound and memory of the reading
+    pdf: pdfium.PdfDocument,
+    page: pdfium.PdfPage,
+    textpage: pdfium.PdfTextPage,
+    folder: Path,
+    *,
+    limit: int | None = None,
+    targets: LinkTargets | None = None,
+) -> tuple[tuple[PdfLink, ...], bool]:
+    """Read the link annotations of a page, with their text and target.
+
+    The annotations are read in the order of PDFium, the first
+    `MAX_PAGE_LINKS` only, as the module holds it when called. The text of
+    the first ones only is read, as `_text_quota` tells, and the others keep
+    an empty text.
+
+    Args:
+        pdf: The document, opened by `open_pdf`.
+        page: The page, open.
+        textpage: Its text page, open.
+        folder: The folder of the PDF, from which the relative path of a
+            file that a link opens is checked.
+        limit: The most annotations to read, if fewer than `MAX_PAGE_LINKS`.
+        targets: The targets of the annotations of the document already
+            resolved, which this fills, so that an annotation that many
+            references share is resolved once. Without it, they are shared
+            on the page only.
+
+    Returns:
+        The links, each with the printable text in its box, cut at
+        `LINK_TEXT_LIMIT` characters, and where it leads, as `_link_target`
+        tells; and whether other link annotations follow the last one read.
+    """
+    most = MAX_PAGE_LINKS if limit is None else min(limit, MAX_PAGE_LINKS)
+    texts = _text_quota(textpage)
+    resolved: LinkTargets = {} if targets is None else targets
+    buffer = (ctypes.c_ushort * _LINK_TEXT_UNITS)()
+    position = ctypes.c_int(0)
+    link = pdfium_c.FPDF_LINK()
+    links: list[PdfLink] = []
+    for number in range(max(0, most)):
+        if not pdfium_c.FPDFLink_Enumerate(page.raw, position, link):
+            return tuple(links), False
+        text = _link_text(textpage, link, buffer) if number < texts else ""
+        target = _resolved_target(pdf, link, folder, resolved)
+        links.append(PdfLink(text, *target))
+    more = bool(pdfium_c.FPDFLink_Enumerate(page.raw, position, link))
+    return tuple(links), more
+
+
+def _sized_label(pdf: pdfium.PdfDocument, index: int) -> tuple[str, int]:
+    """Read the label of a page, and the size that PDFium told for it.
+
+    A label of more than `LABEL_BYTES` bytes is left unread.
+
+    Args:
+        pdf: The document.
+        index: Position of the page, from 0.
+
+    Returns:
+        The printable label of the page, cut at `LABEL_LIMIT` characters,
+        else its number from 1; and the size of the label in bytes, with its
+        NUL, as PDFium told it.
+    """
+    label, size = _sized_string(
+        partial(pdfium_c.FPDF_GetPageLabel, pdf.raw, index),
+        limit=LABEL_BYTES,
+        encoding=_UTF16,
+    )
+    return printable(label, limit=LABEL_LIMIT) or str(index + 1), size
+
+
+def read_labels(pdf: pdfium.PdfDocument) -> tuple[list[str], bool]:
+    """Read the label of each page of a document.
+
+    The labels are read until the sizes asked, with their NUL, reach
+    `PAGE_LABEL_WORK` bytes, as the module holds it when called; each page
+    after them takes its number, as a page without label does.
+
+    Args:
+        pdf: The document, opened by `open_pdf`.
+
+    Returns:
+        The label of each page, in order, as `read_page` reads it, and
+        whether pages were numbered for the limit.
+    """
+    labels: list[str] = []
+    spent = 0  # The bytes of the labels asked.
+    cut = False
+    for index in range(len(pdf)):
+        if spent >= PAGE_LABEL_WORK:
+            cut = True
+            labels.append(str(index + 1))
+            continue
+        label, size = _sized_label(pdf, index)
+        spent += size
+        labels.append(label)
+    return labels, cut
 
 
 def _read_open_page(
-    pdf: pdfium.PdfDocument,
     index: int,
     pages: tuple[pdfium.PdfPage, pdfium.PdfTextPage],
     *,
     images: bool,
+    label: str,
 ) -> PdfPageText:
     """Read a page that is open, as `read_page` does.
 
     Args:
-        pdf: The document of the page.
         index: Position of the page, from 0.
         pages: The page, and its text page.
         images: Whether the images and the figures are read.
+        label: The label of the page.
 
     Returns:
         What `read_page` returns.
     """
     page, textpage = pages
-    label = _page_label(pdf, index)
     left, bottom, right, top = page.get_bbox()
     figures = vector_figures(page, textpage)
     read = _read_chars(textpage, (left, bottom), _FigureText.of(figures))
@@ -1314,11 +1779,15 @@ def _read_open_page(
     )
 
 
-def read_page(
+def read_page(  # ruff: ignore[too-many-arguments] - one keyword per part of the page that is read
     pdf: pdfium.PdfDocument,
     index: int,
     *,
     images: bool = True,
+    link_folder: Path | None = None,
+    link_limit: int | None = None,
+    link_targets: LinkTargets | None = None,
+    label: str | None = None,
 ) -> PdfPageText:
     """Read the characters, the raster images and the figures of a page.
 
@@ -1326,7 +1795,8 @@ def read_page(
     dropped. An image whose pixels cannot be read is kept, with the reason.
     The vector figures are always found, and the text drawn in them is left
     out of the characters; each figure is rendered once, for its signature,
-    if the images are read.
+    if the images are read. The link annotations are read, as `read_links`
+    reads them, only with a folder to check their files from.
 
     Args:
         pdf: The document, opened by `open_pdf`.
@@ -1335,11 +1805,18 @@ def read_page(
             none is decoded or rendered, but the share of the page that the
             images cover is still found, and the text of the figures still
             left out.
+        link_folder: The folder of the PDF, to read the links of the page,
+            or ``None`` not to read them.
+        link_limit: The most links to read, if fewer than `MAX_PAGE_LINKS`.
+        link_targets: The targets of the link annotations of the document
+            already resolved, as `read_links` takes them.
+        label: The label of the page, as `read_labels` reads it, or
+            ``None`` to read it here.
 
     Returns:
         The characters of the page turned upright, with its printable label,
         the size of its turned crop box, the share of it that images cover,
-        its images and its figures.
+        its images, its figures and its links.
 
     Raises:
         InputError: If PDFium cannot load the page or read its text.
@@ -1349,37 +1826,82 @@ def read_page(
             closing(pdf[index]) as page,
             closing(page.get_textpage()) as textpage,
         ):
-            return _read_open_page(
-                pdf,
+            text = _read_open_page(
                 index,
                 (page, textpage),
                 images=images,
+                label=_sized_label(pdf, index)[0] if label is None else label,
+            )
+            if link_folder is None:
+                return text
+            links, more = read_links(
+                pdf,
+                page,
+                textpage,
+                link_folder,
+                limit=link_limit,
+                targets=link_targets,
+            )
+            return replace(
+                text,
+                links=links,
+                more_links=more,
+                untexted_links=max(0, len(links) - _text_quota(textpage)),
             )
     except pdfium.PdfiumError:
         msg = f"page {index + 1}: invalid or damaged PDF"
         raise InputError(msg) from None
 
 
-def read_bookmarks(pdf: pdfium.PdfDocument) -> list[Bookmark]:
+def read_bookmarks(
+    pdf: pdfium.PdfDocument,
+) -> tuple[list[Bookmark], OutlineCut]:
     """Read the outline of a document, in the order of the document.
+
+    The walk of pypdfium2 stops at a cycle, and at a depth of 15. It is cut
+    after the first `MAX_BOOKMARKS` bookmarks, or once the sizes of the
+    titles asked, with their NUL, reach `OUTLINE_TITLE_WORK` bytes, each
+    limit as the module holds it when called. A title of more than
+    `BOOKMARK_TITLE_BYTES` bytes is left unread, as ``""``, but its size
+    counts.
 
     Args:
         pdf: The document, opened by `open_pdf`.
 
     Returns:
-        The entries of the outline, parents before their children.
+        The entries of the outline, parents before their children, and why
+        bookmarks after them were left unread, if they were.
     """
     bookmarks: list[Bookmark] = []
-    for item in pdf.get_toc():
+    spent = 0  # The bytes of the titles asked.
+    for item in islice(pdf.get_toc(), MAX_BOOKMARKS + 1):
+        if len(bookmarks) == MAX_BOOKMARKS:
+            return bookmarks, "bookmarks"
+        if spent >= OUTLINE_TITLE_WORK:
+            return bookmarks, "titles"
+        title, size = _sized_string(
+            partial(pdfium_c.FPDFBookmark_GetTitle, item.raw),
+            limit=BOOKMARK_TITLE_BYTES,
+            encoding=_UTF16,
+        )
+        spent += size
         dest = item.get_dest()
         page = None if dest is None else dest.get_index()
-        bookmarks.append(Bookmark(item.level, item.get_title(), page))
-    return bookmarks
+        bookmarks.append(Bookmark(item.level, title, page))
+    return bookmarks, None
 
 
 def _metadata(pdf: pdfium.PdfDocument, key: str) -> str | None:
-    """Return a printable metadata value, if not empty."""
-    return printable(pdf.get_metadata_value(key), limit=METADATA_LIMIT) or None
+    """Return a printable metadata value, if not empty.
+
+    A value of more than `METADATA_BYTES` bytes is left unread.
+    """
+    value = _pdfium_string(
+        partial(pdfium_c.FPDF_GetMetaText, pdf.raw, f"{key}\x00".encode()),
+        limit=METADATA_BYTES,
+        encoding=_UTF16,
+    )
+    return printable(value, limit=METADATA_LIMIT) or None
 
 
 def read_metadata(pdf: pdfium.PdfDocument) -> tuple[str | None, str | None]:

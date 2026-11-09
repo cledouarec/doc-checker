@@ -73,7 +73,13 @@ def load_document(
         The normalized document.
     """
     if detect_format(path) == "pdf":
-        return load_pdf(path, cfg.pdf, lang=cfg.lang, images=cfg.images)
+        return load_pdf(
+            path,
+            cfg.pdf,
+            lang=cfg.lang,
+            images=cfg.images,
+            audit=audit,
+        )
     return load_html(
         path,
         cfg.html,

@@ -24,8 +24,10 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 
 from doc_checker.errors import InputError
+from doc_checker.extract.pdf import reader
 from doc_checker.extract.pdf.catalog import PdfCatalog, read_catalog
 from doc_checker.extract.pdf.reader import (
+    BOOKMARK_TITLE_BYTES,
     LABEL_LIMIT,
     METADATA_LIMIT,
     Bookmark,
@@ -33,6 +35,7 @@ from doc_checker.extract.pdf.reader import (
     font_style,
     open_pdf,
     read_bookmarks,
+    read_labels,
     read_metadata,
     read_page,
 )
@@ -55,6 +58,7 @@ from tests.pdf_builders import (
     build_fpdf2_pdf,
     build_image_stream_pdf,
     build_lines_pdf,
+    build_outline_pdf,
     build_oversized_image_pdf,
     build_raw_pdf,
     build_reportlab_pdf,
@@ -107,7 +111,7 @@ def test_fonts_sizes_and_label(manual: Path) -> None:
 def test_bookmarks_labels_metadata(manual: Path) -> None:
     """The bookmarks, the page labels and the metadata are read."""
     with open_pdf(manual) as pdf:
-        marks = read_bookmarks(pdf)
+        marks, cut = read_bookmarks(pdf)
         labels = [read_page(pdf, i).label for i in range(3)]
         title, generator = read_metadata(pdf)
     assert marks[:3] == [
@@ -115,6 +119,7 @@ def test_bookmarks_labels_metadata(manual: Path) -> None:
         Bookmark(1, "Installation", 2),
         Bookmark(1, "First steps", 3),
     ]
+    assert cut is None
     assert labels == ["i", "1", "2"]
     assert title == "Example"
     assert generator is not None
@@ -125,7 +130,7 @@ def test_bookmarks_and_metadata_of_other_documents(tmp_path: Path) -> None:
     """Documents without outline or generator give no bookmark or generator."""
     fpdf2 = build_fpdf2_pdf(SAMPLE_EN, tmp_path / "f.pdf")
     with open_pdf(fpdf2) as pdf:
-        marks = read_bookmarks(pdf)
+        marks, _ = read_bookmarks(pdf)
         metadata = read_metadata(pdf)
     assert [(mark.level, mark.title) for mark in marks[:3]] == [
         (0, "Getting started"),
@@ -136,7 +141,91 @@ def test_bookmarks_and_metadata_of_other_documents(tmp_path: Path) -> None:
     assert metadata == ("Example", None)
     flat = build_reportlab_pdf(SAMPLE_EN, tmp_path / "n.pdf", outline=False)
     with open_pdf(flat) as pdf:
-        assert read_bookmarks(pdf) == []
+        assert read_bookmarks(pdf) == ([], None)
+
+
+def test_bookmarks_stop_at_their_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the limit of the outline, no bookmark is read, and it is said."""
+    path = build_outline_pdf(
+        tmp_path / "o.pdf",
+        [("(One)", 1), ("(Two)", 1), ("(Three)", None)],
+    )
+    with open_pdf(path) as pdf:
+        assert read_bookmarks(pdf) == (
+            [
+                Bookmark(0, "One", 0),
+                Bookmark(0, "Two", 0),
+                Bookmark(0, "Three", None),
+            ],
+            None,
+        )
+    monkeypatch.setattr(reader, "MAX_BOOKMARKS", 2)
+    with open_pdf(path) as pdf:
+        assert read_bookmarks(pdf) == (
+            [Bookmark(0, "One", 0), Bookmark(0, "Two", 0)],
+            "bookmarks",
+        )
+
+
+def test_bookmarks_stop_once_their_titles_spent_the_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bytes of the titles asked, kept or not, end the outline."""
+    path = build_outline_pdf(
+        tmp_path / "o.pdf",
+        [("(One)", 1), ("(Two)", 1), ("(Three)", 1)],
+    )
+    # Each of the first two titles takes 8 bytes: 3 characters and a NUL.
+    monkeypatch.setattr(reader, "OUTLINE_TITLE_WORK", 16)
+    with open_pdf(path) as pdf:
+        assert read_bookmarks(pdf) == (
+            [Bookmark(0, "One", 0), Bookmark(0, "Two", 0)],
+            "titles",
+        )
+    monkeypatch.setattr(reader, "BOOKMARK_TITLE_BYTES", 4)
+    with open_pdf(path) as pdf:
+        assert read_bookmarks(pdf) == (
+            [Bookmark(0, "", 0), Bookmark(0, "", 0)],
+            "titles",
+        )
+    monkeypatch.setattr(reader, "OUTLINE_TITLE_WORK", 17)
+    with open_pdf(path) as pdf:
+        _, cut = read_bookmarks(pdf)
+    assert cut is None
+
+
+def test_a_too_long_bookmark_title_is_left_unread(tmp_path: Path) -> None:
+    """A title beyond its limit in bytes is read as empty."""
+    longest = BOOKMARK_TITLE_BYTES // 2  # Characters of two bytes in UTF-16.
+    path = build_outline_pdf(
+        tmp_path / "o.pdf",
+        [(f"({'x' * longest})", 1), (f"({'x' * (longest + 1)})", 1)],
+    )
+    with open_pdf(path) as pdf:
+        marks, _ = read_bookmarks(pdf)
+    assert [mark.title for mark in marks] == ["x" * longest, ""]
+
+
+@pytest.mark.parametrize("field", ["outline", "info", "label"])
+def test_a_lone_surrogate_is_replaced(tmp_path: Path, field: str) -> None:
+    """A UTF-16 string with half a character is read with a replacement."""
+    lone = "<FEFFD8000041>"  # A high surrogate without its low half, then A.
+    path = build_outline_pdf(
+        tmp_path / "s.pdf",
+        [(lone if field == "outline" else "(Intro)", 1)],
+        info_title=lone if field == "info" else "(Title)",
+        label=lone if field == "label" else None,
+    )
+    with open_pdf(path) as pdf:
+        marks, _ = read_bookmarks(pdf)
+        title, _ = read_metadata(pdf)
+        label = read_page(pdf, 0).label
+    read = {"outline": marks[0].title, "info": title, "label": label}
+    assert read[field] == "\U0000fffdA"
 
 
 def test_read_metadata_cleans_values(tmp_path: Path) -> None:
@@ -156,6 +245,26 @@ def test_read_metadata_cleans_values(tmp_path: Path) -> None:
         assert read_metadata(pdf) == ("Spaced title", "Tool")
     with open_pdf(empty) as pdf:
         assert read_metadata(pdf) == (None, None)
+
+
+def test_page_labels_stop_once_they_spent_the_work(
+    manual: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the labels asked spent their work, the next pages are numbered."""
+    labels = ["i", *(str(n) for n in range(1, 10))]
+    with open_pdf(manual) as pdf:
+        assert read_labels(pdf) == (labels, False)
+    # Each label takes 4 bytes, a character and a NUL: 40 for the 10 pages.
+    monkeypatch.setattr(reader, "PAGE_LABEL_WORK", 8)
+    with open_pdf(manual) as pdf:
+        assert read_labels(pdf) == (
+            ["i", "1", *(str(n) for n in range(3, 11))],
+            True,
+        )
+    monkeypatch.setattr(reader, "PAGE_LABEL_WORK", 37)
+    with open_pdf(manual) as pdf:
+        assert read_labels(pdf) == (labels, False)
 
 
 def test_labels_and_metadata_are_printable(tmp_path: Path) -> None:

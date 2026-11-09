@@ -20,6 +20,13 @@ QUALITY_DROP: Final = 20
 COLOR_MIN: Final = 0.02
 COLOR_KEPT: Final = 0.5
 DPI_ENOUGH: Final = 300.0
+BLOCKS_REF_MIN: Final = 1.4
+BLOCKS_RATIO: Final = 1.3
+# Blocks of the reference inflate its sharpness, so a repair may read a
+# little blurrier; measured ratios of repairs are 1.3 to 2.5, of a Gaussian
+# blur of radius 1, 2 and 3 on a blocky reference 0.1-0.2, 0.01-0.05 and
+# 0.005-0.03: only a mild loss (above this floor) is excused.
+BLOCKS_SHARPNESS_FLOOR: Final = 0.3
 
 _FULL_QUALITY: Final = 100
 
@@ -70,6 +77,22 @@ def _lost(before: float, after: float) -> bool:
     return before >= COLOR_MIN and after < before * COLOR_KEPT
 
 
+def _repaired(measures: Measures) -> bool:
+    """Tell whether the reference is clearly blockier than the new image.
+
+    Args:
+        measures: Measures of the pair.
+
+    Returns:
+        True when the JPEG blocks of the reference show and exceed the new
+        image's by `BLOCKS_RATIO`: the new image is a repair, not a loss.
+    """
+    return (
+        measures.ref_blockiness >= BLOCKS_REF_MIN
+        and measures.ref_blockiness >= BLOCKS_RATIO * measures.new_blockiness
+    )
+
+
 def judge(
     ref: ImageRef,
     new: ImageRef,
@@ -104,7 +127,8 @@ def judge(
     quality_better = gap is not None and gap >= QUALITY_DROP
     scale_better = res > 1 / RESOLUTION_MIN
     better = (
-        scale_better
+        _repaired(measures)
+        or scale_better
         or sharper
         or quality_better
         or _lost(measures.new_color, measures.ref_color)
@@ -117,7 +141,14 @@ def judge(
         "color": _lost(measures.ref_color, measures.new_color),
         "transparency": ref.alpha is True and new.alpha is False,
         "sharpness": measures.sharpness < SHARPNESS_MIN
-        and not (scale_better or quality_better),
+        and not (
+            scale_better
+            or quality_better
+            or (
+                _repaired(measures)
+                and measures.sharpness >= BLOCKS_SHARPNESS_FLOOR
+            )
+        ),
     }
     causes = sorted(name for name, bad in worse.items() if bad)
     ssim_decides = not causes and measures.ssim < SSIM_MIN and not better

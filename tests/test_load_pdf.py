@@ -1,10 +1,11 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for loading PDF documents."""
 
+import logging
 import re
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import pytest
 from pypdf import PdfWriter
@@ -14,9 +15,10 @@ from doc_checker.compare.engine import compare_documents
 from doc_checker.config import Config, PdfConfig
 from doc_checker.errors import InputError
 from doc_checker.extract import detect_format, load_document
-from doc_checker.extract.pdf import load_pdf
+from doc_checker.extract.pdf import load_pdf, reader
 from doc_checker.images.pixels import TOO_LARGE
 from doc_checker.model.document import HEADING_SOURCE, NUMBER_ATTR, BlockKind
+from doc_checker.model.facts import OutlineEntry
 from tests.builders import FIGURES_EN, SAMPLE_EN, SAMPLE_FR
 from tests.pdf_builders import (
     build_figure_list_pdf,
@@ -24,6 +26,7 @@ from tests.pdf_builders import (
     build_images_pdf,
     build_listing_pdf,
     build_ornaments_pdf,
+    build_outline_pdf,
     build_oversized_image_pdf,
     build_raw_pdf,
     build_reportlab_pdf,
@@ -323,6 +326,141 @@ def test_pdf_language_must_be_a_language_tag(
 def test_load_document_reads_pdf(pdfs: dict[str, Path]) -> None:
     """A PDF input is loaded as a PDF document."""
     assert load_document(pdfs["rl_fr"], Config()).format == "pdf"
+
+
+def test_load_document_reads_the_page_facts_for_the_audit(
+    pdfs: dict[str, Path],
+) -> None:
+    """The page facts of a PDF are read for the audit, and only then."""
+    plain = load_document(pdfs["scan"], Config())
+    audited = load_document(pdfs["scan"], Config(), audit=True)
+    assert plain.pdf_pages == ()
+    assert [page.scanned for page in audited.pdf_pages] == [False] * 9 + [
+        True,
+    ]
+    assert audited.pdf_pages[0].chars > 0
+    assert (audited.title, audited.outline) == (plain.title, plain.outline)
+    assert audited.warnings == plain.warnings
+    assert [b.text for b in audited.blocks] == [b.text for b in plain.blocks]
+
+
+def test_outline_entries_are_printable_and_may_lack_a_page(
+    tmp_path: Path,
+) -> None:
+    """A control in a title is a space; a bookmark may lead to no page."""
+    path = build_outline_pdf(
+        tmp_path / "o.pdf",
+        [("(a\\007b)", 1), ("(Nowhere)", None)],
+    )
+    assert _load(path).outline == (
+        OutlineEntry(0, "a b", 1),
+        OutlineEntry(0, "Nowhere", None),
+    )
+
+
+def test_outline_beyond_its_limit_is_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bookmarks past the limit are not read, and a warning says so."""
+    monkeypatch.setattr(reader, "MAX_BOOKMARKS", 2)
+    path = build_outline_pdf(
+        tmp_path / "o.pdf",
+        [("(One)", 1), ("(Two)", 1), ("(Three)", 1)],
+    )
+    doc = _load(path)
+    assert [entry.title for entry in doc.outline] == ["One", "Two"]
+    assert doc.warnings == [
+        "the outline has more than 2 bookmarks, the others were not read",
+    ]
+
+
+def test_page_labels_beyond_their_work_are_a_warning(
+    pdfs: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the labels asked spent their work, the next pages are numbered."""
+    monkeypatch.setattr(reader, "PAGE_LABEL_WORK", 8)
+    doc = load_pdf(pdfs["toc"], PdfConfig(), lang="auto", audit=True)
+    assert doc.parts == ["i", "1", *(str(n) for n in range(3, 11))]
+    assert [page.label for page in doc.pdf_pages] == doc.parts
+    assert doc.warnings == [
+        "the page labels exceed 8 bytes, the other pages are numbered",
+    ]
+
+
+def test_outline_titles_beyond_their_work_are_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the titles asked spent their work, a warning ends the outline."""
+    monkeypatch.setattr(reader, "OUTLINE_TITLE_WORK", 10)
+    path = build_outline_pdf(
+        tmp_path / "o.pdf",
+        [("(One)", 1), ("(Two)", 1), ("(Three)", 1)],
+    )
+    doc = _load(path)
+    assert [entry.title for entry in doc.outline] == ["One", "Two"]
+    assert doc.warnings == [
+        (
+            "the outline titles exceed 10 bytes,"
+            " the other bookmarks were not read"
+        ),
+    ]
+
+
+class _Recorder(logging.Handler):
+    """A logging handler that keeps the records it is given."""
+
+    def __init__(self) -> None:
+        """Start with no record."""
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        """Keep a record."""
+        self.records.append(record)
+
+
+def test_outline_cycle_is_quiet(tmp_path: Path) -> None:
+    """An outline that loops is read once around, and logs nothing."""
+    path = build_outline_pdf(
+        tmp_path / "o.pdf",
+        [("(One)", 1), ("(Two)", 1)],
+        cycle=True,
+    )
+    recorder = _Recorder()
+    root = logging.getLogger()
+    root.addHandler(recorder)
+    try:
+        doc = _load(path)
+    finally:
+        root.removeHandler(recorder)
+    assert [entry.title for entry in doc.outline] == ["One", "Two"]
+    assert recorder.records == []
+
+
+@pytest.mark.parametrize("field", ["outline", "info", "label"])
+def test_lone_surrogates_do_not_stop_the_loading(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    """Half a UTF-16 character in a title or a label is replaced."""
+    lone = "<FEFFD8000041>"  # A high surrogate without its low half, then A.
+    path = build_outline_pdf(
+        tmp_path / "s.pdf",
+        [(lone if field == "outline" else "(Intro)", 1)],
+        info_title=lone if field == "info" else "(Title)",
+        label=lone if field == "label" else None,
+    )
+    doc = load_pdf(path, PdfConfig(), lang="auto", audit=True)
+    read = {
+        "outline": doc.outline[0].title,
+        "info": doc.title,
+        "label": doc.pdf_pages[0].label,
+    }
+    assert read[field] == "\U0000fffdA"
 
 
 def test_pdf_header_may_follow_a_few_bytes(tmp_path: Path) -> None:
