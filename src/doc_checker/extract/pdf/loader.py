@@ -63,7 +63,11 @@ from doc_checker.model.facts import (
     OutlineEntry,
     PdfPageFacts,
 )
-from doc_checker.text.lang import declared_language, resolve_language
+from doc_checker.text.lang import (
+    LANG_SAMPLE_BLOCKS,
+    declared_language,
+    resolve_language,
+)
 from doc_checker.text.normalize import ELLIPSIS, printable
 
 if TYPE_CHECKING:
@@ -89,7 +93,6 @@ if TYPE_CHECKING:
 
 SCANNED_MIN_COVERAGE: Final = 0.5  # Smallest image share of a scanned page.
 SCANNED_LABELS_MAX: Final = 10  # Most page labels that a warning lists.
-LANG_SAMPLE_BLOCKS: Final = 200  # Blocks whose text tells the language.
 MAX_DOCUMENT_LINKS: Final = 1_000_000  # Most links read in a document.
 
 _DIGITS: Final = re.compile(r"\d+")

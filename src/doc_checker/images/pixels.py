@@ -37,6 +37,10 @@ NOT_READ: Final = frozenset({EXTERNAL, PAGE_LIMIT, NOT_RENDERED})
 LOSSLESS_FORMATS: Final = frozenset(
     {"png", "gif", "bmp", "tiff", "flate", "raw", "ccitt", "jbig2"},
 )
+# The formats of the web that browsers show but that are not decoded here,
+# as `web_signature` tells them from their first bytes.
+AVIF: Final = "avif"
+JXL: Final = "jxl"
 
 _ALPHA_MODES: Final = frozenset({"RGBA", "LA", "PA"})
 _WHITE: Final = (255, 255, 255, 255)
@@ -52,6 +56,17 @@ _IJG_LUMINANCE: Final = (
     *(72, 92, 95, 98, 112, 100, 103, 99),
 )
 _IJG_SUM: Final = sum(_IJG_LUMINANCE)
+# The file type box of an ISO base media file (AVIF, HEIF): its size, its
+# type, its major brand, a version, then its compatible brands, of which
+# at most `_BRANDS_END` bytes are read.
+_FTYP: Final = b"ftyp"
+_FTYP_HEAD: Final = 16
+_BRAND: Final = 4
+_BRANDS_END: Final = 64
+_AVIF_BRANDS: Final = frozenset({b"avif", b"avis"})
+# A JPEG XL codestream, and the box that starts a JPEG XL container.
+_JXL_CODESTREAM: Final = b"\xff\x0a"
+_JXL_CONTAINER: Final = b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a"
 
 
 class UnreadableImage(Exception):  # ruff: ignore[error-suffix-on-exception-name] - public name set by the plan
@@ -59,16 +74,20 @@ class UnreadableImage(Exception):  # ruff: ignore[error-suffix-on-exception-name
 
     Attributes:
         reason: Short reason, such as `TOO_LARGE` or `CANNOT_DECODE`.
+        size: Size of the file in bytes, when it is known though the file
+            was not read, as for a file `TOO_LARGE`; else ``None``.
     """
 
-    def __init__(self, reason: str) -> None:
-        """Keep the reason.
+    def __init__(self, reason: str, *, size: int | None = None) -> None:
+        """Keep the reason, and the size of the file if it is known.
 
         Args:
             reason: Why the image is unreadable.
+            size: Size of the file in bytes, if known.
         """
         super().__init__(reason)
         self.reason = reason
+        self.size = size
 
 
 def read_image_file(file: Path, limit: int = MAX_FILE_BYTES) -> bytes:
@@ -83,7 +102,8 @@ def read_image_file(file: Path, limit: int = MAX_FILE_BYTES) -> bytes:
 
     Raises:
         UnreadableImage: `NOT_FOUND` if it is not a file or cannot be read,
-            `TOO_LARGE` beyond the limit.
+            `TOO_LARGE` beyond the limit, with the size of the file, or the
+            bytes read when it grew past the limit as it was read.
     """
     try:
         size = file.stat().st_size if file.is_file() else None
@@ -92,15 +112,55 @@ def read_image_file(file: Path, limit: int = MAX_FILE_BYTES) -> bytes:
     if size is None:
         raise UnreadableImage(NOT_FOUND)
     if size > limit:
-        raise UnreadableImage(TOO_LARGE)
+        raise UnreadableImage(TOO_LARGE, size=size)
     try:
         with file.open("rb") as stream:
             data = stream.read(limit + 1)
     except OSError:
         raise UnreadableImage(NOT_FOUND) from None
     if len(data) > limit:
-        raise UnreadableImage(TOO_LARGE)
+        raise UnreadableImage(TOO_LARGE, size=len(data))
     return data
+
+
+def _avif_brands(data: bytes) -> bool:
+    """Tell whether bytes start with a file type box of an AVIF brand.
+
+    Args:
+        data: The first bytes of a file.
+
+    Returns:
+        Whether the major brand, or one of the compatible brands within
+        the box and the first `_BRANDS_END` bytes, is ``avif`` or
+        ``avis``.
+    """
+    if data[_BRAND : 2 * _BRAND] != _FTYP:
+        return False
+    end = min(int.from_bytes(data[:_BRAND]), len(data), _BRANDS_END)
+    if end < _FTYP_HEAD:
+        return False
+    brands = [data[2 * _BRAND : 3 * _BRAND]] + [
+        data[start : start + _BRAND]
+        for start in range(_FTYP_HEAD, end - _BRAND + 1, _BRAND)
+    ]
+    return any(brand in _AVIF_BRANDS for brand in brands)
+
+
+def web_signature(data: bytes) -> str | None:
+    """Tell an image of the web that is not decoded here by its signature.
+
+    Args:
+        data: Encoded image, maybe only its first bytes.
+
+    Returns:
+        `AVIF` for a file type box of an AVIF brand; `JXL` for a JPEG XL
+        codestream or container; else ``None``.
+    """
+    if _avif_brands(data):
+        return AVIF
+    if data.startswith((_JXL_CODESTREAM, _JXL_CONTAINER)):
+        return JXL
+    return None
 
 
 def _refuse_large(image: Image.Image) -> None:

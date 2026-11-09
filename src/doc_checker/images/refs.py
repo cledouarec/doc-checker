@@ -16,6 +16,7 @@ from doc_checker.images.pixels import (
     jpeg_quality,
     open_raster,
     uses_alpha,
+    web_signature,
 )
 from doc_checker.model.document import ImageRef, PixelSource
 
@@ -137,7 +138,8 @@ def raster_ref(
         shown: Displayed size.
 
     Returns:
-        The reference, with a `problem` and no hash if unreadable.
+        The reference, with a `problem` and no hash if unreadable, and the
+        format of the web that the signature of its bytes tells, if any.
     """
     digest = content_digest(data)
     facts = _facts(data, digest)
@@ -150,6 +152,7 @@ def raster_ref(
             alt=alt,
             shown=shown,
             size=len(data),
+            web_format=web_signature(data),
         )
     return ImageRef(
         name=name,
@@ -225,6 +228,7 @@ def unreadable_ref(  # ruff: ignore[too-many-arguments] - the fields of an image
     shown: tuple[float, float] | None = None,
     size: int | None = None,
     vector: bool = False,
+    web_format: str | None = None,
 ) -> ImageRef:
     """Build the `ImageRef` of an image without pixels.
 
@@ -237,6 +241,8 @@ def unreadable_ref(  # ruff: ignore[too-many-arguments] - the fields of an image
         shown: Displayed size.
         size: Size of the encoded image.
         vector: Whether the image is a drawing.
+        web_format: Format of the web that the signature of its bytes
+            tells, as `web_signature` gives it.
 
     Returns:
         The reference, without hash or source.
@@ -250,6 +256,7 @@ def unreadable_ref(  # ruff: ignore[too-many-arguments] - the fields of an image
         vector=vector,
         size=size,
         problem=problem,
+        web_format=web_format,
     )
 
 

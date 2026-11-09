@@ -7,6 +7,7 @@ from doc_checker.text.lang import (
     declared_language,
     detect_language,
     resolve_language,
+    strong_language,
 )
 from doc_checker.text.lexicon import (
     DEFAULT_ADMONITION_TITLES,
@@ -45,6 +46,14 @@ def test_detect_language() -> None:
     assert detect_language(FR_SAMPLE) == "fr"
     assert detect_language(EN_SAMPLE) == "en"
     assert detect_language("Hello") is None
+
+
+def test_strong_language_needs_much_evidence() -> None:
+    """Fifteen stopwords and three times the other language."""
+    assert strong_language("le la les de " * 4) == "fr"
+    assert strong_language("le la les de " * 3) is None
+    assert strong_language("le la les de " * 4 + "the and is of " * 2) is None
+    assert strong_language("the and is of " * 4 + "le la " * 2) == "en"
 
 
 def test_resolve_language() -> None:
