@@ -560,6 +560,7 @@ def test_audit_html_report_tells_the_document(tmp_path: Path) -> None:
         ("Tagged", ["-"]),
         ("Blocks", ["1"]),
         ("Images", ["0"]),
+        ("Words", ["5"]),
     ]
     assert not tree.cssselect("p.matched")
     (article,) = tree.cssselect("article.finding")

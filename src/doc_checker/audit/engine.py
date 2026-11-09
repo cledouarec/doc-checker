@@ -7,22 +7,27 @@ and the pages of the document, by `structure_drafts` of
 `doc_checker.audit.links`. The family `A11Y` checks its accessibility, by
 `accessibility_drafts` of `doc_checker.audit.accessibility`, after the
 structure. The family `IMAGES` checks its images, when they were read, by
-`image_quality_drafts` of `doc_checker.audit.images`, last, with a
-`PixelLoader` that reads their pixels again. The drafts of the families
-then become findings as those of `compare` do, by `finalize_drafts` of
-`doc_checker.compare.aggregate`: severities, filters, identifiers, groups.
+`image_quality_drafts` of `doc_checker.audit.images`, next, with a
+`PixelLoader` that reads their pixels again. The family `TEXT` checks its
+text, by `text_drafts` of `doc_checker.audit.text`, last, with a `Speller`
+that knows the personal words of the configuration. The drafts of the
+families then become findings as those of `compare` do, by
+`finalize_drafts` of `doc_checker.compare.aggregate`: severities, filters,
+identifiers, groups.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.audit.accessibility import accessibility_drafts
 from doc_checker.audit.images import image_quality_drafts
 from doc_checker.audit.links import broken_link_drafts
 from doc_checker.audit.structure import structure_drafts
+from doc_checker.audit.text import TEXT, text_drafts
 from doc_checker.compare.aggregate import finalize_drafts
 from doc_checker.images.load import PixelLoader
 from doc_checker.model.document import BlockKind
+from doc_checker.spell.speller import Speller
 
 if TYPE_CHECKING:
     from doc_checker.compare.drafts import Draft
@@ -49,6 +54,8 @@ class AuditStats:
             family `IMAGES` does not run when the images were not read.
         profile: Profile of the audit, ``"screen"`` or ``"print"``.
         images_read: Whether the images were read.
+        words: Words spelled; ``None`` when the family `TEXT`, which
+            spells them, did not run.
     """
 
     pages: int
@@ -58,15 +65,26 @@ class AuditStats:
     checks: tuple[str, ...]
     profile: str
     images_read: bool
+    words: int | None = None
 
 
 @dataclass(slots=True)
 class AuditResult:
-    """Outcome of the audit of a document."""
+    """Outcome of the audit of a document.
+
+    Attributes:
+        doc: The document, with the warnings of the family `TEXT` after
+            its own.
+        findings: The findings.
+        stats: Statistics.
+        words: The words that the dictionaries do not know, each once, as
+            `TextOutcome` lists them.
+    """
 
     doc: Document
     findings: list[Finding]
     stats: AuditStats
+    words: tuple[str, ...] = ()
 
 
 def audit_document(doc: Document, cfg: Config) -> AuditResult:
@@ -79,8 +97,10 @@ def audit_document(doc: Document, cfg: Config) -> AuditResult:
 
     Returns:
         The findings, those of the structure first, then those of the
-        accessibility, then those of the images, each family in its order,
-        and statistics.
+        accessibility, of the images and of the text, each family in its
+        order, statistics, and the words that the dictionaries do not
+        know; the document is a copy that has the warnings of the text
+        after its own.
     """
     drafts: list[Draft] = []
     links = None
@@ -93,6 +113,14 @@ def audit_document(doc: Document, cfg: Config) -> AuditResult:
     if IMAGES in cfg.checks and cfg.images:
         with PixelLoader(doc.path) as loader:
             drafts += image_quality_drafts(doc, loader, cfg.audit, cfg.profile)
+    words = None
+    unknown: tuple[str, ...] = ()
+    if TEXT in cfg.checks:
+        outcome = text_drafts(doc, cfg, Speller(cfg.spelling.words))
+        drafts += outcome.drafts
+        doc = replace(doc, warnings=[*doc.warnings, *outcome.warnings])
+        words = outcome.checked
+        unknown = outcome.words
     images = sum(block.kind is BlockKind.IMAGE for block in doc.blocks)
     stats = AuditStats(
         pages=len(doc.parts),
@@ -102,5 +130,6 @@ def audit_document(doc: Document, cfg: Config) -> AuditResult:
         checks=tuple(c for c in cfg.checks if c != IMAGES or cfg.images),
         profile=cfg.profile,
         images_read=cfg.images,
+        words=words,
     )
-    return AuditResult(doc, finalize_drafts(drafts, cfg), stats)
+    return AuditResult(doc, finalize_drafts(drafts, cfg), stats, unknown)

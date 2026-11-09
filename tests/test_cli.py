@@ -314,8 +314,14 @@ AUDIT_SUMMARY_CASES = [
         "| checks a11y, structure | profile",
     ),
     (["--no-images"], "| checks structure, a11y, text | profile screen"),
-    (["--checks", "a11y"], "| links - | checks a11y | profile screen"),
-    (["--checks", "images", "--no-images"], "| links - | checks - |"),
+    (
+        ["--checks", "a11y"],
+        "| links - | words - | checks a11y | profile screen",
+    ),
+    (
+        ["--checks", "images", "--no-images"],
+        "| links - | words - | checks - |",
+    ),
 ]
 
 
