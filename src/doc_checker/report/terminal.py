@@ -8,15 +8,22 @@ import click
 
 from doc_checker.images.refs import describe
 from doc_checker.model.findings import Severity
-from doc_checker.report.context import UNKNOWN, matched_percent
+from doc_checker.report.context import (
+    IMAGES_NOT_READ,
+    NOT_RUN,
+    UNKNOWN,
+    matched_percent,
+)
 from doc_checker.text.normalize import BIDI_CLASS, CONTROL_CLASS, truncate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from doc_checker.audit.engine import AuditResult
     from doc_checker.compare.engine import CompareResult
     from doc_checker.model.document import Block, Document, Link
+    from doc_checker.model.findings import Finding
 
 _MAX_TEXT: Final = 200
 _LINK_KIND: Final = "link"
@@ -25,7 +32,7 @@ _REPLACEMENT: Final = "\U0000fffd"
 # What `printable` blanks out, but the tab and the line feed.
 _HIDDEN_RE: Final = re.compile(f"[{CONTROL_CLASS}{BIDI_CLASS}]")
 _NEWLINE_MARK: Final = " \U000023ce "
-_TOP_CRITICAL: Final = 5
+_TOP_FINDINGS: Final = 5
 _QUOTE_CHARS: Final = 60
 _STYLES: Final[dict[Severity, dict[str, Any]]] = {
     Severity.CRITICAL: {"fg": "red", "bold": True},
@@ -127,6 +134,39 @@ def _described(doc: Document) -> str:
     return f"{_one_line(str(doc.path))} ({len(doc.parts)} pages, {generator})"
 
 
+def _counts(findings: Sequence[Finding]) -> str:
+    """Return the line that counts the findings of each severity."""
+    counts = ", ".join(
+        f"{sum(f.severity is severity for f in findings)} "
+        f"{_styled(severity, severity.label)}"
+        for severity in sorted(Severity, reverse=True)
+    )
+    return f"findings: {counts}"
+
+
+def _top_line(finding: Finding) -> str:
+    """Return the line of a finding listed under the counts.
+
+    It tells the severity, the rule, the place and an excerpt of the first
+    side of the finding, then the occurrences of a group.
+    """
+    side = finding.ref or finding.new
+    location = _one_line(side.source.href) if side else ""
+    quote = _shorten(side.text, _QUOTE_CHARS) if side else ""
+    label = _styled(finding.severity, finding.severity.name)
+    count = (
+        f" ({len(finding.occurrences)} occurrences)"
+        if finding.occurrences
+        else ""
+    )
+    return f'  {label} {finding.rule}  {location}  "{quote}"{count}'
+
+
+def _reports_line(reports: Sequence[Path]) -> str:
+    """Return the line that lists the reports written."""
+    return "reports: " + ", ".join(str(path) for path in reports)
+
+
 def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
     """Return the short summary of a comparison shown in the terminal.
 
@@ -143,11 +183,6 @@ def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
         breaks as marks.
     """
     ref, new, stats = result.ref, result.new, result.stats
-    counts = ", ".join(
-        f"{sum(f.severity is severity for f in result.findings)} "
-        f"{_styled(severity, severity.label)}"
-        for severity in sorted(Severity, reverse=True)
-    )
     lines = [
         f"compare  ref={_described(ref)}  new={_described(new)}",
         (
@@ -160,30 +195,60 @@ def render_summary(result: CompareResult, reports: Sequence[Path]) -> str:
             f"images {stats.ref_images} <-> {stats.new_images} | "
             f"matched {stats.matched_images}",
         )
-    lines.append(f"findings: {counts}")
+    lines.append(_counts(result.findings))
     critical = [
         finding
         for finding in result.findings
         if finding.severity is Severity.CRITICAL
     ]
-    for finding in critical[:_TOP_CRITICAL]:
-        side = finding.ref or finding.new
-        location = _one_line(side.source.href) if side else ""
-        quote = _shorten(side.text, _QUOTE_CHARS) if side else ""
-        label = _styled(Severity.CRITICAL, "CRITICAL")
-        count = (
-            f" ({len(finding.occurrences)} occurrences)"
-            if finding.occurrences
-            else ""
-        )
-        lines.append(
-            f'  {label} {finding.rule}  {location}  "{quote}"{count}',
-        )
+    lines.extend(map(_top_line, critical[:_TOP_FINDINGS]))
     tag = click.style("warning", fg="yellow")
     lines.extend(
         f"{tag}: {which}: {_one_line(warning)}"
         for which, document in (("ref", ref), ("new", new))
         for warning in document.warnings
     )
-    lines.append("reports: " + ", ".join(str(path) for path in reports))
+    lines.append(_reports_line(reports))
+    return "\n".join(lines)
+
+
+def render_audit_summary(result: AuditResult, reports: Sequence[Path]) -> str:
+    """Return the short summary of an audit shown in the terminal.
+
+    Args:
+        result: Audit result.
+        reports: Report files written.
+
+    Returns:
+        Styled text; ``click.echo`` removes the styles when not in a TTY.
+        The document, its counts, the families of checks and the profile,
+        the findings counted by severity, then, if the highest severity
+        found is major or critical, the first five findings of that
+        severity, as `render_summary` lists the critical ones; then the
+        warnings of the document and the reports. The values that come from
+        the document are on one line and have their controls made visible,
+        as `visible` does; an excerpt of a block shows its line breaks as
+        marks.
+    """
+    stats = result.stats
+    images = str(stats.images) if stats.images_read else IMAGES_NOT_READ
+    links = NOT_RUN if stats.links is None else str(stats.links)
+    checks = ", ".join(stats.checks) or NOT_RUN
+    lines = [
+        f"audit  doc={_described(result.doc)}",
+        (
+            f"blocks {stats.blocks} | images {images} | links {links}"
+            f" | checks {checks} | profile {stats.profile}"
+        ),
+        _counts(result.findings),
+    ]
+    highest = max((f.severity for f in result.findings), default=None)
+    if highest is not None and highest >= Severity.MAJOR:
+        top = [f for f in result.findings if f.severity is highest]
+        lines.extend(map(_top_line, top[:_TOP_FINDINGS]))
+    tag = click.style("warning", fg="yellow")
+    lines.extend(
+        f"{tag}: {_one_line(warning)}" for warning in result.doc.warnings
+    )
+    lines.append(_reports_line(reports))
     return "\n".join(lines)

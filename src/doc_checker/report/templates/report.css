@@ -9,6 +9,8 @@
   --del-bg: #ffebe9;
   --ins-fg: #116329;
   --ins-bg: #dafbe1;
+  --mark-fg: #3d2c00;
+  --mark-bg: #fff1b8;
   --critical: #cf222e;
   --major: #bc4c00;
   --minor: #9a6700;
@@ -26,6 +28,8 @@
     --del-bg: #490202;
     --ins-fg: #7ee787;
     --ins-bg: #04260f;
+    --mark-fg: #f2e5b0;
+    --mark-bg: #4d3800;
     --critical: #f85149;
     --major: #db6d28;
     --minor: #d29922;
@@ -101,6 +105,7 @@ td {
 }
 
 .matched,
+.checks,
 .none,
 .shown,
 .where,
@@ -210,6 +215,10 @@ article.finding h3 code {
   margin: 0.5rem 0;
 }
 
+.sides.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .side h4 {
   margin: 0 0 0.25rem;
   font-size: 0.85rem;
@@ -254,6 +263,11 @@ ins {
   color: var(--ins-fg);
   background: var(--ins-bg);
   text-decoration: underline;
+}
+
+mark {
+  color: var(--mark-fg);
+  background: var(--mark-bg);
 }
 
 .detail,

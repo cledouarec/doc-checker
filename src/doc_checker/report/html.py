@@ -1,5 +1,5 @@
 # Copyright 2026 Christophe Le Douarec
-"""Standalone HTML report of a comparison.
+"""Standalone HTML report of a comparison or of an audit.
 
 The report is one file that opens from the disk: its style sheet and its
 script are inline, and a content security policy lets them run, but nothing
@@ -23,11 +23,13 @@ from doc_checker.report.context import (
     ReportContext,
     Thumbnails,
     is_code,
+    side_of,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from doc_checker.audit.engine import AuditResult
     from doc_checker.compare.engine import CompareResult
 
 
@@ -88,14 +90,14 @@ class _DomIds:
 
 
 def render_html(
-    result: CompareResult,
+    result: CompareResult | AuditResult,
     path: Path,
     thumbnails: Thumbnails | None = None,
 ) -> Path:
-    """Write the standalone HTML report of a comparison.
+    """Write the standalone HTML report of a comparison or of an audit.
 
     Args:
-        result: Comparison result.
+        result: Result of a comparison or of an audit.
         path: Report file to write.
         thumbnails: Thumbnails of the sides of the findings, shared with the
             other report; ``None`` for thumbnails of this report only.
@@ -114,10 +116,10 @@ def render_html(
         policy=content_security_policy(css, script),
         css=css,
         script=script,
+        command=context.command,
+        columns=context.columns,
         inputs=context.inputs(),
-        matched=context.matched(),
-        matched_images=context.matched_images(),
-        moved=result.stats.moved,
+        **context.headline(),
         severities=severities,
         counts=[
             (severity, len(context.findings_of(severity)))
@@ -137,6 +139,7 @@ def render_html(
         category_titles=CATEGORY_TITLES,
         severity_titles=SEVERITY_TITLES,
         source=context.source,
+        side_of=side_of,
         shown=context.shown,
         hidden=context.hidden,
         is_code=is_code,

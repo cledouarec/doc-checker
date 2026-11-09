@@ -2,6 +2,7 @@
 {% for segment in side.segments -%}
 {% if segment.op == "delete" %}<del>{{ segment.text }}</del>
 {%- elif segment.op == "insert" %}<ins>{{ segment.text }}</ins>
+{%- elif segment.op == "mark" %}<mark>{{ segment.text }}</mark>
 {%- else %}{{ segment.text }}
 {%- endif %}
 {% endfor %}
@@ -18,11 +19,12 @@
 {%- else %}&mdash;
 {%- endif %}
 {% endmacro %}
-{% macro where(finding) %}<p class="where">Reference: {{ link(finding.ref, "ref") }} &middot; New: {{ link(finding.new, "new") }}</p>{% endmacro %}
+{% macro where(finding) %}<p class="where">{% for column in columns %}{% if not loop.first %} &middot; {% endif %}{{ column.label }}: {{ link(side_of(finding, column.which), column.which) }}{% endfor %}</p>{% endmacro %}
 {% macro ident(finding) %}<p class="id">ID: <code>{{ finding.id }}</code></p>{% endmacro %}
 {% macro sides(finding) %}
-<div class="sides">
-{% for which, label, side in (("ref", "Reference", finding.ref), ("new", "New", finding.new)) %}
+<div class="sides{% if columns | length == 1 %} single{% endif %}">
+{% for column in columns %}
+{% set which, label, side = column.which, column.label, side_of(finding, column.which) %}
 {% set thumb = thumbnail(side, which) %}
 <div class="side {{ which }}"><h4>{{ label }}{% if side is not none and side.kind is not none %} <span class="kind">{{ side.kind.value | replace("_", " ") }}</span>{% endif %}</h4>
 {%- if thumb %}<img class="thumb" src="{{ thumb.data_uri }}" alt="{{ label }} image" width="{{ thumb.width }}" height="{{ thumb.height }}">{% endif %}
@@ -36,21 +38,25 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="{{ policy }}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>doc-checker report: compare</title>
+<title>doc-checker report: {{ command }}</title>
 <style>{{ css | safe }}</style>
 </head>
 <body>
 <header id="summary">
-<h1>doc-checker report: compare</h1>
+<h1>doc-checker report: {{ command }}</h1>
 <table class="inputs">
-<thead><tr><td></td><th scope="col">Reference</th><th scope="col">New</th></tr></thead>
+<thead><tr><td></td>{% for column in columns %}<th scope="col">{{ column.label }}</th>{% endfor %}</tr></thead>
 <tbody>
-{% for label, ref_value, new_value in inputs %}
-<tr><th scope="row">{{ label }}</th><td class="quote">{{ ref_value }}</td><td class="quote">{{ new_value }}</td></tr>
+{% for label, values in inputs %}
+<tr><th scope="row">{{ label }}</th>{% for value in values %}<td class="quote">{{ value }}</td>{% endfor %}</tr>
 {% endfor %}
 </tbody>
 </table>
+{% if command == "compare" %}
 <p class="matched">Matched: {{ matched }}% of reference blocks{% if matched_images %}, {{ matched_images }}{% endif %} &middot; Moved: {{ moved }}</p>
+{% else %}
+<p class="checks">Checks: {{ checks }} &middot; Profile: {{ profile }}</p>
+{% endif %}
 <ul class="counts">
 {% for severity, count in counts %}
 <li data-severity="{{ severity.label }}"><span class="count">{{ count }}</span> {{ severity.label }}</li>
@@ -70,12 +76,12 @@
 {% endif %}
 {% if normalization %}
 <section id="normalization">
-<h2>Normalized differences</h2>
+<h2>{{ "Normalized differences" if command == "compare" else "Normalizations" }}</h2>
 <table>
-<thead><tr><th scope="col">Normalization</th><th scope="col">Reference</th><th scope="col">New</th></tr></thead>
+<thead><tr><th scope="col">Normalization</th>{% for column in columns %}<th scope="col">{{ column.label }}</th>{% endfor %}</tr></thead>
 <tbody>
-{% for key, ref_count, new_count in normalization %}
-<tr><th scope="row">{{ key }}</th><td>{{ ref_count }}</td><td>{{ new_count }}</td></tr>
+{% for key, counts in normalization %}
+<tr><th scope="row">{{ key }}</th>{% for count in counts %}<td>{{ count }}</td>{% endfor %}</tr>
 {% endfor %}
 </tbody>
 </table>

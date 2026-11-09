@@ -1,14 +1,18 @@
-# doc-checker report: compare
+# doc-checker report: {{ command }}
 
 ## Inputs
 
-| | Reference | New |
-|---|---|---|
-{% for label, ref_value, new_value in inputs %}
-| {{ label }} | {{ ref_value }} | {{ new_value }} |
+| |{% for column in columns %} {{ column.label }} |{% endfor +%}
+|---|{% for column in columns %}---|{% endfor +%}
+{% for label, values in inputs %}
+| {{ label }} |{% for value in values %} {{ value }} |{% endfor +%}
 {% endfor %}
 
+{% if command == "compare" %}
 **Matched:** {{ matched }}% of reference blocks{% if matched_images %}, {{ matched_images }}{% endif %} · **Moved:** {{ moved }}
+{% else %}
+**Checks:** {{ checks }} · **Profile:** {{ profile }}
+{% endif %}
 
 ## Summary
 
@@ -23,12 +27,12 @@ No findings.
 {% endif %}
 {% if normalization %}
 
-## Normalized differences
+## {{ "Normalized differences" if command == "compare" else "Normalizations" }}
 
-| Normalization | Reference | New |
-|---|---|---|
-{% for key, ref_count, new_count in normalization %}
-| {{ key }} | {{ ref_count }} | {{ new_count }} |
+| Normalization |{% for column in columns %} {{ column.label }} |{% endfor +%}
+|---|{% for column in columns %}---|{% endfor +%}
+{% for key, counts in normalization %}
+| {{ key }} |{% for count in counts %} {{ count }} |{% endfor +%}
 {% endfor %}
 {% endif %}
 {% if chrome %}
@@ -64,10 +68,10 @@ No findings.
 
 <details><summary>{{ finding.occurrences | length }} occurrences</summary>
 
-| ID | Reference | New |
-|---|---|---|
+| ID |{% for column in columns %} {{ column.label }} |{% endfor +%}
+|---|{% for column in columns %}---|{% endfor +%}
 {% for item in context.shown(finding) %}
-| {{ md_code(item.id) }} | {{ image(item.ref, "ref") }}{{ link(item.ref, "ref") }}<br>{{ cell(item.ref) }} | {{ image(item.new, "new") }}{{ link(item.new, "new") }}<br>{{ cell(item.new) }} |
+| {{ md_code(item.id) }} |{% for column in columns %}{% set side = side_of(item, column.which) %} {{ image(side, column.which) }}{{ link(side, column.which) }}<br>{{ cell(side) }} |{% endfor +%}
 {% endfor %}
 {% if context.hidden(finding) %}
 
@@ -77,14 +81,15 @@ and {{ context.hidden(finding) }} more occurrences
 </details>
 {% else %}
 
-- Reference: {{ link(finding.ref, "ref") }}
-- New: {{ link(finding.new, "new") }}
+{% for column in columns %}
+- {{ column.label }}: {{ link(side_of(finding, column.which), column.which) }}
+{% endfor %}
 - ID: `{{ finding.id }}`
 {% if finding.detail %}
 
 {{ md_text(finding.detail) }}
 {% endif %}
-{% if is_code(finding) %}
+{% if command == "compare" and is_code(finding) %}
 {% set lines = diff_lines(finding) %}
 {% set fence = md_fence(lines) %}
 
@@ -95,9 +100,9 @@ and {{ context.hidden(finding) }} more occurrences
 {{ fence }}
 {% else %}
 
-| Reference | New |
-|---|---|
-| {{ image(finding.ref, "ref") }}{{ cell(finding.ref) }} | {{ image(finding.new, "new") }}{{ cell(finding.new) }} |
+|{% for column in columns %} {{ column.label }} |{% endfor +%}
+|{% for column in columns %}---|{% endfor +%}
+|{% for column in columns %}{% set side = side_of(finding, column.which) %} {{ image(side, column.which) }}{{ cell(side) }} |{% endfor +%}
 {% endif %}
 {% endif %}
 {% endfor %}
