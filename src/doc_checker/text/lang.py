@@ -2,6 +2,7 @@
 """Detection and resolution of the language of a document."""
 
 import re
+from types import MappingProxyType
 from typing import Final
 
 from doc_checker.text.tokenize import TokenKind, tokenize
@@ -79,6 +80,11 @@ LANG_SAMPLE_BLOCKS: Final = 200
 # language, and how many times more than those of the other language.
 LANG_EVIDENCE_MIN: Final = 15
 LANG_RATIO: Final = 3.0
+# The stopwords that the text of a block needs before `block_language` names
+# its language.
+BLOCK_EVIDENCE_MIN: Final = 6
+# The names of the languages that a text can plainly read as.
+LANGUAGE_NAMES: Final = MappingProxyType({"fr": "French", "en": "English"})
 AUTO: Final = "auto"
 
 # A language of letters, then subtags of letters and digits after hyphens.
@@ -114,16 +120,21 @@ def detect_language(text: str) -> str | None:
     return "fr" if french > english else "en"
 
 
-def strong_language(text: str) -> str | None:
+def strong_language(
+    text: str,
+    *,
+    minimum: int = LANG_EVIDENCE_MIN,
+) -> str | None:
     """Tell whether a text is plainly French or plainly English.
 
     Args:
         text: Text sample.
+        minimum: The stopwords of its language that the text needs.
 
     Returns:
-        ``"fr"`` or ``"en"`` when the text has at least
-        `LANG_EVIDENCE_MIN` stopwords of that language and at least
-        `LANG_RATIO` times as many as of the other one; else ``None``.
+        ``"fr"`` or ``"en"`` when the text has at least ``minimum``
+        stopwords of that language and at least `LANG_RATIO` times as many
+        as of the other one; else ``None``.
     """
     french, english = _stopword_counts(text)
     language, found, other = (
@@ -131,9 +142,24 @@ def strong_language(text: str) -> str | None:
         if french > english
         else ("en", english, french)
     )
-    if found < LANG_EVIDENCE_MIN or found < LANG_RATIO * other:
+    if found < minimum or found < LANG_RATIO * other:
         return None
     return language
+
+
+def block_language(text: str) -> str | None:
+    """Tell whether the text of a block is plainly French or English.
+
+    Args:
+        text: The text of the block.
+
+    Returns:
+        ``"fr"`` or ``"en"`` when the text has at least
+        `BLOCK_EVIDENCE_MIN` stopwords of that language and at least
+        `LANG_RATIO` times as many as of the other one, as
+        `strong_language` counts them; else ``None``.
+    """
+    return strong_language(text, minimum=BLOCK_EVIDENCE_MIN)
 
 
 def declared_language(declared: str | None) -> str | None:

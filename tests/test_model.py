@@ -207,7 +207,7 @@ def test_missing_content_rules_are_critical() -> None:
 
 def test_rule_registry_is_consistent() -> None:
     """Every rule is registered under its own identifier."""
-    assert len(RULES) == 69
+    assert len(RULES) == 83
     assert all(spec.id == key for key, spec in RULES.items())
 
 
@@ -272,3 +272,9 @@ def test_accessibility_is_the_last_category() -> None:
     """The new category comes last and has its report title."""
     assert list(Category)[-1] is Category.ACCESSIBILITY
     assert CATEGORY_TITLES[Category.ACCESSIBILITY] == "Accessibility"
+
+
+def test_blocks_and_documents_have_no_code_by_default() -> None:
+    """Inline code spans and monospaced words are empty by default."""
+    assert make_block("x y").code_spans == ()
+    assert make_document(make_block("x y")).code_words == frozenset()

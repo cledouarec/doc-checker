@@ -2953,6 +2953,33 @@ def build_numbered_pdf(
     return out
 
 
+def build_inline_code_pdf(
+    path: Path,
+    parts: Sequence[tuple[str, bool]],
+) -> Path:
+    """Write an A4 PDF of one line whose parts of code are in Courier.
+
+    The line is in Helvetica 11, 72 pt from the left edge, each part in
+    Courier 11 when its flag is set, the parts one after the other with no
+    blank added between them.
+
+    Args:
+        path: The PDF file to write.
+        parts: The texts of the line, in order, each with whether it is code.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(path), pagesize=A4)
+    line = canvas.beginText(72, _H - 72)
+    for text, code in parts:
+        line.setFont("Courier" if code else "Helvetica", 11)
+        line.textOut(text)
+    canvas.drawText(line)
+    canvas.save()
+    return path
+
+
 def swap_pages(source: Path, out: Path, first: int, second: int) -> Path:
     """Copy a PDF with two of its pages swapped.
 

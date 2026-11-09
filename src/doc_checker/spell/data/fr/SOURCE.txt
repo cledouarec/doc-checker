@@ -1,0 +1,16 @@
+Project: Grammalecte, French Hunspell dictionaries
+         ("toutes variantes": both spellings of the 1990 reform)
+Archive: https://grammalecte.net/dic/hunspell-french-dictionaries-v7.7.zip
+Version: 7.7
+Date: 2025-12-15
+License: MPL-2.0 (see LICENSE)
+
+SHA-256 of the archive:
+44314d992f94b4658c31a86ef2351724a43067531b0af3643f91bf0220eee616
+
+SHA-256 of the files shipped:
+254756d4fd286a923b3f51dae65965bfc8619aa96db8528326bf31fcdc0840e4  fr-toutesvariantes.aff
+140c5296b514bc55af7433f8913a73245b9b18116830a7db48e2aabfa85fcbed  fr-toutesvariantes.dic
+4a25abf740ad6ba5e8d0cfc0d2ffadc3c13c303f8fe389f323b061a389350f83  README_dict_fr.txt
+
+Files shipped unchanged.

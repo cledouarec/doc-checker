@@ -74,7 +74,7 @@ from doc_checker.text.lang import (
     declared_language,
     resolve_language,
 )
-from doc_checker.text.normalize import printable
+from doc_checker.text.normalize import normalize_display, printable
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -242,7 +242,9 @@ def _to_block(
 ) -> Block:
     """Return the normalized block of a raw block: keys, links, anchors.
 
-    The block of an image has its image read instead.
+    Its inline code is normalized as its text is, but not counted, as the
+    text of the block counts it already; a code that has nothing left but
+    blanks is left out. The block of an image has its image read instead.
     """
     if raw.image is not None:
         return _image_block(raw, raw.image, rel_path, images)
@@ -254,10 +256,12 @@ def _to_block(
         level=raw.level,
         attrs={_ROLE: raw.role} if raw.role else None,
     )
+    code = (normalize_display(text, Counter()) for text in raw.code)
     return replace(
         block,
         links=resolve(raw.links, rel_path),
         anchors=raw.ids,
+        code_spans=tuple(text for text in code if text.strip()),
     )
 
 

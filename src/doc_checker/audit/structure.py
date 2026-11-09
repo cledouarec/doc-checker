@@ -20,10 +20,11 @@ two bookmarks of the same parent with the same title, case ignored.
 
 A reference is unresolved where a block that is neither code, formula,
 table, contents, index nor image holds a lone ``??`` or ``[?]``, or, in
-HTML only, a literal ``[text][label]``; an HTML page also tells the
-references its DOM left without a target, each placed on the block of its
-source line. Each block gives one draft per kind of reference, which marks
-the first one.
+HTML only, a literal ``[text][label]``, that touches none of its inline
+code, as `code_ranges` places it; an HTML page also tells the references
+its DOM left without a target, each placed on the block of its source
+line. Each block gives one draft per kind of reference, which marks the
+first one.
 
 A figure or a table without a caption is reported only in a document that
 captions at least one figure, or table. A table, or a figure of an HTML
@@ -43,6 +44,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter
 from typing import TYPE_CHECKING, Final
 
+from doc_checker.audit.prose import code_ranges
 from doc_checker.audit.sides import block_side, image_side, quote
 from doc_checker.compare.drafts import ARROW, Draft, marked_side, marked_span
 from doc_checker.extract.pdf.headings import MAX_LEVEL
@@ -52,6 +54,7 @@ from doc_checker.model.document import (
     BlockKind,
     SourceRef,
 )
+from doc_checker.spell.words import touches
 from doc_checker.text.normalize import normalize_display, printable
 
 if TYPE_CHECKING:
@@ -60,13 +63,17 @@ if TYPE_CHECKING:
     from doc_checker.model.document import Block, Document
     from doc_checker.model.facts import HtmlPageFacts, Spot, TaggedElement
     from doc_checker.model.findings import Side
+    from doc_checker.spell.words import Span
 
-UNRESOLVED_MARK: Final = re.compile(r"(?<![\w?])\?\?(?![\w?])")
+UNRESOLVED_MARK: Final = re.compile(r"(?<![\w?=])\?\?(?![\w?=])")
 MISSING_CITATION: Final = re.compile(r"\[\?\]")
+# One quantifier per bracket keeps the scan linear; the letter and the
+# character class are checked in Python, on the match.
 MARKDOWN_REFERENCE: Final = re.compile(
-    r"(?<![\w\])\[])\[([^\[\]\n]*[^\W\d_][^\[\]\n]*)\]"
-    r"\[([^\[\]\n]*)\](?![\[(])",
+    r"(?<![\w\])\[])\[([^\[\]\n<>/]*)\]\[([^\[\]\n<>/]*)\](?![\[(])",
 )
+CHARACTER_CLASS: Final = re.compile(r"(?:[^\W_]-[^\W_])+")
+_LETTER: Final = re.compile(r"[^\W\d_]")
 
 _SKIPPED: Final = "structure.heading_skipped"
 _EMPTY: Final = "structure.empty_section"
@@ -592,12 +599,24 @@ def _text_references(
     block: Block,
     patterns: Sequence[tuple[str, re.Pattern[str]]],
 ) -> list[Draft]:
-    """Return one draft per kind of unresolved reference that a text holds."""
+    """Return one draft per kind of unresolved reference that a text holds.
+
+    A reference that touches the inline code of the block is code, such as
+    the ``??`` operator.
+    """
     if block.kind in _NO_REFERENCES:
         return []
     drafts: list[Draft] = []
+    code: list[Span] | None = None  # Placed once, if a pattern matches.
     for name, pattern in patterns:
-        matches = list(pattern.finditer(block.text))
+        matches = [
+            m
+            for m in pattern.finditer(block.text)
+            if pattern is not MARKDOWN_REFERENCE or _is_reference(m[1])
+        ]
+        if matches and block.code_spans:
+            code = code_ranges(block) if code is None else code
+            matches = [m for m in matches if not touches(m.span(), code)]
         if matches:
             side = marked_span(
                 block.source,
@@ -608,6 +627,14 @@ def _text_references(
             detail = f"{len(matches)} unresolved reference(s) in this block"
             drafts.append(Draft(_UNRESOLVED, None, side, None, detail, name))
     return drafts
+
+
+def _is_reference(text: str) -> bool:
+    """Return whether the text of a ``[text][label]`` can name something.
+
+    It holds a letter and is not a character class such as ``0-9a-f``.
+    """
+    return bool(_LETTER.search(text)) and not CHARACTER_CLASS.fullmatch(text)
 
 
 def _unresolved_references(doc: Document) -> list[Draft]:

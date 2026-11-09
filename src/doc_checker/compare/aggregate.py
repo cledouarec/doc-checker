@@ -12,6 +12,7 @@ its findings: severities, filters, identifiers, then groups.
 
 import difflib
 from collections import Counter
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.compare.drafts import ARROW
@@ -22,12 +23,16 @@ from doc_checker.rules import get_rule
 from doc_checker.text.normalize import truncate
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from doc_checker.compare.drafts import Draft
     from doc_checker.config import Config
 
 GROUP_MIN_OCCURRENCES: Final = 5
+# Rules that group sooner: a misspelled word is one fix wherever it occurs.
+GROUP_MIN_BY_RULE: Final[Mapping[str, int]] = MappingProxyType(
+    {"text.unknown_word": 2, "text.unknown_name": 2, "text.jargon": 2},
+)
 PATTERN_MAX_CHARS: Final = 80
 # The empty set, for what a change leaves out or brings in.
 EMPTY: Final = "\U00002205"
@@ -156,8 +161,9 @@ def group_findings(findings: Sequence[Finding]) -> list[Finding]:
 
     Returns:
         The findings, where those of one rule and pattern, at least
-        `GROUP_MIN_OCCURRENCES` of them, are replaced by one group at the
-        place of the first. Findings without a pattern are kept.
+        `GROUP_MIN_BY_RULE` of the rule (`GROUP_MIN_OCCURRENCES` by
+        default) of them, are replaced by one group at the place of the
+        first. Findings without a pattern are kept.
     """
     counts = Counter(
         (f.rule, f.pattern) for f in findings if f.pattern is not None
@@ -165,7 +171,10 @@ def group_findings(findings: Sequence[Finding]) -> list[Finding]:
     members: dict[tuple[str, str | None], list[Finding]] = {}
     for finding in findings:
         key = (finding.rule, finding.pattern)
-        if counts[key] >= GROUP_MIN_OCCURRENCES:
+        if counts[key] >= GROUP_MIN_BY_RULE.get(
+            finding.rule,
+            GROUP_MIN_OCCURRENCES,
+        ):
             members.setdefault(key, []).append(finding)
     result: list[Finding] = []
     for finding in findings:
