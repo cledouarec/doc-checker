@@ -2,13 +2,14 @@
 """Tests for the engine of the audit."""
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from doc_checker.audit.engine import AuditStats, audit_document
 from doc_checker.compare.drafts import EXCERPT_MAX_CHARS, marked_side
 from doc_checker.config import Config, IgnoreConfig
 from doc_checker.images.refs import raster_ref
-from doc_checker.model.document import BlockKind, SourceRef
-from doc_checker.model.facts import PdfLink, PdfPageFacts
+from doc_checker.model.document import BlockKind, Link, SourceRef
+from doc_checker.model.facts import HtmlPageFacts, PdfLink, PdfPageFacts
 from doc_checker.model.findings import Severity
 from doc_checker.text.normalize import ELLIPSIS
 from tests.builders import (
@@ -18,6 +19,9 @@ from tests.builders import (
     make_image_block,
 )
 from tests.image_builders import drawing, encode
+
+if TYPE_CHECKING:
+    from doc_checker.model.document import Document
 
 STRUCTURE_ONLY = Config(checks=("structure",))
 
@@ -155,3 +159,62 @@ def test_marked_side_cuts_around_its_mark() -> None:
         ("mark", "MARK"),
         ("equal", "b" * half + ELLIPSIS),
     ]
+
+
+def _ids(doc: Document, rule: str) -> list[str]:
+    """Return the identifiers of the findings of a rule of an audit."""
+    return [
+        f.id for f in audit_document(doc, Config()).findings if f.rule == rule
+    ]
+
+
+def test_findings_of_one_rule_in_one_block_have_their_own_ids() -> None:
+    """Two broken links, two vague links, two kinds of reference differ."""
+    links = replace(
+        make_block(
+            "Read the install guide and the upgrade guide, or here or here.",
+        ),
+        links=(
+            Link("install guide", "install.html", page="install.html"),
+            Link("upgrade guide", "upgrade.html", page="upgrade.html"),
+            Link("here", "https://example.org", url="//example.org"),
+            Link("here", "https://example.com", url="//example.com"),
+        ),
+    )
+    doc = make_audit_document(
+        links,
+        make_block("See Section ?? and [?] for the limits."),
+        html_pages=(HtmlPageFacts("index.html", "en", "Home"),),
+    )
+    for rule in (
+        "link.page_missing",
+        "a11y.link_text",
+        "structure.unresolved_reference",
+    ):
+        ids = _ids(doc, rule)
+        assert len(ids) == len(set(ids)) == 2
+
+
+def test_same_findings_on_two_pdf_pages_share_their_id() -> None:
+    """The page is not part of an identifier: a repeated text shares it."""
+    links = (PdfLink("the manual", "file", "gone.pdf", valid=False),)
+    pages = tuple(
+        PdfPageFacts(number, str(number), 10, 0, scanned=False, links=links)
+        for number in (1, 2)
+    )
+    blocks = [
+        replace(
+            make_block("See Section ?? below.", file="doc.pdf"),
+            source=SourceRef("doc.pdf", page=number),
+        )
+        for number in (1, 2)
+    ]
+    doc = make_audit_document(
+        *blocks,
+        fmt="pdf",
+        parts=["1", "2"],
+        pdf_pages=pages,
+    )
+    for rule in ("link.file_missing", "structure.unresolved_reference"):
+        first, second = _ids(doc, rule)
+        assert first == second

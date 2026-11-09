@@ -23,6 +23,7 @@ from doc_checker.images.pixels import (
     jpeg_quality,
     open_raster,
     uses_alpha,
+    web_signature,
 )
 from doc_checker.images.refs import (
     content_digest,
@@ -186,6 +187,41 @@ def test_formats_other_than_web_rasters_cannot_be_decoded(fmt: str) -> None:
     assert raster_ref(data, name="a.png", source=None).problem == (
         "cannot decode"
     )
+
+
+@pytest.mark.parametrize(
+    ("head", "expected"),
+    [
+        (b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf", "avif"),
+        (b"\x00\x00\x00\x18ftypavis\x00\x00\x00\x00avismsf1", "avif"),
+        (b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1avif", "avif"),
+        (b"\xff\xff\xff\xffftypmif1\x00\x00\x00\x00mif1avif", "avif"),
+        (b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic", None),
+        (b"\x00\x00\x00\x10ftypmif1\x00\x00\x00\x00avif", None),
+        (b"\xff\x0a", "jxl"),
+        (b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a", "jxl"),
+        (b"\x00\x00\x00\x0cftyp", None),
+        (b"\x89PNG\r\n\x1a\n", None),
+        (b"", None),
+    ],
+)
+def test_web_signatures(head: bytes, expected: str | None) -> None:
+    """AVIF by the brands of its file type box, JPEG XL by its signature."""
+    assert web_signature(head + bytes(32)) == expected
+
+
+def test_undecoded_web_image_keeps_its_web_format() -> None:
+    """An AVIF cannot be decoded, but its reference tells what it is."""
+    avif = b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf"
+    ref = raster_ref(avif + bytes(64), name="", source=None)
+    assert (ref.problem, ref.format, ref.web_format) == (
+        "cannot decode",
+        "",
+        "avif",
+    )
+    png = raster_ref(encode(drawing("setup")), name="a.png", source=None)
+    garbage = raster_ref(b"\x89PNX" + bytes(64), name="a.png", source=None)
+    assert (png.web_format, garbage.web_format) == (None, None)
 
 
 def test_multi_picture_jpeg_is_a_jpeg() -> None:

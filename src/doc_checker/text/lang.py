@@ -72,11 +72,30 @@ EN_STOPWORDS: Final[frozenset[str]] = frozenset(
     ],
 )
 MIN_EVIDENCE: Final = 5
+# The blocks whose text tells the language of a document: the loaders read
+# its first blocks of text, the audit its first blocks of prose.
+LANG_SAMPLE_BLOCKS: Final = 200
+# The stopwords that a text needs before `strong_language` names its
+# language, and how many times more than those of the other language.
+LANG_EVIDENCE_MIN: Final = 15
+LANG_RATIO: Final = 3.0
 AUTO: Final = "auto"
 
 # A language of letters, then subtags of letters and digits after hyphens.
 _LANGUAGE_TAG: Final = re.compile(r"[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*")
 _SUBTAG_SEPARATOR: Final = re.compile(r"[-_]")
+
+
+def _stopword_counts(text: str) -> tuple[int, int]:
+    """Return the French and the English stopwords of a text."""
+    words = [
+        token.text.casefold()
+        for token in tokenize(text)
+        if token.kind is TokenKind.WORD
+    ]
+    french = sum(word in FR_STOPWORDS for word in words)
+    english = sum(word in EN_STOPWORDS for word in words)
+    return french, english
 
 
 def detect_language(text: str) -> str | None:
@@ -89,16 +108,32 @@ def detect_language(text: str) -> str | None:
         ``"fr"``, ``"en"``, or ``None`` when the evidence is too weak or
         balanced.
     """
-    words = [
-        token.text.casefold()
-        for token in tokenize(text)
-        if token.kind is TokenKind.WORD
-    ]
-    french = sum(word in FR_STOPWORDS for word in words)
-    english = sum(word in EN_STOPWORDS for word in words)
+    french, english = _stopword_counts(text)
     if max(french, english) < MIN_EVIDENCE or french == english:
         return None
     return "fr" if french > english else "en"
+
+
+def strong_language(text: str) -> str | None:
+    """Tell whether a text is plainly French or plainly English.
+
+    Args:
+        text: Text sample.
+
+    Returns:
+        ``"fr"`` or ``"en"`` when the text has at least
+        `LANG_EVIDENCE_MIN` stopwords of that language and at least
+        `LANG_RATIO` times as many as of the other one; else ``None``.
+    """
+    french, english = _stopword_counts(text)
+    language, found, other = (
+        ("fr", french, english)
+        if french > english
+        else ("en", english, french)
+    )
+    if found < LANG_EVIDENCE_MIN or found < LANG_RATIO * other:
+        return None
+    return language
 
 
 def declared_language(declared: str | None) -> str | None:

@@ -68,7 +68,12 @@ from doc_checker.model.document import (
     carry_anchors,
 )
 from doc_checker.model.facts import HtmlPageFacts
-from doc_checker.text.lang import AUTO, declared_language, resolve_language
+from doc_checker.text.lang import (
+    AUTO,
+    LANG_SAMPLE_BLOCKS,
+    declared_language,
+    resolve_language,
+)
 from doc_checker.text.normalize import printable
 
 if TYPE_CHECKING:
@@ -84,7 +89,6 @@ if TYPE_CHECKING:
     from doc_checker.extract.html.site import HtmlPage
 
 _BODY_CHROME: Final = ("header", "footer", "aside")
-_LANG_SAMPLE_BLOCKS: Final = 200
 _ROLE: Final = "role"
 
 
@@ -502,7 +506,7 @@ def _sample(blocks: Sequence[Block]) -> str:
     return " ".join(
         islice(
             (block.text for block in blocks if not _is_image(block)),
-            _LANG_SAMPLE_BLOCKS,
+            LANG_SAMPLE_BLOCKS,
         ),
     )
 
