@@ -37,6 +37,10 @@ class HtmlPageFacts:
         empty_links: Links without an accessible name.
         unresolved: References that lead nowhere.
         bare_tables: Tables without a header cell.
+        media: Source lines of the embedded media of the content: iframe,
+            video, audio, object and embed, which give no block.
+        blockless: Source lines of the other content that gives no block:
+            a toctree, and a picture when the images are not read.
     """
 
     file: str
@@ -47,6 +51,8 @@ class HtmlPageFacts:
     empty_links: tuple[Spot, ...] = ()
     unresolved: tuple[Spot, ...] = ()
     bare_tables: tuple[Spot, ...] = ()
+    media: tuple[int, ...] = ()
+    blockless: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

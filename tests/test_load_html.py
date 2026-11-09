@@ -4,6 +4,7 @@
 import base64
 import dataclasses
 import html
+import posixpath
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,6 +15,7 @@ from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
 from doc_checker.extract.html import images as html_images
 from doc_checker.extract.html import load_html
+from doc_checker.extract.html.links import LinkResolver
 from doc_checker.images.refs import content_digest
 from doc_checker.model.document import NUMBER_ATTR, BlockKind
 from tests.builders import (
@@ -30,9 +32,10 @@ from tests.builders import (
 from tests.image_builders import drawing, encode
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
-    from doc_checker.model.document import Document, ImageRef
+    from doc_checker.model.document import Document, ImageRef, Link
 
 BANNER = "Docs for version 2.0."
 
@@ -502,3 +505,51 @@ def test_links_to_leaves_out_external_mail_and_fragments(
     doc = load_html(site, HtmlConfig(), lang="auto", audit=True)
     pages = {page.file: page.links_to for page in doc.html_pages}
     assert pages["index.html"] == frozenset({"other.html"})
+
+
+def _nav_site(root: Path, folders: Sequence[str], per_folder: int) -> None:
+    """Write pages whose navigation links every page of the site."""
+    pages = [f"{f}/p{n}.html" for f in folders for n in range(per_folder)]
+    for page in pages:
+        folder = posixpath.dirname(page)
+        nav = "".join(
+            f'<a href="{posixpath.relpath(target, folder)}">{target}</a>'
+            for target in pages
+        )
+        extra = '<a href="?q=1">q</a><a href="#top">t</a><a href="">e</a>'
+        path = root / page
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"<html lang='en'><head><title>{page}</title></head><body>"
+            f"<nav>{nav}{extra}<a href='https://example.org'>x</a></nav>"
+            f"<main><h1>{page}</h1><p>Text of {page}.</p></main>"
+            "</body></html>",
+            encoding="utf-8",
+        )
+
+
+def test_page_links_are_resolved_once_per_folder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A navigation shared by the pages of a folder is resolved once."""
+    _nav_site(tmp_path / "s", ("a", "b"), 15)
+    calls: list[str] = []
+    link = LinkResolver.link
+
+    def counted(
+        self: LinkResolver,
+        text: str,
+        href: str,
+        page: str,
+    ) -> Link | None:
+        """Count a call, then make it."""
+        calls.append(href)
+        return link(self, text, href, page)
+
+    monkeypatch.setattr(LinkResolver, "link", counted)
+    doc = load_document(tmp_path / "s", Config(), audit=True)
+    assert len(calls) <= 2 * (30 + 1)
+    for page in doc.html_pages:
+        others = {p.file for p in doc.html_pages} - {page.file}
+        assert page.links_to == others

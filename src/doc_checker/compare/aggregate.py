@@ -1,10 +1,13 @@
 # Copyright 2026 Christophe Le Douarec
-"""Patterns of findings, and the groups of systematic patterns.
+"""Patterns of findings, the groups of systematic patterns, and the findings.
 
 A pattern says what a finding changes, such as the substitution of an
 e-acute by an e for an accent that was lost. Once five findings of one rule
 share a pattern, they are replaced by a single group that keeps them as its
 occurrences.
+
+`finalize_drafts` turns the drafts of a command, `compare` or `audit`, into
+its findings: severities, filters, identifiers, then groups.
 """
 
 import difflib
@@ -13,11 +16,16 @@ from typing import TYPE_CHECKING, Final
 
 from doc_checker.compare.drafts import ARROW
 from doc_checker.compare.textdiff import without_letter_hyphens
-from doc_checker.model.findings import Finding, group_id
+from doc_checker.config import rule_disabled
+from doc_checker.model.findings import Finding, finding_id, group_id
+from doc_checker.rules import get_rule
 from doc_checker.text.normalize import truncate
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
+
+    from doc_checker.compare.drafts import Draft
+    from doc_checker.config import Config
 
 GROUP_MIN_OCCURRENCES: Final = 5
 PATTERN_MAX_CHARS: Final = 80
@@ -167,3 +175,51 @@ def group_findings(findings: Sequence[Finding]) -> list[Finding]:
         elif members[key][0] is finding:
             result.append(_group(members[key]))
     return result
+
+
+def finalize_drafts(drafts: Iterable[Draft], cfg: Config) -> list[Finding]:
+    """Return the findings, with overrides, filters, identifiers and groups.
+
+    A finding is left out before the grouping if its identifier is ignored,
+    or if the identifier of the group of its rule and pattern is: an ignored
+    group stays ignored when fewer findings than a group needs are left.
+
+    Args:
+        drafts: The drafts of a command, in order.
+        cfg: Run configuration.
+
+    Returns:
+        The findings of the drafts whose rule is enabled, whose severity,
+        after the overrides of the configuration, reaches its minimum, and
+        that are not ignored, in order, grouped by `group_findings`.
+    """
+    findings = []
+    ignored = cfg.ignore.findings
+    for draft in drafts:
+        if rule_disabled(cfg, draft.rule):
+            continue
+        spec = get_rule(draft.rule)
+        default = spec.severity if draft.severity is None else draft.severity
+        severity = cfg.severity.get(draft.rule, default)
+        if severity < cfg.min_severity:
+            continue
+        identifier = finding_id(draft.rule, draft.ref, draft.new)
+        if identifier in ignored or (
+            draft.pattern is not None
+            and group_id(draft.rule, draft.pattern) in ignored
+        ):
+            continue
+        findings.append(
+            Finding(
+                draft.rule,
+                severity,
+                spec.category,
+                spec.title,
+                draft.ref,
+                draft.new,
+                draft.detail,
+                identifier,
+                draft.pattern,
+            ),
+        )
+    return group_findings(findings)

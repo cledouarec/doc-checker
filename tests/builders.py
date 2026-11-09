@@ -14,8 +14,12 @@ from typing import TYPE_CHECKING, Literal
 
 from doc_checker.compare.engine import compare_documents
 from doc_checker.config import Config
+from doc_checker.extract.common import assign_section_paths
 from doc_checker.images.refs import raster_ref
 from doc_checker.model.document import (
+    FROM_OUTLINE,
+    FROM_STYLE,
+    HEADING_SOURCE,
     Block,
     BlockKind,
     Document,
@@ -1240,6 +1244,59 @@ def make_document(
         chrome_keys=chrome_keys,
         warnings=[],
     )
+
+
+def make_heading(
+    text: str,
+    level: int,
+    *,
+    file: str = "index.html",
+    page: int | None = None,
+    outline: bool = False,
+) -> Block:
+    """Return a normalized heading, of a page of a PDF if a page is given.
+
+    A heading found by a bookmark has `FROM_OUTLINE` as its source, else a
+    heading of a PDF page has `FROM_STYLE`; an HTML heading has none.
+    """
+    if outline:
+        attrs = {HEADING_SOURCE: FROM_OUTLINE}
+    elif page is not None:
+        attrs = {HEADING_SOURCE: FROM_STYLE}
+    else:
+        attrs = {}
+    block = make_block(text, BlockKind.HEADING, file=file, level=level)
+    return replace(block, source=SourceRef(file, page=page), attrs=attrs)
+
+
+def make_audit_document(
+    *blocks: Block,
+    fmt: Literal["html", "pdf"] = "html",
+    parts: Sequence[str] | None = None,
+    **facts: object,
+) -> Document:
+    """Return an English document of the given blocks, as the audit reads it.
+
+    Args:
+        blocks: The blocks, in reading order; their section paths are set.
+        fmt: Format of the document: an HTML site ``doc`` or ``doc.pdf``.
+        parts: Its pages, by default one: ``index.html`` or ``1``.
+        facts: Other fields of the document, such as ``html_pages``.
+
+    Returns:
+        The document, tagged if it is a PDF.
+    """
+    pdf = fmt == "pdf"
+    default = ["1"] if pdf else ["index.html"]
+    doc = replace(
+        make_document(*blocks),
+        path=Path("doc.pdf" if pdf else "doc"),
+        format=fmt,
+        parts=list(default if parts is None else parts),
+        tagged=True if pdf else None,
+    )
+    assign_section_paths(doc.blocks)
+    return replace(doc, **facts)
 
 
 def with_figures(spec: DocSpec) -> DocSpec:
