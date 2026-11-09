@@ -546,3 +546,16 @@ def test_empty_word_list_is_an_empty_file(tmp_path: Path) -> None:
     result = CliRunner().invoke(main, [*cmd, "--emit-wordlist", str(words)])
     assert result.exit_code == 0, result.output
     assert words.read_bytes() == b""
+
+
+def test_page_over_the_size_limit_exits_3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized page is an unreadable input."""
+    monkeypatch.setattr("doc_checker.extract.html.site.MAX_PAGE_BYTES", 1_000)
+    page = tmp_path / "big.html"
+    page.write_text("<p>" + "word " * 400 + "</p>", encoding="utf-8")
+    result = CliRunner().invoke(main, ["extract", str(page)])
+    assert result.exit_code == 3
+    assert "more than the 1000 bytes" in result.output

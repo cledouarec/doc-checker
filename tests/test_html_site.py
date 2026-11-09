@@ -155,3 +155,21 @@ def test_find_chrome() -> None:
     for page in middle:
         page[6] = banner
     assert find_chrome(middle) == frozenset()
+
+
+def test_page_over_the_size_limit_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page larger than the limit is not read, and the error says why."""
+    monkeypatch.setattr("doc_checker.extract.html.site.MAX_PAGE_BYTES", 1_000)
+
+    def unread(_self: Path) -> bytes:
+        msg = "the page was read"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("pathlib.Path.read_bytes", unread)
+    page = tmp_path / "big.html"
+    page.write_text("<p>" + "word " * 400 + "</p>", encoding="utf-8")
+    with pytest.raises(InputError, match="more than the 1000 bytes"):
+        parse_page(page, "big.html")

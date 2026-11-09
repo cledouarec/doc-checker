@@ -32,6 +32,7 @@ _REFRESH_URL: Final = re.compile(
     r"""url\s*=\s*['"]?([^'"\s;]+)""",
     re.IGNORECASE,
 )
+MAX_PAGE_BYTES: Final = 100_000_000
 _DEFAULT_CHARSET: Final = "utf-8"
 _REFRESH: Final = "refresh"
 
@@ -114,9 +115,17 @@ def parse_page(path: Path, rel_path: str) -> HtmlPage:
         The parsed page.
 
     Raises:
-        InputError: If the file cannot be read or holds no HTML.
+        InputError: If the file cannot be read, is larger than
+            `MAX_PAGE_BYTES`, or holds no HTML.
     """
     try:
+        size = path.stat().st_size
+        if size > MAX_PAGE_BYTES:
+            msg = (
+                f"cannot read {rel_path}: {size} bytes, more than the "
+                f"{MAX_PAGE_BYTES} bytes that a page may have"
+            )
+            raise InputError(msg)
         data = path.read_bytes()
     except OSError as exc:
         msg = f"cannot read {rel_path}: {exc.strerror}"

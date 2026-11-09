@@ -1,17 +1,21 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the filter chains of PDF image streams and their codec headers."""
 
+import io
 import os
 import struct
 import time
 import zlib
 
 import pytest
+from PIL import Image
 
 from doc_checker.images.streams import (
+    MAX_JPEG_SCANS,
     full_filters,
     inflated_length,
     jpeg_header,
+    jpeg_scans,
     jpx_header,
 )
 from tests.image_builders import (
@@ -21,6 +25,7 @@ from tests.image_builders import (
     jpeg_of_components,
     jpx_announcing,
     jpx_of_components,
+    progressive_jpeg,
 )
 
 _JPEG = encode(drawing("setup"), "JPEG", quality=90)
@@ -125,3 +130,36 @@ def test_jpx_header_of_a_codestream_and_of_a_jp2_file() -> None:
     assert jpx_header(jp2[:40]) is None
     no_component = jpx_announcing(400, 250)
     assert jpx_header(no_component[:40] + bytes(2) + no_component[42:]) is None
+
+
+def test_jpeg_scans_are_counted() -> None:
+    """Baseline, progressive and crafted JPEGs count their scans."""
+    image = Image.new("RGB", (64, 64), (200, 30, 30))
+    baseline = io.BytesIO()
+    image.save(baseline, "JPEG")
+    assert jpeg_scans(baseline.getvalue()) == 1
+    assert 2 <= jpeg_scans(progressive_jpeg(0)) <= 12
+    assert jpeg_scans(progressive_jpeg(200)) == MAX_JPEG_SCANS + 1
+
+
+def test_jpeg_scans_survive_damaged_data() -> None:
+    """Truncated, garbage and filled data give a count and never raise."""
+    jpeg = progressive_jpeg(3)
+    assert jpeg_scans(b"") == 0
+    assert jpeg_scans(b"not a jpeg") == 0
+    assert jpeg_scans(b"\xff\xd8\xff") == 0
+    assert jpeg_scans(jpeg + b"\xff") == jpeg_scans(jpeg)
+    for end in range(len(jpeg)):
+        assert 0 <= jpeg_scans(jpeg[:end]) <= MAX_JPEG_SCANS + 1
+    filled = jpeg.replace(b"\xff\xd9", b"\xff" * 500 + b"\xff\xd9")
+    assert jpeg_scans(filled) == jpeg_scans(jpeg)
+    assert jpeg_scans(b"\xff\xd8" + b"\xff" * 100_000) == 0
+    assert jpeg_scans(b"\xff\xd8" + b"\xff\xda\x00" * 10) <= MAX_JPEG_SCANS + 1
+
+
+def test_jpeg_of_many_markers_is_refused_quickly() -> None:
+    """A stream of standalone markers or tiny segments counts as too many."""
+    for body in (b"\xff\x01" * 200_000, b"\xff\xfe\x00\x02" * 200_000):
+        start = time.perf_counter()
+        assert jpeg_scans(b"\xff\xd8" + body) == MAX_JPEG_SCANS + 1
+        assert time.perf_counter() - start < 1.0

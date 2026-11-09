@@ -3,7 +3,9 @@
 
 import base64
 import html
+import random
 import re
+import string
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -70,6 +72,23 @@ def make_block(
         key_strict=strict,
         key_loose=loose_key(strict),
     )
+
+
+def random_blocks(
+    seed: int,
+    count: int,
+    words: int = 12,
+) -> list[Block]:
+    """Return paragraphs of random words: two seeds give unrelated blocks."""
+    rng = random.Random(seed)  # ruff: ignore[suspicious-non-cryptographic-random-usage] - test data
+
+    def word() -> str:
+        return "".join(rng.choices(string.ascii_lowercase, k=7))
+
+    return [
+        make_block(" ".join(word() for _ in range(words)))
+        for _ in range(count)
+    ]
 
 
 type Defect = Literal[

@@ -11,8 +11,8 @@
 
 import bisect
 import itertools
-from collections import Counter
-from dataclasses import dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
@@ -29,8 +29,18 @@ GREEDY_WINDOW: Final = 50
 SPLIT_MERGE_RATIO: Final = 0.9
 MAX_SPLIT_PARTS: Final = 6
 MAX_STRUCTURE_PARTS: Final = 100
+# The work an alignment may spend, in units of `_Budget.take`: a base plus
+# an amount per character of the loose keys of both documents.
+ALIGN_WORK_BASE: Final = 10_000_000
+ALIGN_WORK_PER_CHAR: Final = 1_000
 
 _PERCENT: Final = 100
+# The characters `fuzz.ratio` compares in one unit of work, per query block.
+_CHARS_PER_WORD: Final = 64
+# Units of work, at about 2 ns each, of a call of `fuzz.ratio` on two empty
+# texts, and of one more choice of `process.extractOne`.
+_CALL_COST: Final = 200
+_CHOICE_COST: Final = 50
 # The score of `fuzz.ratio` that a split or a merge must reach.
 _SPLIT_SCORE: Final = SPLIT_MERGE_RATIO * _PERCENT
 # The kinds whose blocks may split into many parts: a table into one block
@@ -72,6 +82,83 @@ class Pair:
     moved: bool = False
 
 
+@dataclass(slots=True)
+class _Budget:
+    """The work left to an alignment, shared by all its fuzzy comparisons.
+
+    A comparison of a query with some choices costs about
+    ``(len(query) // 64 + 1)`` units per character of the choices, plus one
+    per choice. Once a comparison does not fit, the budget is exhausted for
+    good and every later block is only paired with an identical one.
+
+    Attributes:
+        limit: Units the alignment may spend.
+        spent: Units spent so far.
+        exhausted: Whether a comparison did not fit.
+        skipped: The blocks, as (side, index), that were not fully searched.
+    """
+
+    limit: int
+    spent: int = 0
+    exhausted: bool = False
+    skipped: set[tuple[str, int]] = field(default_factory=set)
+
+    def take(self, cost: int) -> bool:
+        """Charge a cost and return whether it fits.
+
+        Args:
+            cost: Units of work of a comparison.
+
+        Returns:
+            Whether the comparison may be made.
+        """
+        if self.exhausted or self.spent + cost > self.limit:
+            self.exhausted = True
+            return False
+        self.spent += cost
+        return True
+
+    def search(self, query: int, chars: int, count: int) -> bool:
+        """Charge a query compared with choices by ``process.extractOne``.
+
+        The pattern of the query is built once, then scanned against every
+        choice.
+
+        Args:
+            query: Length of the query text.
+            chars: Total length of the choices.
+            count: Number of choices.
+
+        Returns:
+            Whether the comparison may be made.
+        """
+        cost = (query // _CHARS_PER_WORD + 1) * chars + count * _CHOICE_COST
+        return self.take(cost + query + _CALL_COST)
+
+
+def _call_cost(first: int, second: int) -> int:
+    """Return the work of ``fuzz.ratio`` on two texts of given lengths.
+
+    A call builds the pattern of the longer text, then scans the shorter.
+    """
+    longest, shortest = max(first, second), min(first, second)
+    return (longest // _CHARS_PER_WORD + 1) * shortest + longest + _CALL_COST
+
+
+@dataclass(frozen=True, slots=True)
+class Alignment:
+    """The alignment of two block lists.
+
+    Attributes:
+        pairs: The pairs, in reference order.
+        unsearched: Blocks that were compared by identical text only, the
+            work limit being reached.
+    """
+
+    pairs: list[Pair]
+    unsearched: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     """A split or merge found inside a gap, in gap positions."""
@@ -82,6 +169,28 @@ class _Candidate:
     new_start: int
     new_end: int
     pair: Pair
+
+
+class _Exact:
+    """The columns of a gap by loose key, to pair identical blocks in order.
+
+    Attributes:
+        positions: For each loose key, the positions of the columns that
+            have it, in order.
+    """
+
+    def __init__(self, new: Sequence[Block], columns: Sequence[int]) -> None:
+        self.positions: dict[str, list[int]] = {}
+        for position, j in enumerate(columns):
+            self.positions.setdefault(new[j].key_loose, []).append(position)
+
+    def find(self, key: str, start: int, stop: int) -> int | None:
+        """Return the first position in ``[start, stop)`` of a key."""
+        positions = self.positions.get(key, [])
+        index = bisect.bisect_left(positions, start)
+        if index < len(positions) and positions[index] < stop:
+            return positions[index]
+        return None
 
 
 def _similarity(first: Block, second: Block) -> float:
@@ -176,35 +285,47 @@ def _unmatched(rows: Sequence[int], columns: Sequence[int]) -> list[Pair]:
     ]
 
 
-def _greedy(
+def _greedy(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] - the two documents, a gap of them and the shared budget
     ref: Sequence[Block],
     new: Sequence[Block],
     rows: Sequence[int],
     columns: Sequence[int],
     match: float,
+    budget: _Budget,
 ) -> list[Pair]:
-    """Return the pairs of a large gap, aligned greedily in a window."""
+    """Return the pairs of a large gap, aligned greedily in a window.
+
+    Once the budget is exhausted, a block is only paired with an identical
+    one of the window.
+    """
     pairs = []
     pointer = 0
     used: set[int] = set()
+    exact = _Exact(new, columns)
     for i in rows:
-        window = {
-            position: new[columns[position]].key_loose
-            for position in range(
-                pointer,
-                min(pointer + GREEDY_WINDOW, len(columns)),
-            )
-        }
-        found = process.extractOne(
-            ref[i].key_loose,
-            window,
-            scorer=fuzz.ratio,
-            score_cutoff=match * _PERCENT,
+        stop = min(pointer + GREEDY_WINDOW, len(columns))
+        chars = sum(
+            len(new[columns[k]].key_loose) for k in range(pointer, stop)
         )
-        if found is None:
+        if budget.search(len(ref[i].key_loose), chars, stop - pointer):
+            window = {
+                position: new[columns[position]].key_loose
+                for position in range(pointer, stop)
+            }
+            found = process.extractOne(
+                ref[i].key_loose,
+                window,
+                scorer=fuzz.ratio,
+                score_cutoff=match * _PERCENT,
+            )
+            position = None if found is None else found[2]
+        else:
+            if stop > pointer:
+                budget.skipped.add(("ref", i))
+            position = exact.find(ref[i].key_loose, pointer, stop)
+        if position is None:
             pairs.append(Pair(PairKind.DELETED, (i,), ()))
             continue
-        position = found[2]
         pairs.append(_matched(ref, new, (i, columns[position])))
         used.add(columns[position])
         pointer = position + 1
@@ -287,6 +408,8 @@ def _opens(first: Block, single: Block) -> bool:
 def _best_run(
     single: Block,
     runs: Sequence[Block],
+    budget: _Budget,
+    who: tuple[str, int],
 ) -> tuple[float, int, int] | None:
     """Return the best contiguous run of blocks equal to one block.
 
@@ -304,6 +427,8 @@ def _best_run(
     Args:
         single: The block that may have been split or merged.
         runs: Candidate blocks of the other side, in order.
+        budget: The work left; the search ends when it is exhausted.
+        who: The side and index of ``single``, counted as skipped then.
 
     Returns:
         The score, start and end of the best run, or ``None``.
@@ -315,8 +440,13 @@ def _best_run(
     best: tuple[float, int, int] | None = None
     for start in range(len(runs)):
         parts = MAX_SPLIT_PARTS
-        if structure and _opens(runs[start], single):
-            parts = MAX_STRUCTURE_PARTS
+        if structure:
+            prefix = min(len(runs[start].key_loose), size)
+            if not budget.take(_call_cost(prefix, prefix)):
+                budget.skipped.add(who)
+                return best
+            if _opens(runs[start], single):
+                parts = MAX_STRUCTURE_PARTS
         # The length of the keys of the run joined by blanks.
         length = len(runs[start].key_loose)
         for end in range(start + 2, min(start + parts, len(runs)) + 1):
@@ -325,6 +455,9 @@ def _best_run(
                 break
             if length < shortest:
                 continue
+            if not budget.take(_call_cost(size, length)):
+                budget.skipped.add(who)
+                return best
             joined = " ".join(block.key_loose for block in runs[start:end])
             ratio = (
                 fuzz.ratio(single.key_loose, joined, score_cutoff=_SPLIT_SCORE)
@@ -337,12 +470,13 @@ def _best_run(
     return best
 
 
-def _candidates(
+def _candidates(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] - the two documents, a gap of them and the shared budget
     ref: Sequence[Block],
     new: Sequence[Block],
     rows: Sequence[int],
     columns: Sequence[int],
     scores: Sequence[Sequence[float]],
+    budget: _Budget,
 ) -> list[_Candidate]:
     """Return the split and merge candidates of a gap."""
     found = []
@@ -350,7 +484,7 @@ def _candidates(
     for a, i in enumerate(rows):
         if max(scores[a]) >= SPLIT_MERGE_RATIO:
             continue
-        best = _best_run(ref[i], new_blocks)
+        best = _best_run(ref[i], new_blocks, budget, ("ref", i))
         if best is not None:
             ratio, start, end = best
             pair = Pair(PairKind.SPLIT, (i,), tuple(columns[start:end]))
@@ -359,7 +493,7 @@ def _candidates(
     for b, j in enumerate(columns):
         if max(row[b] for row in scores) >= SPLIT_MERGE_RATIO:
             continue
-        best = _best_run(new[j], ref_blocks)
+        best = _best_run(new[j], ref_blocks, budget, ("new", j))
         if best is not None:
             ratio, start, end = best
             pair = Pair(PairKind.MERGE, tuple(rows[start:end]), (j,))
@@ -391,18 +525,37 @@ def _select(candidates: list[_Candidate]) -> list[_Candidate]:
     return sorted(kept, key=lambda c: c.ref_start)
 
 
-def _align_gap(
+def _align_gap(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] - the two documents, a gap of them and the shared budget
     ref: Sequence[Block],
     new: Sequence[Block],
     rows: Sequence[int],
     columns: Sequence[int],
     match: float,
+    budget: _Budget,
 ) -> list[Pair]:
     """Return the pairs of the blocks of a gap between two anchors."""
     if not rows or not columns:
         return _unmatched(rows, columns)
     if len(rows) * len(columns) > MAX_DP_CELLS:
-        return _greedy(ref, new, rows, columns, match)
+        return _greedy(ref, new, rows, columns, match, budget)
+    lengths = [len(new[j].key_loose) for j in columns]
+    cost = sum(
+        _call_cost(len(ref[i].key_loose), length)
+        for i in rows
+        for length in lengths
+    )
+    if not budget.take(cost):
+        # No similarity matrix: align the identical blocks, in order.
+        budget.skipped.update(("ref", i) for i in rows)
+        return _dynamic(
+            rows,
+            columns,
+            lambda a, b: float(
+                ref[rows[a]].key_loose == new[columns[b]].key_loose,
+            ),
+            1.0,
+            lambda i, j: _matched(ref, new, (i, j)),
+        )
     scores = [[_similarity(ref[i], new[j]) for j in columns] for i in rows]
 
     def pair_of(i: int, j: int) -> Pair:
@@ -410,7 +563,9 @@ def _align_gap(
 
     pairs: list[Pair] = []
     row_start = column_start = 0
-    for candidate in _select(_candidates(ref, new, rows, columns, scores)):
+    for candidate in _select(
+        _candidates(ref, new, rows, columns, scores, budget),
+    ):
         pairs += _dynamic(
             rows[row_start : candidate.ref_start],
             columns[column_start : candidate.new_start],
@@ -435,13 +590,30 @@ def _match_leftovers(
     new: Sequence[Block],
     pairs: list[Pair],
     moved_match: float,
+    budget: _Budget,
 ) -> list[Pair]:
-    """Return the pairs with unmatched blocks paired as moved blocks."""
+    """Return the pairs with unmatched blocks paired as moved blocks.
+
+    Each search is charged to the budget. Once it does not fit, the missing
+    blocks left are only paired with the first added block left that has the
+    same loose key.
+
+    Args:
+        ref: Reference blocks.
+        new: New blocks.
+        pairs: The pairs found so far.
+        moved_match: Minimum similarity to pair a moved block.
+        budget: The work left.
+
+    Returns:
+        The pairs.
+    """
     inserted = {
         pair.new[0]: new[pair.new[0]].key_loose
         for pair in pairs
         if pair.kind is PairKind.INSERTED
     }
+    chars = sum(len(key) for key in inserted.values())
     deleted = sorted(
         pair.ref[0] for pair in pairs if pair.kind is PairKind.DELETED
     )
@@ -450,22 +622,32 @@ def _match_leftovers(
         for pair in pairs
         if pair.kind not in {PairKind.DELETED, PairKind.INSERTED}
     ]
+    by_key: dict[str, deque[int]] | None = None
     for i in deleted:
-        found = (
-            process.extractOne(
-                ref[i].key_loose,
-                inserted,
-                scorer=fuzz.ratio,
-                score_cutoff=moved_match * _PERCENT,
-            )
-            if inserted
-            else None
-        )
-        if found is None:
+        j = None
+        if inserted and by_key is None:
+            if budget.search(len(ref[i].key_loose), chars, len(inserted)):
+                found = process.extractOne(
+                    ref[i].key_loose,
+                    inserted,
+                    scorer=fuzz.ratio,
+                    score_cutoff=moved_match * _PERCENT,
+                )
+                j = None if found is None else found[2]
+            else:
+                by_key = {}
+                for position, key in inserted.items():
+                    by_key.setdefault(key, deque()).append(position)
+        if inserted and by_key is not None:
+            budget.skipped.add(("ref", i))
+            positions = by_key.get(ref[i].key_loose, deque())
+            while positions and positions[0] not in inserted:
+                positions.popleft()
+            j = positions[0] if positions else None
+        if j is None:
             result.append(Pair(PairKind.DELETED, (i,), ()))
             continue
-        j = found[2]
-        del inserted[j]
+        chars -= len(inserted.pop(j))
         result.append(_matched(ref, new, (i, j), moved=True))
     result += [Pair(PairKind.INSERTED, (), (j,)) for j in sorted(inserted)]
     return result
@@ -488,13 +670,14 @@ def _in_reference_order(pairs: list[Pair]) -> list[Pair]:
     return sorted(pairs, key=key)
 
 
-def align(
+def align_blocks(
     ref: Sequence[Block],
     new: Sequence[Block],
     *,
     match: float,
     moved_match: float,
-) -> list[Pair]:
+    work: int | None = None,
+) -> Alignment:
     """Align the blocks of a reference document with its new version.
 
     Args:
@@ -502,10 +685,18 @@ def align(
         new: New blocks, in reading order.
         match: Minimum similarity to pair blocks in place.
         moved_match: Minimum similarity to pair a moved block.
+        work: Units of work the alignment may spend; by default
+            `ALIGN_WORK_BASE` plus `ALIGN_WORK_PER_CHAR` per character of the
+            loose keys.
 
     Returns:
-        The pairs, in reference order.
+        The pairs, in reference order, and the number of blocks compared by
+        identical text only because of the work limit.
     """
+    if work is None:
+        size = sum(len(block.key_loose) for block in (*ref, *new))
+        work = ALIGN_WORK_BASE + ALIGN_WORK_PER_CHAR * size
+    budget = _Budget(work)
     chain, moved = _anchors(ref, new)
     pairs = [_matched(ref, new, anchor, moved=True) for anchor in moved]
     used_ref = {i for i, _ in moved}
@@ -514,8 +705,24 @@ def align(
     for (i0, j0), (i1, j1) in itertools.pairwise(bounds):
         rows = [i for i in range(i0 + 1, i1) if i not in used_ref]
         columns = [j for j in range(j0 + 1, j1) if j not in used_new]
-        pairs += _align_gap(ref, new, rows, columns, match)
+        pairs += _align_gap(ref, new, rows, columns, match, budget)
         if i1 < len(ref):
             pairs.append(_matched(ref, new, (i1, j1)))
-    pairs = _match_leftovers(ref, new, pairs, moved_match)
-    return _in_reference_order(pairs)
+    pairs = _match_leftovers(ref, new, pairs, moved_match, budget)
+    return Alignment(_in_reference_order(pairs), len(budget.skipped))
+
+
+def align(
+    ref: Sequence[Block],
+    new: Sequence[Block],
+    *,
+    match: float,
+    moved_match: float,
+) -> list[Pair]:
+    """Return the pairs of `align_blocks`, in reference order."""
+    return align_blocks(
+        ref,
+        new,
+        match=match,
+        moved_match=moved_match,
+    ).pairs

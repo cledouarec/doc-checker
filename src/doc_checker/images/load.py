@@ -54,12 +54,14 @@ from doc_checker.images.streams import (
     DCT,
     FLATE,
     JPX,
+    MAX_JPEG_SCANS,
     PIXEL_CHAINS,
     WRAPPED_CHAINS,
     CodecHeader,
     full_filters,
     inflated_length,
     jpeg_header,
+    jpeg_scans,
     jpx_header,
 )
 
@@ -279,10 +281,12 @@ def _checked_jpeg(jpeg: bytes, announced: int) -> int | None:
         without one.
 
     Raises:
-        UnreadableImage: If its frame header cannot be read or announces too
-            many pixels or components, or if the JPEG does not decode
-            without error.
+        UnreadableImage: If it has too many scans, if its frame header
+            cannot be read or announces too many pixels or components, or
+            if the JPEG does not decode without error.
     """
+    if jpeg_scans(jpeg) > MAX_JPEG_SCANS:
+        raise UnreadableImage(TOO_LARGE)
     header = _checked_header(jpeg_header(jpeg), announced)
     try:
         return _draft_decoded(jpeg, header)

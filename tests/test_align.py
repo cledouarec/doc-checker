@@ -2,13 +2,19 @@
 """Tests for the global alignment of blocks."""
 
 import time
+from typing import Final
 
 import pytest
 
 import doc_checker.compare.align as align_module
-from doc_checker.compare.align import Pair, align
+from doc_checker.compare.align import Pair, align, align_blocks
 from doc_checker.model.document import Block, BlockKind
-from tests.builders import SPLIT_PARTS, SPLIT_WHOLE, make_block
+from tests.builders import (
+    SPLIT_PARTS,
+    SPLIT_WHOLE,
+    make_block,
+    random_blocks,
+)
 
 P = [
     f"Paragraph number {w} talks about topic {w}."
@@ -185,3 +191,136 @@ def test_heading_matches_paragraph_with_same_text() -> None:
     ]
     new = [make_block("Configuration options for the server")]
     assert _kinds(_align(ref, new)) == [("equal", (0,), (0,), False)]
+
+
+ANCHORS: Final = (
+    "The first anchor paragraph stays in its place.",
+    "The second anchor paragraph stays in its place too.",
+)
+
+
+def test_moved_search_stops_at_its_budget() -> None:
+    """Beyond its budget, a block only pairs with an identical one."""
+    first, second = (make_block(text) for text in ANCHORS)
+    moved = make_block("Moved note.")  # too short to be an anchor
+    ref = [first, *random_blocks(1, 30), second, moved]
+    new = [first, moved, second, *random_blocks(2, 30)]
+    full = align_blocks(ref, new, match=0.6, moved_match=0.8)
+    cut = align_blocks(ref, new, match=0.6, moved_match=0.8, work=50_000)
+    assert full.unsearched == 0
+    assert cut.unsearched == 27
+    pair = next(p for p in cut.pairs if p.ref == (32,))
+    assert pair.new == (1,)
+    assert pair.moved
+
+
+def test_alignment_of_long_unrelated_blocks_is_bounded() -> None:
+    """Two unrelated documents of long blocks are aligned within the budget."""
+    ref = random_blocks(1, 150, words=1_000)
+    new = random_blocks(2, 150, words=1_000)
+    start = time.process_time()
+    result = align_blocks(ref, new, match=0.6, moved_match=0.8)
+    assert time.process_time() - start < MAX_SECONDS
+    assert result.unsearched > 0
+
+
+def test_alignment_of_many_unrelated_blocks_is_bounded() -> None:
+    """Two unrelated documents of many blocks are aligned within the budget."""
+    ref, new = random_blocks(1, 10_000), random_blocks(2, 10_000)
+    start = time.process_time()
+    result = align_blocks(ref, new, match=0.6, moved_match=0.8, work=2_000_000)
+    assert time.process_time() - start < MAX_SECONDS
+    assert result.unsearched > 0
+
+
+def test_alignment_of_a_long_block_against_tiny_ones_is_bounded() -> None:
+    """A long block against many one-character blocks is cut, or fast."""
+    ref = random_blocks(1, 1, words=25_000)  # about 200,000 characters
+    new = [make_block("x") for _ in range(20_000)]
+    start = time.process_time()
+    result = align_blocks(ref, new, match=0.6, moved_match=0.8)
+    assert time.process_time() - start < MAX_SECONDS
+    assert result.unsearched > 0
+
+
+def test_blocks_in_place_stay_in_place_past_the_limit() -> None:
+    """With no work left, a distant duplicate does not move equal blocks."""
+    items = [f"Item {i}" for i in range(5)]
+    ref = _b("Note.", *items)
+    new = _b(*items, "Filler one.", "Filler two.", "Filler three.", "Note.")
+    result = align_blocks(ref, new, match=0.6, moved_match=0.8, work=0)
+    assert [p.ref for p in result.pairs if p.moved] == [(0,)]
+    assert ("equal", (1,), (0,), False) in _kinds(result.pairs)
+
+
+def test_greedy_search_past_the_limit_is_bounded_to_its_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the limit, a duplicate beyond the window is the only move."""
+    monkeypatch.setattr(align_module, "MAX_DP_CELLS", 4)
+    items = [f"Item {i}" for i in range(2)]
+    fillers = [f"Filler {i}" for i in range(48)]
+    # "Note." is the 51st block: out of the window of the first row.
+    ref = _b("Note.", *items, "Last.", "Gone.")
+    new = _b(*items, *fillers, "Note.", "Last.")
+    far = align_blocks(ref, new, match=0.6, moved_match=0.8, work=0)
+    assert [p.ref for p in far.pairs if p.moved] == [(0,)]
+    assert far.unsearched == 5
+    # Every block is paired: the last two rows have an empty window.
+    done = align_blocks(
+        _b(*items, "Gone one.", "Gone two."),
+        _b(*items),
+        match=0.6,
+        moved_match=0.8,
+        work=0,
+    )
+    assert done.unsearched == 2
+
+
+def test_split_and_merge_searches_stop_at_the_budget() -> None:
+    """A split or a merge search cut by the budget finds nothing."""
+    first, last = _b(*P[:2])
+    whole = make_block(SPLIT_WHOLE)
+    parts = _b(*SPLIT_PARTS)
+    for ref, new in (
+        ([first, whole, last], [first, *parts, last]),
+        ([first, *parts, last], [first, whole, last]),
+    ):
+        result = align_blocks(ref, new, match=0.6, moved_match=0.8, work=1_000)
+        assert result.unsearched == 1
+        assert not {"split", "merge"} & {p.kind.value for p in result.pairs}
+
+
+@pytest.mark.parametrize("max_cells", [align_module.MAX_DP_CELLS, 4])
+def test_identical_blocks_pair_past_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    max_cells: int,
+) -> None:
+    """With no work left, a dynamic or greedy gap still pairs equal blocks."""
+    monkeypatch.setattr(align_module, "MAX_DP_CELLS", max_cells)
+    items = [f"Item {i}" for i in range(30)]
+    result = align_blocks(
+        _b(*items),
+        _b(*items),
+        match=0.6,
+        moved_match=0.8,
+        work=1,
+    )
+    assert _kinds(result.pairs) == [
+        ("equal", (i,), (i,), False) for i in range(30)
+    ]
+    assert result.unsearched == 30
+
+
+def test_align_keeps_its_pairs() -> None:
+    """`align` gives the pairs of `align_blocks`."""
+    ref, new = random_blocks(1, 5), random_blocks(1, 5)
+    assert (
+        align(ref, new, match=0.6, moved_match=0.8)
+        == align_blocks(
+            ref,
+            new,
+            match=0.6,
+            moved_match=0.8,
+        ).pairs
+    )

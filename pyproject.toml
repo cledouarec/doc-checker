@@ -86,3 +86,4 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["INP001", "S101", "PLR2004", "DOC201", "DOC501"]
+"tools/*" = ["INP001", "T201"]
