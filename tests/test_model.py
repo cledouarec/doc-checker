@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from doc_checker.model.document import (
+    BlockKind,
     Document,
     ImageRef,
     PixelSource,
@@ -128,6 +129,52 @@ def test_finding_id_ignores_the_page() -> None:
     early_id = finding_id("block.missing", early, None)
     late_id = finding_id("block.missing", late, None)
     assert early_id == late_id
+
+
+def test_finding_id_of_a_side_without_mark_is_unchanged() -> None:
+    """The identifiers of compare, whose sides have no mark, stay the same."""
+    source = SourceRef("guide.html", anchor="install")
+    old = Side(
+        source,
+        (
+            DiffSegment("equal", "Run the "),
+            DiffSegment("delete", "old"),
+            DiffSegment("insert", "new"),
+            DiffSegment("equal", " installer."),
+        ),
+        BlockKind.PARAGRAPH,
+    )
+    new = Side(
+        source,
+        (DiffSegment("equal", "Run the new installer."),),
+        BlockKind.PARAGRAPH,
+    )
+    assert finding_id("text.changed", old, new) == "21baec031731"
+    assert finding_id("block.missing", old, None) == "7f665493b7bb"
+
+
+def test_finding_id_tells_apart_the_marks_of_one_excerpt() -> None:
+    """Two marks of one excerpt differ by their place or their text."""
+    source = SourceRef("a.html")
+
+    def marked(before: str, mark: str, after: str) -> Side:
+        segments = (
+            DiffSegment("equal", before),
+            DiffSegment("mark", mark),
+            DiffSegment("equal", after),
+        )
+        return Side(source, segments)
+
+    first = marked("See ", "here", " or here.")
+    second = marked("See here or ", "here", ".")
+    assert first.text == second.text
+    ids = {
+        finding_id("a11y.link_text", side, None)
+        for side in (first, second, marked("See ", "here or", " here."))
+    }
+    assert len(ids) == 3
+    again = marked("See ", "here", " or here.")
+    assert finding_id("a11y.link_text", again, None) in ids
 
 
 def test_document_tagged_defaults_to_none(tmp_path: Path) -> None:

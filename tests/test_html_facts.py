@@ -1,6 +1,8 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the facts of HTML pages that only the audit reads."""
 
+import time
+
 import lxml.html
 
 from doc_checker.extract.html.facts import (
@@ -223,3 +225,68 @@ def test_hidden_and_decorative_pictures_do_not_name_a_link() -> None:
         "n3.html",
         "n4.html",
     ]
+
+
+def test_embedded_media_are_found_by_their_line() -> None:
+    """Frames, videos, sounds and objects of the content give their line."""
+    root = lxml.html.document_fromstring(
+        "<html><body>\n<main>\n"
+        '<iframe src="https://example.org/embed"></iframe>\n'
+        '<video src="a.mp4"></video><audio src="a.ogg"></audio>\n'
+        '<object data="a.swf"></object>\n<embed src="a.swf">\n'
+        '<footer><video src="b.mp4"></video></footer>\n'
+        "</main></body></html>",
+    ).find("body")
+    spots = content_spots(root, ("footer",))
+    assert spots.media == (3, 4, 4, 5, 6)
+
+
+def test_left_out_elements_are_told_in_one_walk() -> None:
+    """Deep empty links cost one walk, not a walk up from each of them."""
+    depth, links = 240, 50_000
+    root = _page(
+        "<main>"
+        + "<div>" * depth
+        + '<a href="x.html"></a>' * links
+        + "<nav>"
+        + '<a href="n.html"></a>' * 100
+        + "</nav>"
+        + "</div>" * depth
+        + "</main>",
+    ).body
+    start = time.perf_counter()
+    spots = content_spots(root, GLOBAL_STRIP)
+    # Under 1 s; a walk up from each link took 12.7 s.
+    assert time.perf_counter() - start < 5.0
+    assert len(spots.empty_links) == links
+
+
+def test_the_root_inside_a_drawing_or_a_formula_is_left_out() -> None:
+    """A root that a formula or a drawing holds gives no place."""
+    for holder in ('<span class="katex">', "<svg>"):
+        tree = _page(f'{holder}<div id="r"><a href="x.html"></a></div>')
+        (root,) = tree.cssselect("#r")
+        assert content_spots(root, GLOBAL_STRIP).empty_links == ()
+
+
+def test_toctrees_and_unread_pictures_give_their_lines() -> None:
+    """A toctree with a link, and a picture if images are not read, count."""
+    root = lxml.html.document_fromstring(
+        "<html><body>\n<main>\n"
+        '<h2>Guide <img src="i.png"></h2>\n'
+        '<div class="toctree-wrapper compound"><ul><li>'
+        '<a href="a.html">A</a></li></ul></div>\n'
+        '<div class="toctree-wrapper" hidden><a href="b.html">B</a></div>\n'
+        '<div class="toctree-wrapper"></div>\n'
+        '<nav><div class="toctree-wrapper"><a href="c.html">C</a></div>'
+        "</nav>\n"
+        '<p><img src="a.png"></p>\n'
+        '<svg><title>T</title><svg><image href="x.png"/></svg></svg>\n'
+        '<picture><source srcset="a.webp"><img src="a.png"></picture>\n'
+        '<span class="katex"><svg></svg></span><button><img src="b.png">'
+        "</button>\n"
+        "</main></body></html>",
+    ).find("body")
+    assert content_spots(root, GLOBAL_STRIP).blockless == (4,)
+    unread = content_spots(root, GLOBAL_STRIP, images=False)
+    assert unread.blockless == (4, 8, 9, 10, 10)

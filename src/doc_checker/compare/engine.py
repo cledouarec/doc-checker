@@ -24,17 +24,17 @@ The images, which the alignment leaves out, are matched and judged by
 those of the text; an image that either document removed as page chrome is
 compared on neither side.
 
-The drafts then take the severities of the configuration, and those of the
-disabled rules, below the minimum severity or ignored are left out. Last,
-`group_findings` of `doc_checker.compare.aggregate` replaces the findings of
-one rule and pattern, once there are five of them, by one group.
+Last, `finalize_drafts` of `doc_checker.compare.aggregate` gives the
+drafts the severities of the configuration, leaves out those of the
+disabled rules, below the minimum severity or ignored, and replaces the
+findings of one rule and pattern, once there are five of them, by one group.
 """
 
 import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
-from doc_checker.compare.aggregate import group_findings, text_pattern
+from doc_checker.compare.aggregate import finalize_drafts, text_pattern
 from doc_checker.compare.align import Pair, PairKind, align
 from doc_checker.compare.classify import HunkContext, classify_hunk
 from doc_checker.compare.drafts import MATCHED, Draft, whole
@@ -46,7 +46,6 @@ from doc_checker.compare.images import (
 from doc_checker.compare.links import link_drafts
 from doc_checker.compare.structure import kind_drafts, level_drafts
 from doc_checker.compare.textdiff import Hunk, diff_tokens, span_text
-from doc_checker.config import rule_disabled
 from doc_checker.images.load import PixelLoader
 from doc_checker.model.document import (
     CELL_SEPARATOR,
@@ -56,14 +55,7 @@ from doc_checker.model.document import (
     Document,
     carry_anchors,
 )
-from doc_checker.model.findings import (
-    DiffSegment,
-    Finding,
-    Side,
-    finding_id,
-    group_id,
-)
-from doc_checker.rules import get_rule
+from doc_checker.model.findings import DiffSegment, Finding, Side
 from doc_checker.text.lexicon import is_admonition_title, is_chapter_label
 from doc_checker.text.normalize import loose_key
 from doc_checker.text.numbers import HEADING_NUMBER
@@ -466,45 +458,6 @@ def _unreported(block: Block) -> bool:
     )
 
 
-def _finalize(drafts: Iterable[Draft], cfg: Config) -> list[Finding]:
-    """Return the findings, with overrides, filters, identifiers and groups.
-
-    A finding is left out before the grouping if its identifier is ignored,
-    or if the identifier of the group of its rule and pattern is: an ignored
-    group stays ignored when fewer findings than a group needs are left.
-    """
-    findings = []
-    ignored = cfg.ignore.findings
-    for draft in drafts:
-        if rule_disabled(cfg, draft.rule):
-            continue
-        spec = get_rule(draft.rule)
-        default = spec.severity if draft.severity is None else draft.severity
-        severity = cfg.severity.get(draft.rule, default)
-        if severity < cfg.min_severity:
-            continue
-        identifier = finding_id(draft.rule, draft.ref, draft.new)
-        if identifier in ignored or (
-            draft.pattern is not None
-            and group_id(draft.rule, draft.pattern) in ignored
-        ):
-            continue
-        findings.append(
-            Finding(
-                draft.rule,
-                severity,
-                spec.category,
-                spec.title,
-                draft.ref,
-                draft.new,
-                draft.detail,
-                identifier,
-                draft.pattern,
-            ),
-        )
-    return group_findings(findings)
-
-
 @dataclass(frozen=True, slots=True)
 class _Images:
     """The drafts of the images of two documents, and their counts.
@@ -640,4 +593,4 @@ def compare_documents(
         images=cfg.images,
     )
     drafts = [*drafter.drafts(pairs), *images.drafts]
-    return CompareResult(ref, new, _finalize(drafts, cfg), stats)
+    return CompareResult(ref, new, finalize_drafts(drafts, cfg), stats)

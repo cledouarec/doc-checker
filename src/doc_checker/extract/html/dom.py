@@ -172,13 +172,19 @@ def _raw_text(element: HtmlElement) -> str:
     return "".join(parts)
 
 
+def is_formula(element: HtmlElement) -> bool:
+    """Return whether an element is a formula, by its tag or its classes."""
+    classes = (element.get("class") or "").lower().split()
+    return element.tag in _FORMULA_TAGS or bool(
+        _FORMULA_MARKS.intersection(classes),
+    )
+
+
 def in_formula(element: HtmlElement) -> bool:
     """Return whether an element is, or is in, a formula."""
-    for node in (element, *element.iterancestors()):
-        classes = (node.get("class") or "").lower().split()
-        if node.tag in _FORMULA_TAGS or _FORMULA_MARKS.intersection(classes):
-            return True
-    return False
+    return any(
+        is_formula(node) for node in (element, *element.iterancestors())
+    )
 
 
 def _images_in(parts: Iterable[HtmlElement]) -> Iterator[HtmlElement]:
