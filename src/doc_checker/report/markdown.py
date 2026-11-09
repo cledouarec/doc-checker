@@ -1,5 +1,5 @@
 # Copyright 2026 Christophe Le Douarec
-"""Markdown report of a comparison.
+"""Markdown report of a comparison or of an audit.
 
 The thumbnails that the report shows are WebP files in a directory next to
 it, named by their content. A file already there is kept, and none is ever
@@ -16,26 +16,29 @@ from doc_checker.report.context import (
     SEVERITY_TITLES,
     TEMPLATES,
     UNKNOWN,
+    Column,
     ReportContext,
     Thumbnails,
     is_code,
+    side_of,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from doc_checker.audit.engine import AuditResult
     from doc_checker.compare.engine import CompareResult
     from doc_checker.images.thumbnail import Thumbnail
     from doc_checker.model.findings import DiffSegment, Finding, Side
 
 # The directory of the thumbnails, next to the report.
 ASSETS_DIR: Final = "report_assets"
-_IMAGE_LABELS: Final = {"ref": "Reference image", "new": "New image"}
 _ABSENT: Final = "\U00002014"
 _MARKUP: Final = {
     "delete": ("<del>", "</del>"),
     "insert": ("<ins>", "</ins>"),
+    "mark": ("<mark>", "</mark>"),
     "equal": ("", ""),
 }
 # The characters of HTML and of the inline syntax of Markdown.
@@ -146,11 +149,11 @@ def md_cell(segments: Sequence[DiffSegment]) -> str:
     """Return diff segments as the content of a Markdown table cell.
 
     Args:
-        segments: Unchanged, deleted and inserted pieces of text.
+        segments: Unchanged, deleted, inserted and marked pieces of text.
 
     Returns:
         Escaped text, with a ``<br>`` for each line break, deletions in
-        ``<del>`` and insertions in ``<ins>``.
+        ``<del>``, insertions in ``<ins>`` and marked pieces in ``<mark>``.
     """
     parts = []
     for segment in segments:
@@ -234,13 +237,21 @@ def _holds(target: Path, size: int) -> bool:
 class _Assets:
     """The thumbnails that a Markdown report shows, as files next to it."""
 
-    def __init__(self, thumbnails: Thumbnails) -> None:
+    def __init__(
+        self,
+        thumbnails: Thumbnails,
+        columns: Sequence[Column],
+    ) -> None:
         """Start with no thumbnail shown.
 
         Args:
             thumbnails: Thumbnails of the sides of the findings.
+            columns: The columns of the report, which name the images.
         """
         self._thumbnails = thumbnails
+        self._labels = {
+            column.which: f"{column.label} image" for column in columns
+        }
         self._shown: dict[str, Thumbnail] = {}
 
     def __call__(self, side: Side | None, which: Literal["ref", "new"]) -> str:
@@ -257,7 +268,7 @@ class _Assets:
         if thumb is None:
             return ""
         self._shown.setdefault(thumb.name, thumb)
-        return f"![{_IMAGE_LABELS[which]}]({ASSETS_DIR}/{thumb.name})<br>"
+        return f"![{self._labels[which]}]({ASSETS_DIR}/{thumb.name})<br>"
 
     def write(self, directory: Path) -> None:
         """Write each thumbnail shown that the directory does not hold yet.
@@ -279,14 +290,14 @@ class _Assets:
 
 
 def render_markdown(
-    result: CompareResult,
+    result: CompareResult | AuditResult,
     path: Path,
     thumbnails: Thumbnails | None = None,
 ) -> Path:
-    """Write the Markdown report of a comparison, and its thumbnails.
+    """Write the Markdown report of a comparison or an audit, and thumbnails.
 
     Args:
-        result: Comparison result.
+        result: Result of a comparison or of an audit.
         path: Report file to write.
         thumbnails: Thumbnails of the sides of the findings, shared with the
             other report; ``None`` for thumbnails of this report only.
@@ -299,18 +310,16 @@ def render_markdown(
         with Thumbnails(result) as own:
             return render_markdown(result, path, own)
     context = ReportContext(result, path.parent)
-    assets = _Assets(thumbnails)
+    assets = _Assets(thumbnails, context.columns)
     inputs = [
-        (label, md_cell_code(ref), md_cell_code(new))
-        if label == "Path"
-        else (label, _plain(ref), _plain(new))
-        for label, ref, new in context.inputs()
+        (label, tuple(map(md_cell_code if label == "Path" else _plain, row)))
+        for label, row in context.inputs()
     ]
     text = TEMPLATES.get_template("report.md.j2").render(
+        command=context.command,
+        columns=context.columns,
         inputs=inputs,
-        matched=context.matched(),
-        matched_images=context.matched_images(),
-        moved=result.stats.moved,
+        **context.headline(),
         categories=context.categories(),
         summary=[
             (SEVERITY_TITLES[severity], counts, total)
@@ -332,6 +341,7 @@ def render_markdown(
         md_text=md_text,
         shown_pattern=shown_pattern,
         link=lambda side, which: _source(context, side, which),
+        side_of=side_of,
         cell=_cell,
         image=assets,
     )

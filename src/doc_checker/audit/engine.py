@@ -43,8 +43,10 @@ class AuditStats:
         pages: Pages of the document: HTML pages or PDF pages.
         blocks: Blocks that are not images.
         images: Image blocks.
-        links: Links checked.
-        checks: Families of checks run.
+        links: Links checked; ``None`` when the family `STRUCTURE`, which
+            checks them, did not run.
+        checks: Families of checks run, in the order they were asked: the
+            family `IMAGES` does not run when the images were not read.
         profile: Profile of the audit, ``"screen"`` or ``"print"``.
         images_read: Whether the images were read.
     """
@@ -52,7 +54,7 @@ class AuditStats:
     pages: int
     blocks: int
     images: int
-    links: int
+    links: int | None
     checks: tuple[str, ...]
     profile: str
     images_read: bool
@@ -81,7 +83,7 @@ def audit_document(doc: Document, cfg: Config) -> AuditResult:
         and statistics.
     """
     drafts: list[Draft] = []
-    links = 0
+    links = None
     if STRUCTURE in cfg.checks:
         drafts += structure_drafts(doc)
         broken, links = broken_link_drafts(doc)
@@ -97,7 +99,7 @@ def audit_document(doc: Document, cfg: Config) -> AuditResult:
         blocks=len(doc.blocks) - images,
         images=images,
         links=links,
-        checks=cfg.checks,
+        checks=tuple(c for c in cfg.checks if c != IMAGES or cfg.images),
         profile=cfg.profile,
         images_read=cfg.images,
     )

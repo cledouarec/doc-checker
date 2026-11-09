@@ -78,7 +78,7 @@ def test_audit_runs_only_the_families_asked() -> None:
     doc = make_audit_document(make_block("See Section ?? now."))
     result = audit_document(doc, Config(checks=("a11y",)))
     assert result.findings == []
-    assert (result.stats.links, result.stats.checks) == (0, ("a11y",))
+    assert (result.stats.links, result.stats.checks) == (None, ("a11y",))
 
 
 def test_audit_stats_of_a_pdf() -> None:
@@ -218,3 +218,13 @@ def test_same_findings_on_two_pdf_pages_share_their_id() -> None:
     for rule in ("link.file_missing", "structure.unresolved_reference"):
         first, second = _ids(doc, rule)
         assert first == second
+
+
+def test_stats_tell_the_families_that_ran() -> None:
+    """The images family does not run when the images are not read."""
+    doc = make_audit_document(make_block("Text."))
+    unread = replace(Config(), images=False)
+    assert audit_document(doc, unread).stats.checks == ("structure", "a11y")
+    alone = replace(Config(checks=("images",)), images=False)
+    stats = audit_document(doc, alone).stats
+    assert (stats.checks, stats.links) == ((), None)

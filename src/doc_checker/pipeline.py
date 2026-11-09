@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING
 
+from doc_checker.audit.engine import audit_document
 from doc_checker.compare.engine import compare_documents
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
@@ -13,6 +14,7 @@ from doc_checker.report.markdown import render_markdown
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from doc_checker.audit.engine import AuditResult
     from doc_checker.compare.engine import CompareResult
     from doc_checker.config import Config
 
@@ -44,11 +46,27 @@ def run_compare(ref_path: Path, new_path: Path, cfg: Config) -> CompareResult:
     return compare_documents(ref, new, cfg)
 
 
-def _render_reports(result: CompareResult, cfg: Config) -> list[Path]:
+def run_audit(path: Path, cfg: Config) -> AuditResult:
+    """Load a documentation build with its audit facts and audit it.
+
+    Args:
+        path: The build, a site directory, an HTML file or a PDF.
+        cfg: Run configuration.
+
+    Returns:
+        The audit result.
+    """
+    return audit_document(load_document(path, cfg, audit=True), cfg)
+
+
+def _render_reports(
+    result: CompareResult | AuditResult,
+    cfg: Config,
+) -> list[Path]:
     """Write the reports of the formats of a run, with shared thumbnails.
 
     Args:
-        result: Comparison result.
+        result: Comparison or audit result.
         cfg: Run configuration, with the output directory and formats.
 
     Returns:
@@ -66,11 +84,14 @@ def _render_reports(result: CompareResult, cfg: Config) -> list[Path]:
     return written
 
 
-def write_reports(result: CompareResult, cfg: Config) -> list[Path]:
-    """Write the reports of a comparison in the output directory.
+def write_reports(
+    result: CompareResult | AuditResult,
+    cfg: Config,
+) -> list[Path]:
+    """Write the reports of a comparison or an audit in the output directory.
 
     Args:
-        result: Comparison result.
+        result: Comparison or audit result.
         cfg: Run configuration, with the output directory and formats.
 
     Returns:

@@ -5,13 +5,14 @@ import base64
 import html
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import blake2b
 from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from doc_checker.audit.engine import audit_document
 from doc_checker.compare.engine import compare_documents
 from doc_checker.config import Config
 from doc_checker.extract.common import assign_section_paths
@@ -27,6 +28,8 @@ from doc_checker.model.document import (
     PixelSource,
     SourceRef,
 )
+from doc_checker.model.facts import HtmlPageFacts
+from doc_checker.model.findings import Severity
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
 from tests.image_builders import (
     blurred,
@@ -42,7 +45,9 @@ from tests.image_builders import (
 if TYPE_CHECKING:
     from PIL import Image
 
+    from doc_checker.audit.engine import AuditResult
     from doc_checker.compare.engine import CompareResult
+    from doc_checker.model.findings import Finding
 
 
 def make_block(
@@ -1349,6 +1354,44 @@ def figure_defect(spec: DocSpec, name: str, defect: Defect) -> DocSpec:
     raise _not_found(name)
 
 
+def plant(site: Path, file: str, old: str, new: str) -> None:
+    """Replace the one occurrence of a text in a file of a built site.
+
+    Args:
+        site: The folder of the site.
+        file: The path of the file, relative to the site.
+        old: The text to replace, found exactly once in the file.
+        new: The text that replaces it.
+
+    Raises:
+        ValueError: If the file does not hold ``old`` exactly once.
+    """
+    path = site / file
+    text = path.read_text(encoding="utf-8")
+    count = text.count(old)
+    if count != 1:
+        msg = f"{old!r} found {count} times in {file}, expected once"
+        raise ValueError(msg)
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def rule_counts(
+    findings: Iterable[Finding],
+    *,
+    minimum: Severity = Severity.INFO,
+) -> Counter[str]:
+    """Count the findings of each rule, from a severity up.
+
+    Args:
+        findings: The findings of a result; a group counts as one.
+        minimum: The lowest severity counted.
+
+    Returns:
+        The number of findings of each rule.
+    """
+    return Counter(f.rule for f in findings if f.severity >= minimum)
+
+
 def make_image_block(ref: ImageRef, *, file: str = "index.html") -> Block:
     """Return an image block, as an extractor would produce it."""
     return Block(
@@ -1386,3 +1429,28 @@ def image_result(*, scale: float = 0.4) -> CompareResult:
         ),
         Config(),
     )
+
+
+def audit_result() -> AuditResult:
+    """Audit a one-page site whose one paragraph holds a dead reference.
+
+    Returns:
+        The result, with one major `structure.unresolved_reference` finding
+        whose side marks the ``??``.
+    """
+    doc = make_audit_document(
+        make_block("See Section ?? for the limits."),
+        html_pages=(HtmlPageFacts("index.html", "en", "Home"),),
+    )
+    return audit_document(doc, Config())
+
+
+def image_audit_result() -> AuditResult:
+    """Audit the images of a page whose one image is blurred.
+
+    Returns:
+        The result, with one `image.blurry` finding whose side has pixels.
+    """
+    block = _data_image_block(blurred(drawing("setup"), 2.0))
+    doc = make_audit_document(block)
+    return audit_document(doc, Config(checks=("images",)))
