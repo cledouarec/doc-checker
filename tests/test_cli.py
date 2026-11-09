@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import click
 import lxml.html
+import pytest
 from click.testing import CliRunner
 
 from doc_checker import __version__
@@ -255,3 +256,116 @@ def test_no_images_option_is_accepted(tmp_path: Path) -> None:
     ):
         result = CliRunner().invoke(main, args)
         assert result.exit_code == 0, result.output
+
+
+def test_audit_writes_both_reports(tmp_path: Path) -> None:
+    """An audit of a site exits 0 and writes self-contained reports."""
+    site = build_sphinx_like(FIGURES_EN, tmp_path / "site", split="chapters")
+    out = tmp_path / "out"
+    result = CliRunner().invoke(main, ["audit", str(site), "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("audit  doc=")
+    assert (out / "report.md").is_file()
+    tree = lxml.html.parse(out / "report.html")
+    assert not tree.xpath("//*[@src and not(starts-with(@src, 'data:'))]")
+    assert not tree.xpath("//*[starts-with(@href, 'http')]")
+
+
+def test_audit_of_an_untagged_pdf(tmp_path: Path) -> None:
+    """The report of a reportlab PDF tells that it is not tagged."""
+    pdf = build_reportlab_pdf(SAMPLE_EN, tmp_path / "doc.pdf")
+    out = tmp_path / "out"
+    result = CliRunner().invoke(
+        main,
+        ["audit", str(pdf), "-o", str(out), "--checks", "a11y"],
+    )
+    assert result.exit_code == 0, result.output
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "`a11y.pdf_untagged`" in report
+
+
+def test_audit_unknown_check_exits_2(tmp_path: Path) -> None:
+    """The text checks come in a later version: a usage error now."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    result = CliRunner().invoke(main, ["audit", str(site), "--checks", "text"])
+    assert result.exit_code == 2
+    assert "unknown check 'text'" in result.output
+
+
+def test_audit_unreadable_input_exits_3(tmp_path: Path) -> None:
+    """A password protected PDF cannot be audited."""
+    pdf = build_raw_pdf(tmp_path / "secret.pdf", [], encrypt="secret")
+    result = CliRunner().invoke(main, ["audit", str(pdf)])
+    assert result.exit_code == 3
+
+
+AUDIT_SUMMARY_CASES = [
+    ([], "checks images, structure, a11y | profile screen"),
+    (["--profile", "print"], "checks images, structure, a11y | profile print"),
+    (["--checks", "a11y,images"], "checks a11y, images | profile screen"),
+    (
+        ["--checks", "a11y,a11y,structure"],
+        "| checks a11y, structure | profile",
+    ),
+    (["--no-images"], "| checks structure, a11y | profile screen"),
+    (["--checks", "a11y"], "| links - | checks a11y | profile screen"),
+    (["--checks", "images", "--no-images"], "| links - | checks - |"),
+]
+
+
+@pytest.mark.parametrize(("args", "expected"), AUDIT_SUMMARY_CASES)
+def test_audit_options_reach_the_summary(
+    tmp_path: Path,
+    args: list[str],
+    expected: str,
+) -> None:
+    """The check families and the profile of the command line are shown."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    cmd = ["audit", str(site), "-o", str(tmp_path / "out"), *args]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 0, result.output
+    assert expected in result.output
+
+
+def test_audit_no_images_reads_no_image(tmp_path: Path) -> None:
+    """With --no-images the audit still runs and says images are not read."""
+    site = build_sphinx_like(FIGURES_EN, tmp_path / "site", split="chapters")
+    cmd = ["audit", str(site), "-o", str(tmp_path / "out"), "--no-images"]
+    result = CliRunner().invoke(main, cmd)
+    assert result.exit_code == 0, result.output
+    assert "images not read" in result.output
+
+
+def test_audit_empty_checks_exits_2(tmp_path: Path) -> None:
+    """An empty list of check families is a usage error."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    result = CliRunner().invoke(main, ["audit", str(site), "--checks", ","])
+    assert result.exit_code == 2
+    assert "no check in" in result.output
+
+
+def test_audit_command_line_overrides_the_config_file(tmp_path: Path) -> None:
+    """--checks and --profile win over the checks and profile of a file."""
+    site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
+    conf = tmp_path / "conf.toml"
+    conf.write_text(
+        '[general]\nchecks = ["images"]\nprofile = "print"\n',
+        encoding="utf-8",
+    )
+    base = ["audit", str(site), "-o", str(tmp_path / "out"), "-c", str(conf)]
+    kept = CliRunner().invoke(main, base)
+    assert "checks images | profile print" in kept.output
+    over = CliRunner().invoke(
+        main,
+        [*base, "--checks", "a11y", "--profile", "screen"],
+    )
+    assert "checks a11y | profile screen" in over.output
+
+
+def test_no_images_help_names_what_each_command_does() -> None:
+    """The audit leaves the images out of its checks, compare of its own."""
+    audit = CliRunner().invoke(main, ["audit", "--help"]).output
+    compare = CliRunner().invoke(main, ["compare", "--help"]).output
+    assert "extraction and the checks." in " ".join(audit.split())
+    assert "extraction and the comparison." in " ".join(compare.split())
+    assert "comparison" not in audit

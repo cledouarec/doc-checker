@@ -2,21 +2,38 @@
 """Tests for the Markdown report and the terminal summary."""
 
 import re
+from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import click
 import pytest
 
+from doc_checker.audit.engine import audit_document
 from doc_checker.compare.engine import CompareResult, compare_documents
 from doc_checker.config import Config, HtmlConfig
 from doc_checker.errors import ConfigError
 from doc_checker.extract.html import load_html
 from doc_checker.images.refs import raster_ref
-from doc_checker.model.document import BlockKind, Link, PixelSource, SourceRef
-from doc_checker.model.findings import DiffSegment
+from doc_checker.model.document import (
+    Block,
+    BlockKind,
+    Link,
+    PixelSource,
+    SourceRef,
+)
+from doc_checker.model.facts import HtmlPageFacts
+from doc_checker.model.findings import DiffSegment, Severity
 from doc_checker.pipeline import write_reports
-from doc_checker.report.context import MAX_OCCURRENCES_SHOWN, relative_link
+from doc_checker.report.context import (
+    IMAGES_NOT_READ,
+    MAX_OCCURRENCES_SHOWN,
+    Column,
+    ReportContext,
+    columns,
+    relative_link,
+    side_of,
+)
 from doc_checker.report.markdown import (
     md_cell,
     md_cell_code,
@@ -24,12 +41,20 @@ from doc_checker.report.markdown import (
     md_text,
     render_markdown,
 )
-from doc_checker.report.terminal import render_blocks, render_summary, visible
+from doc_checker.report.terminal import (
+    render_audit_summary,
+    render_blocks,
+    render_summary,
+    visible,
+)
 from tests.builders import (
     FIGURES_EN,
     PARAGRAPHS,
+    audit_result,
     build_sphinx_like,
+    image_audit_result,
     image_result,
+    make_audit_document,
     make_block,
     make_document,
     make_image_block,
@@ -39,9 +64,13 @@ from tests.image_builders import drawing, encode
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from doc_checker.audit.engine import AuditResult
+
 REF_TEXT = (
     "Install the package with the default configuration before you start."
 )
+HOME = (HtmlPageFacts("index.html", "en", "Home"),)
+UNRESOLVED = "structure.unresolved_reference"
 
 
 @pytest.fixture
@@ -378,7 +407,7 @@ def test_markdown_escapes_inputs_and_link_labels(tmp_path: Path) -> None:
     result = compare_documents(ref, make_document(), Config())
     path = render_markdown(result, tmp_path / "r.md")
     text = path.read_text(encoding="utf-8")
-    assert f"| Path | `` {tmp_path}/o`ut `` | `doc` |" in text
+    assert f"| Path | `` {tmp_path / 'o`ut'} `` | `doc` |" in text
     assert "| Generator | &lt;Gen&gt; \\*x\\* | generic |" in text
     assert "| Language | - | en |" in text
     assert "- Reference: [a\\_b.html](o%60ut/a_b.html)\n" in text
@@ -411,8 +440,8 @@ def test_markdown_keeps_a_hostile_path_in_its_cell(tmp_path: Path) -> None:
     path = render_markdown(result, tmp_path / "r.md")
     text = path.read_text(encoding="utf-8")
     assert (
-        f"| Path | `{tmp_path}/a\\|<img src=x onerror=alert(1)>` "
-        f"| `{tmp_path}/b\\\\\\|<b>` |\n"
+        f"| Path | `{tmp_path / 'a'}\\|<img src=x onerror=alert(1)>` "
+        f"| `{tmp_path / 'b'}\\\\\\|<b>` |\n"
     ) in text
 
 
@@ -465,7 +494,7 @@ def test_render_blocks_keeps_document_values_on_their_line(
     lines = render_blocks(doc).splitlines()
     assert len(lines) == 4
     assert lines[0] == (
-        f"{tmp_path}/do c: html, 1 page(s), generator Gen erator, lang e n"
+        f"{tmp_path / 'do c'}: html, 1 page(s), generator Gen erator, lang e n"
     )
     assert lines[1] == "warning: first second"
     assert " a b.html  " in lines[2]
@@ -486,7 +515,7 @@ def test_render_summary_keeps_document_values_on_their_line(
     lines = click.unstyle(render_summary(result, [])).splitlines()
     assert len(lines) == 6
     assert lines[0] == (
-        f"compare  ref={tmp_path}/do c (1 pages, Gen erator)  "
+        f"compare  ref={tmp_path / 'do c'} (1 pages, Gen erator)  "
         "new=doc (1 pages, generic)"
     )
     assert lines[3].startswith("  CRITICAL block.missing  a b.html  ")
@@ -673,7 +702,10 @@ def test_markdown_diff_deletes_before_it_adds(tmp_path: Path) -> None:
     ) in text
 
 
-def _write(result: CompareResult, out: Path) -> dict[str, bytes]:
+def _write(
+    result: CompareResult | AuditResult,
+    out: Path,
+) -> dict[str, bytes]:
     """Write both reports and return every file written, by name."""
     write_reports(result, Config(output=out))
     return {
@@ -778,3 +810,313 @@ def test_extract_lists_images(tmp_path: Path) -> None:
     text = render_blocks(doc)
     assert "image       index.html#installation  _images/setup.png" in text
     assert '_images/setup.png, 400x250 px, PNG, alt "Installer steps"' in text
+
+
+def _audit_summary(*blocks: Block, cfg: Config | None = None) -> list[str]:
+    """Audit a one-page site of blocks and return its summary, unstyled."""
+    doc = make_audit_document(*blocks, html_pages=HOME)
+    result = audit_document(doc, cfg or Config())
+    return click.unstyle(render_audit_summary(result, [])).splitlines()
+
+
+def test_audit_markdown_report_has_one_column(tmp_path: Path) -> None:
+    """One Document column, the checks and the profile, a marked part."""
+    text = render_markdown(audit_result(), tmp_path / "report.md").read_text(
+        encoding="utf-8",
+    )
+    assert text.startswith("# doc-checker report: audit\n")
+    assert "| | Document |" in text
+    assert "| Reference |" not in text
+    assert "**Checks:** images, structure, a11y \xb7 **Profile:** screen" in (
+        text
+    )
+    assert "<mark>??</mark>" in text
+
+
+def test_audit_reports_name_the_families_that_ran(tmp_path: Path) -> None:
+    """Without the images, the reports do not name the images family."""
+    doc = make_audit_document(make_block("Text."), html_pages=HOME)
+    result = audit_document(doc, Config(images=False))
+    text = render_markdown(result, tmp_path / "report.md").read_text(
+        encoding="utf-8",
+    )
+    assert "**Checks:** structure, a11y \xb7 **Profile:** screen" in text
+    unread = audit_document(doc, Config(checks=("images",), images=False))
+    text = render_markdown(unread, tmp_path / "r.md").read_text(
+        encoding="utf-8",
+    )
+    assert "**Checks:** - \xb7 **Profile:** screen" in text
+    (_, counts, *_) = click.unstyle(render_audit_summary(unread, [])).split(
+        "\n",
+    )
+    assert counts == (
+        "blocks 1 | images not read | links - | checks - | profile screen"
+    )
+
+
+def test_audit_terminal_summary(tmp_path: Path) -> None:
+    """The summary names the document, the checks and the top findings."""
+    lines = click.unstyle(
+        render_audit_summary(audit_result(), [tmp_path / "report.md"]),
+    ).splitlines()
+    assert lines[0].startswith("audit  doc=doc (1 pages, generic)")
+    assert lines[1] == (
+        "blocks 1 | images 0 | links 0 | checks images, structure, a11y"
+        " | profile screen"
+    )
+    assert lines[2] == "findings: 0 critical, 1 major, 0 minor, 0 info"
+    assert lines[3].startswith("  MAJOR structure.unresolved_reference")
+
+
+def test_columns_of_both_commands(result: CompareResult) -> None:
+    """A comparison has two columns; an audit has one, its document."""
+    assert columns(result) == (
+        Column("ref", "Reference", result.ref),
+        Column("new", "New", result.new),
+    )
+    audit = audit_result()
+    assert columns(audit) == (Column("ref", "Document", audit.doc),)
+    (finding,) = audit.findings
+    assert side_of(finding, "ref") is finding.ref
+    assert side_of(finding, "new") is None
+
+
+def test_audit_markdown_inputs_tell_the_document(tmp_path: Path) -> None:
+    """The inputs tell the document, whether it is tagged, and its images."""
+    text = render_markdown(audit_result(), tmp_path / "a.md").read_text(
+        encoding="utf-8",
+    )
+    assert (
+        "## Inputs\n\n| | Document |\n|---|---|\n| Path | `doc` |\n"
+        "| Format | html |\n| Pages | 1 |\n| Generator | generic |\n"
+        "| Language | en |\n| Tagged | - |\n| Blocks | 1 |\n"
+        "| Images | 0 |\n\n**Checks:** "
+    ) in text
+    pdf = make_audit_document(make_block(PARAGRAPHS[0]), fmt="pdf")
+    for tagged, told in ((True, "yes"), (False, "no")):
+        audit = audit_document(
+            replace(pdf, tagged=tagged),
+            Config(images=False, profile="print"),
+        )
+        text = render_markdown(audit, tmp_path / f"{told}.md").read_text(
+            encoding="utf-8",
+        )
+        assert "| Format | pdf |\n| Pages | 1 |\n" in text
+        assert f"| Tagged | {told} |\n" in text
+        assert f"| Images | {IMAGES_NOT_READ} |\n" in text
+        assert "\xb7 **Profile:** print\n" in text
+
+
+def test_audit_markdown_findings_name_the_document(tmp_path: Path) -> None:
+    """A finding of an audit tells its place and shows its one side."""
+    text = render_markdown(audit_result(), tmp_path / "a.md").read_text(
+        encoding="utf-8",
+    )
+    assert "- Document: [index.html](" in text
+    assert "- Reference:" not in text
+    assert (
+        "| Document |\n|---|\n| See Section <mark>??</mark> for the limits. |"
+    ) in text
+
+
+def test_audit_markdown_shows_code_with_its_mark(tmp_path: Path) -> None:
+    """A code side of an audit is a cell that marks its part, not a diff."""
+    result = audit_result()
+    (finding,) = result.findings
+    assert finding.ref is not None
+    code = replace(finding, ref=replace(finding.ref, kind=BlockKind.CODE))
+    path = render_markdown(replace(result, findings=[code]), tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert "```" not in text
+    assert "| See Section <mark>??</mark> for the limits. |" in text
+
+
+def test_audit_markdown_groups_name_the_document(tmp_path: Path) -> None:
+    """The occurrences of a group of an audit sit on one column."""
+    blocks = [make_block(f"See Section ?? for limit {n}.") for n in range(6)]
+    doc = make_audit_document(*blocks, html_pages=HOME)
+    result = audit_document(doc, Config())
+    path = render_markdown(result, tmp_path / "r.md")
+    text = path.read_text(encoding="utf-8")
+    assert "| ID | Document |\n|---|---|\n| `" in text
+    assert "<br>See Section <mark>??</mark> for limit 5. |\n" in text
+
+
+def test_audit_markdown_shows_the_thumbnails(tmp_path: Path) -> None:
+    """The image of an audit finding is a thumbnail named for its column."""
+    path = render_markdown(image_audit_result(), tmp_path / "report.md")
+    text = path.read_text(encoding="utf-8")
+    (name,) = re.findall(
+        r"!\[Document image\]\((report_assets/[0-9a-f]{16}\.webp)\)<br>",
+        text,
+    )
+    assert (tmp_path / name).is_file()
+
+
+def test_audit_reports_and_thumbnail_are_stable(tmp_path: Path) -> None:
+    """Both reports of an audit and its thumbnail are the same at each run."""
+    result = image_audit_result()
+    first = _write(result, tmp_path / "a")
+    assert first == _write(result, tmp_path / "b")
+    assert sorted(first)[:2] == ["report.html", "report.md"]
+    assert len([name for name in first if name.endswith(".webp")]) == 1
+
+
+def test_audit_terminal_summary_shows_the_highest_severity() -> None:
+    """The findings of the highest severity are listed if major or above."""
+    block = make_block("See Section ?? for the limits.")
+    critical = Config(severity={UNRESOLVED: Severity.CRITICAL})
+    assert _audit_summary(block, cfg=critical)[2:] == [
+        "findings: 1 critical, 0 major, 0 minor, 0 info",
+        (
+            "  CRITICAL structure.unresolved_reference  index.html  "
+            '"See Section ?? for the limits."'
+        ),
+        "reports: ",
+    ]
+    minor = Config(severity={UNRESOLVED: Severity.MINOR})
+    assert _audit_summary(block, cfg=minor)[2:] == [
+        "findings: 0 critical, 0 major, 1 minor, 0 info",
+        "reports: ",
+    ]
+
+
+def test_audit_terminal_summary_lists_five_and_counts_groups() -> None:
+    """Five findings at most are listed; a group tells its occurrences."""
+    marks = [make_block(f"See Section ?? for limit {n}.") for n in range(4)]
+    cites = [make_block(f"As [?] shows, rule {n} holds.") for n in range(4)]
+    lines = _audit_summary(*marks, *cites)
+    assert lines[2] == "findings: 0 critical, 8 major, 0 minor, 0 info"
+    assert len(lines) == 9
+    assert all(
+        line.startswith(f"  MAJOR {UNRESOLVED}  index.html  ")
+        for line in lines[3:8]
+    )
+    assert lines[8] == "reports: "
+    six = [make_block(f"See Section ?? for limit {n}.") for n in range(6)]
+    lines = _audit_summary(*six)
+    assert lines[2] == "findings: 0 critical, 1 major, 0 minor, 0 info"
+    assert lines[3].endswith(
+        '  "See Section ?? for limit 0." (6 occurrences)',
+    )
+
+
+def test_audit_summary_keeps_document_values_on_their_line(
+    tmp_path: Path,
+) -> None:
+    """Path, generator, place, excerpt and warnings stay on their line."""
+    block = make_block("See Section ?? for\nthe limits.", file="a\x9bb.html")
+    doc = replace(
+        make_audit_document(block, html_pages=HOME),
+        path=tmp_path / "do\nc",
+        generator="Gen\r\nerator",
+        warnings=["first\nsecond", "odd\x07page"],
+    )
+    summary = render_audit_summary(
+        audit_document(doc, Config(images=False)),
+        [tmp_path / "report.md"],
+    )
+    assert "\x9b" not in summary
+    assert "\x07" not in summary
+    assert "\x1b[33mwarning\x1b[0m: first second" in summary
+    lines = click.unstyle(summary).splitlines()
+    assert lines[0] == (
+        f"audit  doc={tmp_path / 'do c'} (1 pages, Gen erator)"
+    )
+    assert lines[1].startswith("blocks 1 | images not read | links 0 | ")
+    assert lines[-3:] == [
+        "warning: first second",
+        "warning: odd\U0000fffdpage",
+        f"reports: {tmp_path / 'report.md'}",
+    ]
+    (top,) = [line for line in lines if line.startswith("  MAJOR ")]
+    assert top.startswith(f"  MAJOR {UNRESOLVED}  a\U0000fffdb.html  ")
+
+
+def test_compare_markdown_keeps_its_two_columns(
+    tmp_path: Path,
+    result: CompareResult,
+) -> None:
+    """The tables and places of a comparison show both documents."""
+    both = replace(
+        result,
+        ref=replace(result.ref, normalization=Counter({"quote": 2})),
+    )
+    text = render_markdown(both, tmp_path / "r.md").read_text(
+        encoding="utf-8",
+    )
+    inputs = (
+        "\n| | Reference | New |\n|---|---|---|\n| Path | `doc` | `doc` |\n"
+    )
+    assert inputs in text
+    assert (
+        "\n## Normalized differences\n\n| Normalization | Reference | New |\n"
+        "|---|---|---|\n| quote | 2 | 0 |\n"
+    ) in text
+    assert "Normalizations" not in text
+    assert re.search(
+        r"\n- Reference: \[index\.html\]\([^)\n]+\)\n"
+        r"- New: \[index\.html\]\([^)\n]+\)\n- ID: `",
+        text,
+    )
+    assert re.search(
+        r"\n- Reference: \[index\.html\]\([^)\n]+\)\n"
+        r"- New: \U00002014\n- ID: `",
+        text,
+    )
+    assert (
+        "\n| Reference | New |\n|---|---|\n"
+        "| <del>Paragraph number one talks about topic one.</del> "
+        "| \U00002014 |\n"
+    ) in text
+    texts = [f"Paragraph {i} says that the backup is safe." for i in range(6)]
+    grouped = compare_documents(
+        make_document(*[make_block(t) for t in texts]),
+        make_document(
+            *[make_block(t.replace("is safe", "is not safe")) for t in texts],
+        ),
+        Config(),
+    )
+    text = render_markdown(grouped, tmp_path / "g.md").read_text(
+        encoding="utf-8",
+    )
+    assert re.search(
+        r"\n\| ID \| Reference \| New \|\n\|---\|---\|---\|\n"
+        r"\| `[0-9a-f]{12}` \| \[index\.html\]\([^)\n]+\)<br>"
+        r"Paragraph 0 says that the backup is safe\. "
+        r"\| \[index\.html\]\([^)\n]+\)<br>"
+        r"Paragraph 0 says that the backup is <ins>not</ins> safe\. \|\n",
+        text,
+    )
+
+
+def test_audit_reports_title_their_normalizations(tmp_path: Path) -> None:
+    """An audit counts its normalizations, which are no differences."""
+    result = audit_result()
+    counted = replace(
+        result,
+        doc=replace(result.doc, normalization=Counter({"quote": 2})),
+    )
+    text = render_markdown(counted, tmp_path / "r.md").read_text(
+        encoding="utf-8",
+    )
+    assert (
+        "\n## Normalizations\n\n| Normalization | Document |\n|---|---|\n"
+        "| quote | 2 |\n"
+    ) in text
+    assert "Normalized differences" not in text
+
+
+def test_context_figures_belong_to_their_command(
+    tmp_path: Path,
+    result: CompareResult,
+) -> None:
+    """The figures of one command are refused to the other one."""
+    audit = ReportContext(audit_result(), tmp_path)
+    compare = ReportContext(result, tmp_path)
+    for figure in (audit.matched, audit.matched_images):
+        with pytest.raises(TypeError, match="an audit has no figures"):
+            figure()
+    for figure in (compare.checks, compare.profile):
+        with pytest.raises(TypeError, match="a comparison has no figures"):
+            figure()

@@ -5,21 +5,26 @@ import base64
 import hashlib
 import html
 import re
+from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import lxml.html
 import pytest
 
+from doc_checker.audit.engine import audit_document
 from doc_checker.compare.engine import CompareResult, compare_documents
 from doc_checker.config import Config, HtmlConfig
 from doc_checker.extract.html import load_html
 from doc_checker.images.svg import parse_svg
-from doc_checker.model.document import BlockKind, ImageRef, Link
+from doc_checker.model.document import BlockKind, ImageRef, Link, SourceRef
 from doc_checker.report.html import content_security_policy, render_html
 from tests.builders import (
     PARAGRAPHS,
+    audit_result,
+    image_audit_result,
     image_result,
+    make_audit_document,
     make_block,
     make_document,
     make_image_block,
@@ -487,3 +492,148 @@ def test_html_report_of_a_hostile_site_shows_only_thumbnails(
     assert not tree.xpath("//@*[starts-with(name(), 'on')]")
     assert len(tree.xpath("//script")) == 1
     assert EVIL_ALT in tree.text_content()
+
+
+def test_audit_html_report_has_one_column(tmp_path: Path) -> None:
+    """One Document column, a single side and the marked part."""
+    text = render_html(audit_result(), tmp_path / "report.html").read_text(
+        encoding="utf-8",
+    )
+    assert "<title>doc-checker report: audit</title>" in text
+    assert '<th scope="col">Document</th>' in text
+    assert "Reference</th>" not in text
+    assert '<div class="sides single">' in text
+    assert "<mark>??</mark>" in text
+    assert "Checks: images, structure, a11y &middot; Profile: screen" in text
+
+
+def test_audit_reports_are_byte_stable(tmp_path: Path) -> None:
+    """Two renderings of an audit write the same bytes."""
+    first = render_html(audit_result(), tmp_path / "a.html").read_bytes()
+    second = render_html(audit_result(), tmp_path / "b.html").read_bytes()
+    assert first == second
+
+
+def test_compare_html_report_keeps_two_columns(
+    tmp_path: Path,
+    result: CompareResult,
+) -> None:
+    """A comparison still shows the reference and the new document."""
+    text = render_html(result, tmp_path / "report.html").read_text(
+        encoding="utf-8",
+    )
+    assert (
+        '<thead><tr><td></td><th scope="col">Reference</th>'
+        '<th scope="col">New</th></tr></thead>'
+    ) in text
+    assert '<div class="sides">' in text
+    assert "sides single" not in text
+    assert 'class="checks"' not in text
+    link = r'<a class="source" href="[^"]+">index\.html</a>'
+    assert re.search(
+        rf'<p class="where">Reference: {link} &middot; New: &mdash;</p>',
+        text,
+    )
+    assert re.search(
+        rf'<p class="where">Reference: {link} &middot; New: {link}</p>',
+        text,
+    )
+
+
+def test_audit_html_report_tells_the_document(tmp_path: Path) -> None:
+    """The inputs, the place and the side of a finding are on one column."""
+    tree = _tree(render_html(audit_result(), tmp_path / "report.html"))
+    assert tree.findtext(".//h1") == "doc-checker report: audit"
+    rows = [
+        (row.findtext("th"), [cell.text for cell in row.cssselect("td")])
+        for row in tree.cssselect("table.inputs tbody tr")
+    ]
+    assert rows == [
+        ("Path", ["doc"]),
+        ("Format", ["html"]),
+        ("Pages", ["1"]),
+        ("Generator", ["generic"]),
+        ("Language", ["en"]),
+        ("Tagged", ["-"]),
+        ("Blocks", ["1"]),
+        ("Images", ["0"]),
+    ]
+    assert not tree.cssselect("p.matched")
+    (article,) = tree.cssselect("article.finding")
+    (where,) = article.cssselect("p.where")
+    assert where.text_content().startswith("Document: index.html")
+    assert len(where.cssselect("a.source")) == 1
+    (side,) = article.cssselect(".side")
+    assert side.get("class") == "side ref"
+    assert side.findtext("h4").startswith("Document")
+    assert [mark.text for mark in side.cssselect(".text mark")] == ["??"]
+
+
+def test_audit_html_report_dom_ids_are_unique(tmp_path: Path) -> None:
+    """Audit findings that share an identifier get numbered DOM ids."""
+    block = make_block("See Section ?? for the limits.")
+    blocks = [
+        replace(block, source=SourceRef("doc.pdf", page=page))
+        for page in (1, 2)
+    ]
+    doc = make_audit_document(*blocks, fmt="pdf", parts=["1", "2"])
+    result = audit_document(doc, Config(checks=("structure",)))
+    first, second = (
+        f
+        for f in result.findings
+        if f.rule == "structure.unresolved_reference"
+    )
+    assert first.id == second.id
+    tree = _tree(render_html(result, tmp_path / "report.html"))
+    ids = tree.xpath("//@id")
+    assert len(ids) == len(set(ids))
+    assert f"f-{first.id}" in ids
+    assert f"f-{first.id}-2" in ids
+
+
+def test_audit_html_thumbnail_is_the_document_image(tmp_path: Path) -> None:
+    """The thumbnail of the side of an audit finding is named for it."""
+    tree = _tree(render_html(image_audit_result(), tmp_path / "report.html"))
+    (image,) = tree.cssselect("img.thumb")
+    assert image.get("alt") == "Document image"
+    assert image.get("src").startswith("data:image/webp;base64,")
+
+
+def test_report_style_marks_and_single_sides(tmp_path: Path) -> None:
+    """The style sheet shows a marked part, and one side on the full width."""
+    tree = _tree(render_html(audit_result(), tmp_path / "report.html"))
+    rules: dict[str, list[str]] = {}
+    for selectors, body in CSS_RULE_RE.findall(tree.findtext(".//style")):
+        rules.setdefault(selectors.strip(), []).append(body)
+    assert (
+        "grid-template-columns: minmax(0, 1fr);" in rules[".sides.single"][0]
+    )
+    assert "color: var(--mark-fg);" in rules["mark"][0]
+    assert "background: var(--mark-bg);" in rules["mark"][0]
+    light, dark = rules[":root"]
+    assert "--mark-fg: #3d2c00;\n  --mark-bg: #fff1b8;" in light
+    assert "--mark-fg: #f2e5b0;\n    --mark-bg: #4d3800;" in dark
+
+
+def test_html_normalizations_are_titled_by_command(
+    tmp_path: Path,
+    result: CompareResult,
+) -> None:
+    """A comparison shows normalized differences, an audit normalizations."""
+    counter = Counter({"quote": 2})
+    both = replace(result, ref=replace(result.ref, normalization=counter))
+    text = render_html(both, tmp_path / "c.html").read_text(encoding="utf-8")
+    assert "<h2>Normalized differences</h2>" in text
+    assert '<tr><th scope="row">quote</th><td>2</td><td>0</td></tr>' in text
+    audit = audit_result()
+    counted = replace(audit, doc=replace(audit.doc, normalization=counter))
+    text = render_html(counted, tmp_path / "a.html").read_text(
+        encoding="utf-8",
+    )
+    assert "<h2>Normalizations</h2>" in text
+    assert (
+        '<thead><tr><th scope="col">Normalization</th>'
+        '<th scope="col">Document</th></tr></thead>'
+    ) in text
+    assert '<tr><th scope="row">quote</th><td>2</td></tr>' in text
+    assert "Normalized differences" not in text
