@@ -13,6 +13,8 @@ from doc_checker.compare.textdiff import (
     without_letter_hyphens,
 )
 from doc_checker.model.findings import Severity
+from doc_checker.spell.dictionary import DICTIONARY_LANGUAGES
+from doc_checker.spell.words import MAX_WORD_CHARS, skip_reason, words
 from doc_checker.text.lexicon import is_modal, negation_count
 from doc_checker.text.normalize import count_marks, strip_accents
 from doc_checker.text.numbers import canonical_number
@@ -21,9 +23,14 @@ from doc_checker.text.tokenize import Token, TokenKind
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from doc_checker.spell.speller import Speller
+
 TYPO_MAX_DISTANCE: Final = 2
 SHORT_WORD_LEN: Final = 4
 MANY_WORDS: Final = 3
+# How far around a word its run of non-blank characters is read: a word in a
+# longer run is no word that the speller reads.
+RUN_SCAN_MAX: Final = 2 * MAX_WORD_CHARS
 
 _LIGATURES: Final = ("ffi", "ffl", "ff", "fi", "fl")
 _LIGATURE_GAPS: Final = ("", " ", "\U0000fffd")
@@ -51,6 +58,10 @@ class HunkContext:
         ref_vocabulary: Casefolded words of the whole reference document.
         ref_lang: Language of the reference document.
         new_lang: Language of the new document.
+        speller: The speller that confirms a typo, with the personal
+            words; None to tell a typo by the reference vocabulary only.
+        code_words: Casefolded words of the inline code of the compared
+            blocks, which the speller does not judge.
     """
 
     ref_text: str
@@ -60,6 +71,8 @@ class HunkContext:
     ref_vocabulary: frozenset[str]
     ref_lang: str | None
     new_lang: str | None
+    speller: Speller | None = None
+    code_words: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,17 +224,159 @@ def _modality(view: _View, _: HunkContext) -> Classification | None:
 
 
 def _typo(view: _View, ctx: HunkContext) -> Classification | None:
-    words = view.single_words()
-    if words is None:
+    """Classify a word replaced by a close one.
+
+    The words are close when their Damerau-Levenshtein distance, without
+    case, is at most 1, or `TYPO_MAX_DISTANCE` past `SHORT_WORD_LEN`
+    letters. The dictionaries judge them, as `_confirmed` does; when they
+    cannot, the new word is a word replaced if the reference uses it, a
+    typo otherwise.
+
+    Args:
+        view: The two sides of the difference.
+        ctx: The compared blocks.
+
+    Returns:
+        The classification, or None if the difference is not one word
+        replaced by a close one.
+    """
+    pair = view.single_words()
+    if pair is None:
         return None
-    ref_word, new_word = (word.casefold() for word in words)
+    ref_word, new_word = (word.casefold() for word in pair)
     limit = 1 if len(ref_word) <= SHORT_WORD_LEN else TYPO_MAX_DISTANCE
     distance = DamerauLevenshtein.distance(ref_word, new_word)
     if not 0 < distance <= limit:
         return None
+    confirmed = _confirmed(view, ctx)
+    if confirmed is not None:
+        return confirmed
     if new_word in ctx.ref_vocabulary:
         return Classification("text.word_replaced", Severity.MAJOR)
     return Classification("text.typo", Severity.MAJOR)
+
+
+def _confirmed(view: _View, ctx: HunkContext) -> Classification | None:
+    """Classify two close words by the dictionaries, if they can tell.
+
+    They can when the context has a speller, both languages have a
+    dictionary and both words are `_checkable`. A new word that the
+    reference uses, a personal word or a word of the dictionaries is known:
+    if the old word is in lowercase and unknown, the new one corrects it;
+    otherwise it replaces it. An unknown new word is a typo. A dictionary
+    that cannot be loaded raises the `DictionaryError` of the speller.
+
+    Args:
+        view: The two sides of a one word replacement.
+        ctx: The compared blocks, with the speller.
+
+    Returns:
+        The classification, or None if the dictionaries cannot tell, or if
+        the speller could not truly look a word up, as `_vouched` tells.
+    """
+    speller = ctx.speller
+    ref_lang, new_lang = ctx.ref_lang, ctx.new_lang
+    ref_token, new_token = view.ref_tokens[0], view.new_tokens[0]
+    if (
+        speller is None
+        or ref_lang not in DICTIONARY_LANGUAGES
+        or new_lang not in DICTIONARY_LANGUAGES
+        or not _checkable(ctx.ref_text, ref_token, ctx.code_words)
+        or not _checkable(ctx.new_text, new_token, ctx.code_words)
+    ):
+        return None
+    ref_word, new_word = ref_token.text, new_token.text
+    new_known = new_word.casefold() in ctx.ref_vocabulary or _vouched(
+        speller,
+        new_word,
+        new_lang,
+    )
+    if new_known is None:
+        return None
+    if not new_known:
+        return Classification("text.typo", Severity.MAJOR)
+    if ref_word.islower():
+        ref_known = _vouched(speller, ref_word, ref_lang)
+        if ref_known is None:
+            return None
+        if not ref_known:
+            return Classification("text.typo_fixed", Severity.INFO)
+    return Classification("text.word_replaced", Severity.MAJOR)
+
+
+def _checkable(text: str, token: Token, code_words: frozenset[str]) -> bool:
+    """Return whether the speller may judge a word of a difference.
+
+    Args:
+        text: The text of the side of the word.
+        token: The word.
+        code_words: The casefolded words of inline code.
+
+    Returns:
+        Whether the word has no `skip_reason`, is no word of inline code
+        and is `_spelled` in its text.
+    """
+    return (
+        skip_reason(token.text) is None
+        and token.text.casefold() not in code_words
+        and _spelled(text, token)
+    )
+
+
+def _spelled(text: str, token: Token) -> bool:
+    """Return whether a token is a word that the speller reads in its text.
+
+    The token must lie inside one of the `words` of its run of non-blank
+    characters, as an elided word lies inside ``d'accueil``: a part of a
+    URL, an e-mail address, a path or an option does not. The run is read
+    at most `RUN_SCAN_MAX` characters around the token, and a longer run
+    gives no word.
+
+    Args:
+        text: The text of the token.
+        token: The word token.
+
+    Returns:
+        Whether the token is a word that the speller reads.
+    """
+    start, end = token.start, token.end
+    low = max(0, start - RUN_SCAN_MAX)
+    high = min(len(text), end + RUN_SCAN_MAX)
+    while start > low and not text[start - 1].isspace():
+        start -= 1
+    while end < high and not text[end].isspace():
+        end += 1
+    if (start > 0 and not text[start - 1].isspace()) or (
+        end < len(text) and not text[end].isspace()
+    ):
+        return False
+    first, last = token.start - start, token.end - start
+    return any(
+        word.start <= first and last <= word.end
+        for word in words(text[start:end])
+    )
+
+
+def _vouched(speller: Speller, word: str, lang: str) -> bool | None:
+    """Return whether the speller knows a word, None if it did not look.
+
+    Args:
+        speller: The speller.
+        word: The word.
+        lang: Its language, one with a dictionary.
+
+    Returns:
+        Whether the word is known, or None if the speller had spent its
+        budget before it could look the word up, or took it as known
+        because spylls failed on it.
+    """
+    known = speller.known(word, lang)
+    if known and (
+        speller.doubtful(word, lang)
+        or not speller.known(word, lang, spent=False)
+    ):
+        return None
+    return known
 
 
 def _size(word_count: int) -> Severity:
@@ -262,7 +417,10 @@ def classify_hunk(hunk: Hunk, ctx: HunkContext) -> Classification:
     """Return the rule and severity of a difference.
 
     The rules are tried in order and the first that applies wins; a
-    difference no rule recognizes is a plain modification.
+    difference no rule recognizes is a plain modification. Only a word
+    replaced by a close one, that no rule before claims, is looked up in
+    the dictionaries; one that cannot be loaded raises the
+    `DictionaryError` of the speller.
 
     Args:
         hunk: The difference.

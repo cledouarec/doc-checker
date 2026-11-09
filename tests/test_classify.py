@@ -4,14 +4,19 @@
 import pytest
 
 from doc_checker.compare.classify import (
+    RUN_SCAN_MAX,
     HunkContext,
     classify_hunk,
     has_encoding_damage,
 )
 from doc_checker.compare.textdiff import diff_tokens
 from doc_checker.model.findings import Severity
+from doc_checker.spell import speller as speller_module
+from doc_checker.spell.speller import Speller
 from doc_checker.text.tokenize import TokenKind, tokenize
 
+LOAD_DICTIONARY = speller_module.load_dictionary
+EM_DASH = "\U00002014"
 C = Severity.CRITICAL
 MA = Severity.MAJOR
 MI = Severity.MINOR
@@ -22,6 +27,8 @@ def _classify(
     ref: str,
     new: str,
     lang: str | None = "en",
+    *,
+    speller: Speller | None = None,
 ) -> list[tuple[str, Severity]]:
     ref_tokens, new_tokens = tokenize(ref), tokenize(new)
     vocabulary = frozenset(
@@ -35,6 +42,7 @@ def _classify(
         vocabulary,
         lang,
         lang,
+        speller=speller,
     )
     return [
         (c.rule, c.severity)
@@ -167,6 +175,208 @@ def test_classify_hunk(
 ) -> None:
     """Each kind of difference gets its rule and severity."""
     assert _classify(ref, new, lang) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("ref", "new", "words", "expected"),
+    [
+        (
+            "The installer downloads files.",
+            "The installer donwloads files.",
+            (),
+            ("text.typo", MA),
+        ),
+        (
+            "Open the files now.",
+            "Open the files new.",
+            (),
+            ("text.word_replaced", MA),
+        ),
+        (
+            "Copy from the form.",
+            "Copy form the form.",
+            (),
+            ("text.word_replaced", MA),
+        ),
+        (
+            "Please recieve the file.",
+            "Please receive the file.",
+            (),
+            ("text.typo_fixed", IN),
+        ),
+        (
+            "Recieve the file.",
+            "Receive the file.",
+            (),
+            ("text.word_replaced", MA),
+        ),
+        ("Kubernetes runs.", "Kubernets runs.", (), ("text.typo", MA)),
+        (
+            "Order part XJ-120-4 today.",
+            "Order part XJ-1204 today.",
+            (),
+            ("text.typo", MA),
+        ),
+        (
+            "The installer downloads files.",
+            "The installer donwloads files.",
+            ("donwloads",),
+            ("text.word_replaced", MA),
+        ),
+    ],
+)
+def test_classify_hunk_with_the_dictionary(
+    ref: str,
+    new: str,
+    words: tuple[str, ...],
+    expected: tuple[str, Severity],
+) -> None:
+    """The dictionary confirms a typo, a valid word or a correction."""
+    assert _classify(ref, new, speller=Speller(words)) == [expected]
+
+
+def test_without_dictionary_language_the_vocabulary_decides() -> None:
+    """A language without dictionary keeps the classification of phase 1."""
+    assert _classify(
+        "Open the files now.",
+        "Open the files new.",
+        "de",
+        speller=Speller(),
+    ) == [("text.typo", MA)]
+
+
+def test_a_negation_stays_critical_with_the_dictionary() -> None:
+    """A word that changes a negation is never a mere word replacement."""
+    assert _classify(
+        "Copy the files now.",
+        "Copy the files not.",
+        speller=Speller(),
+    ) == [("text.negation_changed", C)]
+
+
+def test_a_word_not_looked_up_keeps_the_classification_of_phase_1() -> None:
+    """Once the budget is spent, the vocabulary decides, as in phase 1."""
+    speller = Speller(work=0)
+    assert _classify(
+        "Please recieve the file.",
+        "Please receive the file.",
+        speller=speller,
+    ) == [("text.typo", MA)]
+    assert _classify(
+        "Copy from the form.",
+        "Copy form the form.",
+        speller=speller,
+    ) == [("text.word_replaced", MA)]
+    assert speller.exhausted
+    assert speller.lookups == 0
+
+
+@pytest.mark.parametrize(
+    ("ref", "new"),
+    [
+        (
+            "See https://example.com/docs/recieve for it.",
+            "See https://example.com/docs/receive for it.",
+        ),
+        (
+            "Edit the /etc/recieve.conf file now.",
+            "Edit the /etc/receive.conf file now.",
+        ),
+        (
+            "Set tbl/pcell/begin in the hook.",
+            "Set tbl/cell/begin in the hook.",
+        ),
+        ("Pass --recieve to the tool.", "Pass --receive to the tool."),
+        (
+            "Write to recieve@example.com today.",
+            "Write to receive@example.com today.",
+        ),
+    ],
+)
+def test_a_word_inside_code_keeps_the_classification_of_phase_1(
+    ref: str,
+    new: str,
+) -> None:
+    """A URL, a path, an option or an address is no word to spell."""
+    assert _classify(ref, new, speller=Speller()) == [("text.typo", MA)]
+
+
+@pytest.mark.parametrize(
+    ("glued", "expected"),
+    [
+        (RUN_SCAN_MAX - 1, ("text.typo_fixed", IN)),
+        (RUN_SCAN_MAX, ("text.typo", MA)),
+    ],
+)
+def test_the_run_of_a_word_is_read_within_a_bound(
+    glued: int,
+    expected: tuple[str, Severity],
+) -> None:
+    """A word in a run longer than the bound is no word to spell."""
+    ref = f"Read {'a' * glued}{EM_DASH}recieve now."
+    new = ref.replace("recieve", "receive")
+    assert _classify(ref, new, speller=Speller()) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("ref", "new", "lang", "expected"),
+    [
+        (
+            "La page d'acceuil est vide.",
+            "La page d'accueil est vide.",
+            "fr",
+            ("text.typo_fixed", IN),
+        ),
+        (
+            "Its raison is clear.",
+            "Its reason is clear.",
+            "en",
+            ("text.word_replaced", MA),
+        ),
+    ],
+)
+def test_each_language_has_its_dictionary(
+    ref: str,
+    new: str,
+    lang: str,
+    expected: tuple[str, Severity],
+) -> None:
+    """A French correction is info; a French word in English is a word."""
+    assert _classify(ref, new, lang, speller=Speller()) == [expected]
+
+
+class _FailsOn:
+    """A dictionary that fails on one word and knows the others it knows."""
+
+    def __init__(self, lang: str, word: str) -> None:
+        """Wrap the dictionary of a language."""
+        self.dictionary = LOAD_DICTIONARY(lang)
+        self.word = word
+
+    def lookup(self, form: str) -> bool:
+        """Fail on the word, as spylls might on a hostile one."""
+        if form == self.word:
+            raise IndexError(form)
+        return self.dictionary.lookup(form)
+
+
+def test_a_failed_lookup_of_the_new_word_is_never_a_correction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new word that spylls fails on keeps the classification of phase 1."""
+    monkeypatch.setattr(
+        speller_module,
+        "load_dictionary",
+        lambda lang: _FailsOn(lang, "zorblaxed"),
+    )
+    speller = Speller()
+    for _ in range(2):
+        assert _classify(
+            "Run the zorblax step.",
+            "Run the zorblaxed step.",
+            speller=speller,
+        ) == [("text.typo", MA)]
+    assert speller.failed == 1
 
 
 def test_identical_text_has_no_hunk() -> None:

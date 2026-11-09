@@ -48,6 +48,21 @@ class BlockKind(StrEnum):
     INDEX = "index"
 
 
+# The blocks of prose, whose words and typography are checked.
+SPELLED_KINDS: Final = frozenset(
+    {
+        BlockKind.HEADING,
+        BlockKind.PARAGRAPH,
+        BlockKind.LIST_ITEM,
+        BlockKind.TABLE,
+        BlockKind.CAPTION,
+        BlockKind.QUOTE,
+        BlockKind.ADMONITION,
+        BlockKind.FOOTNOTE,
+    },
+)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceRef:
     """Location of a block in its source document.
