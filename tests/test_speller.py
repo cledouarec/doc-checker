@@ -217,6 +217,23 @@ def test_spent_budget_takes_words_as_known() -> None:
     assert speller.lookups == 1
 
 
+def test_the_verdict_tells_a_word_not_looked_up() -> None:
+    """Past the budget, a new word has no verdict; one looked up keeps it."""
+    speller = Speller(["Orbitctl"], work=16)
+    assert speller.verdict("maison", "fr") is True
+    assert speller.verdict("qwzzy", "fr") is False
+    assert not speller.exhausted
+    assert speller.verdict("zorblax", "fr") is None
+    assert speller.exhausted
+    assert speller.verdict("maison", "fr") is True
+    assert speller.verdict("qwzzy", "fr") is False
+    assert speller.verdict("orbitctl", "fr") is True
+    assert speller.verdict("a" * 200, "fr") is False
+    assert speller.known("zorblax", "fr")
+    assert not speller.known("zorblax", "fr", spent=False)
+    assert speller.lookups == 2
+
+
 def test_non_latin_shapes_are_never_looked_up() -> None:
     """A word that is not a Latin word is unknown, and costs nothing."""
     speller = Speller()
@@ -269,6 +286,19 @@ def test_spent_budget_stops_the_lookups_and_caches_nothing() -> None:
     assert speller.lookups == 1
 
 
+def test_a_spent_budget_may_refuse_the_words_not_looked_up() -> None:
+    """With ``spent=False``, only words looked up in time are known."""
+    speller = Speller(["mine"], work=20)
+    assert speller.known("configuration", "en", spent=False)
+    assert not speller.known("abcdefgh", "en", spent=False)
+    assert speller.exhausted
+    assert speller.known("configuration", "en", spent=False)
+    assert not speller.known("library", "en", spent=False)
+    assert speller.known("library", "en")
+    assert speller.known("mine", "en", spent=False)
+    assert speller.lookups == 1
+
+
 def test_a_failing_lookup_takes_the_word_as_known(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -283,6 +313,35 @@ def test_a_failing_lookup_takes_the_word_as_known(
     assert speller.known("anything", "fr")
     assert speller.failed == 1
     assert speller.lookups == 1
+
+
+def test_a_word_taken_as_known_after_a_failure_is_doubtful(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The words that spylls failed on stay doubtful, and no other word."""
+    monkeypatch.setattr(
+        speller_module,
+        "load_dictionary",
+        lambda _: _FailingDictionary(),
+    )
+    speller = Speller(["mine"])
+    assert not speller.doubtful("anything", "fr")
+    assert speller.known("anything", "fr")
+    assert speller.doubtful("anything", "fr")
+    assert speller.known("anything", "fr")
+    assert speller.doubtful("anything", "fr")
+    assert not speller.doubtful("anything", "en")
+    assert speller.known("mine", "fr")
+    assert not speller.doubtful("mine", "fr")
+
+
+def test_a_word_found_is_not_doubtful() -> None:
+    """A word that the dictionary answered for is not doubtful."""
+    speller = Speller()
+    assert speller.known(f"don{APOSTROPHE}t", "en")
+    assert not speller.known("zorblaxed", "en")
+    assert not speller.doubtful("don't", "en")
+    assert not speller.doubtful("zorblaxed", "en")
 
 
 def test_a_dictionary_that_cannot_be_loaded_is_an_error(

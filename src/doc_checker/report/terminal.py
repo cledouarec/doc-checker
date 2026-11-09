@@ -221,8 +221,9 @@ def render_audit_summary(result: AuditResult, reports: Sequence[Path]) -> str:
 
     Returns:
         Styled text; ``click.echo`` removes the styles when not in a TTY.
-        The document, its counts, the families of checks and the profile,
-        the findings counted by severity, then, if the highest severity
+        The document, its counts (the words are those spelled), the
+        families of checks and the profile, the findings counted by
+        severity, then, if the highest severity
         found is major or critical, the first five findings of that
         severity, as `render_summary` lists the critical ones; then the
         warnings of the document and the reports. The values that come from
@@ -233,12 +234,13 @@ def render_audit_summary(result: AuditResult, reports: Sequence[Path]) -> str:
     stats = result.stats
     images = str(stats.images) if stats.images_read else IMAGES_NOT_READ
     links = NOT_RUN if stats.links is None else str(stats.links)
+    words = NOT_RUN if stats.words is None else str(stats.words)
     checks = ", ".join(stats.checks) or NOT_RUN
     lines = [
         f"audit  doc={_described(result.doc)}",
         (
             f"blocks {stats.blocks} | images {images} | links {links}"
-            f" | checks {checks} | profile {stats.profile}"
+            f" | words {words} | checks {checks} | profile {stats.profile}"
         ),
         _counts(result.findings),
     ]

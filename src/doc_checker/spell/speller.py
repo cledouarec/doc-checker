@@ -14,8 +14,8 @@ is.
 
 Documents are untrusted, and a Hunspell lookup may be slow: the speller
 looks each word up once, and stops after a work budget, where the words not
-looked up yet are taken as known. A word that spylls fails on is taken as
-known and counted.
+looked up yet have no verdict, and are taken as known unless the caller
+says otherwise. A word that spylls fails on is taken as known and counted.
 """
 
 import re
@@ -138,6 +138,7 @@ class Speller:
         self._known: dict[tuple[str, str], bool] = {}
         self._dictionaries: dict[str, Dictionary] = {}
         self._broken: dict[str, str] = {}
+        self._doubtful: set[tuple[str, str]] = set()
         self._exhausted = False
         self._failed = 0
 
@@ -156,8 +157,39 @@ class Speller:
         """The words that spylls failed on, taken as known."""
         return self._failed
 
-    def known(self, word: str, lang: str) -> bool:
+    def doubtful(self, word: str, lang: str) -> bool:
+        """Return whether a word is known only because spylls failed on it.
+
+        Args:
+            word: The word, as the document writes it.
+            lang: The language it was looked up in.
+
+        Returns:
+            Whether the lookup of the word in that language was cut by a
+            failure of spylls, which `known` takes as known.
+        """
+        return (lang, word.translate(_LOOKUP_FORM)) in self._doubtful
+
+    def known(self, word: str, lang: str, *, spent: bool = True) -> bool:
         """Return whether a word is known in a language.
+
+        Args:
+            word: The word, as the document writes it.
+            lang: ``"fr"`` or ``"en"``.
+            spent: The answer for a word that has no `verdict`, a new word
+                once the budget is spent: known by default, so that the
+                spelling reports no word it did not look up; False for a
+                caller that must count only the words that a dictionary or
+                the personal words vouch for.
+
+        Returns:
+            Whether the word is known, as `verdict` tells, else ``spent``.
+        """
+        answer = self.verdict(word, lang)
+        return spent if answer is None else answer
+
+    def verdict(self, word: str, lang: str) -> bool | None:
+        """Return whether a word is known in a language, if it can be told.
 
         Typographic apostrophes and hyphens are read straight. A personal
         word or its possessive is known, and costs no lookup, and so is a
@@ -169,15 +201,16 @@ class Speller:
         its charge fits in the work left: ``max(len(word),
         LOOKUP_MIN_COST)``, times ``1 + 2 * hyphens``, times ``1 +
         apostrophes``. Otherwise the budget is spent, and from then on every
-        new word is taken as known. A dictionary that cannot be loaded
-        raises `DictionaryError`, which names it.
+        new word has no verdict. A dictionary that cannot be loaded raises
+        `DictionaryError`, which names it.
 
         Args:
             word: The word, as the document writes it.
             lang: ``"fr"`` or ``"en"``.
 
         Returns:
-            Whether the word is known.
+            Whether the word is known; None for a new word once the budget
+            is spent, which was not looked up.
 
         Raises:
             ValueError: If the language has no dictionary.
@@ -202,7 +235,7 @@ class Speller:
         if answer is not None:
             return answer
         if self._exhausted:
-            return True
+            return None
         charge = (
             max(len(word), LOOKUP_MIN_COST)
             * (1 + 2 * word.count("-"))
@@ -210,8 +243,11 @@ class Speller:
         )
         if charge > self._work:
             self._exhausted = True
-            return True
+            return None
+        failed = self._failed
         answer = self._search(word, lang)
+        if self._failed > failed:
+            self._doubtful.add(key)
         self._work -= charge
         self._known[key] = answer
         return answer

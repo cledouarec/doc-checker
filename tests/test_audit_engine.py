@@ -4,9 +4,9 @@
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from doc_checker.audit.engine import AuditStats, audit_document
+from doc_checker.audit.engine import TEXT, AuditStats, audit_document
 from doc_checker.compare.drafts import EXCERPT_MAX_CHARS, marked_side
-from doc_checker.config import Config, IgnoreConfig
+from doc_checker.config import Config, IgnoreConfig, SpellingConfig
 from doc_checker.images.refs import raster_ref
 from doc_checker.model.document import BlockKind, Link, SourceRef
 from doc_checker.model.facts import HtmlPageFacts, PdfLink, PdfPageFacts
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from doc_checker.model.document import Document
 
 STRUCTURE_ONLY = Config(checks=("structure",))
+HOME = (HtmlPageFacts("index.html", "en", "Home"),)
 
 
 def test_audit_finalizes_its_drafts() -> None:
@@ -232,3 +233,57 @@ def test_stats_tell_the_families_that_ran() -> None:
     alone = replace(Config(checks=("images",)), images=False)
     stats = audit_document(doc, alone).stats
     assert (stats.checks, stats.links) == ((), None)
+
+
+def test_text_family_runs_last_and_counts_words() -> None:
+    """The text findings come after the others; the checked words count."""
+    block = replace(
+        make_block("The installer donwloads the install guide."),
+        links=(Link("install guide", "install.html", page="install.html"),),
+    )
+    doc = make_audit_document(block, html_pages=HOME)
+    result = audit_document(doc, Config())
+    assert [f.rule for f in result.findings] == [
+        "link.page_missing",
+        "text.unknown_word",
+    ]
+    assert result.stats.words == 6
+    assert result.stats.checks[-1] == TEXT
+    assert result.words == ("donwloads",)
+
+
+def test_text_family_can_be_left_out() -> None:
+    """Without the text family, no word is checked nor counted."""
+    doc = make_audit_document(make_block("The installer donwloads it."))
+    result = audit_document(doc, replace(Config(), checks=("structure",)))
+    assert result.stats.words is None
+    assert result.words == ()
+    assert not [f for f in result.findings if f.rule.startswith("text.")]
+
+
+def test_personal_words_reach_the_text_family() -> None:
+    """A personal word of the configuration is no unknown word."""
+    doc = make_audit_document(make_block("The installer donwloads it."))
+    cfg = replace(Config(), spelling=SpellingConfig(("Donwloads",)))
+    result = audit_document(doc, cfg)
+    assert not [f for f in result.findings if f.rule.startswith("text.")]
+    assert result.words == ()
+
+
+def test_text_warnings_join_a_copy_of_the_document() -> None:
+    """The warnings of the text family are added to a copy of the document."""
+    doc = make_audit_document(
+        make_block("Qwzzy plorf brrk."),
+        lang=None,
+        declared_lang=None,
+    )
+    result = audit_document(doc, Config(checks=("text",)))
+    assert doc.warnings == []
+    assert result.doc.warnings == [
+        (
+            "text checks: the language of the document is unknown; the "
+            "checks that depend on the language read only the blocks that "
+            "plainly read as French or English (see --lang)"
+        ),
+    ]
+    assert result.stats.checks == (TEXT,)
