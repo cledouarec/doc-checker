@@ -67,6 +67,8 @@ _SVG_MIME: Final = "image/svg+xml"
 _SVG_STARTS: Final = (b"<?xml", b"<svg")
 _SNIFF_BYTES: Final = 1024  # Head of a file in which an SVG start is sought.
 _BASE64: Final = "base64"
+# The head of a data URL too long to be decoded in which its comma is sought.
+_DATA_HEAD_CHARS: Final = 1024
 _ALT_ATTRIBUTES: Final = ("alt", "aria-label")
 _DECORATIVE_ROLES: Final = frozenset({"presentation", "none"})
 _TITLE: Final = "title"
@@ -302,6 +304,28 @@ def _unreadable(  # ruff: ignore[too-many-arguments] - the facts of an image wit
     )
 
 
+def _data_url_size(src: str) -> int | None:
+    """Estimate the bytes of a data URL too long to be decoded.
+
+    Args:
+        src: The source of an image, as written.
+
+    Returns:
+        For a data URL whose comma comes in its first `_DATA_HEAD_CHARS`
+        characters, the bytes of its payload: three for four characters of
+        base64, else one for each character; ``None`` for another source.
+    """
+    start = len(src) - len(src.lstrip())
+    if not _DATA_URL.match(src, start):
+        return None
+    comma = src.find(",", start, start + _DATA_HEAD_CHARS)
+    if comma < 0:
+        return None
+    payload = len(src) - comma - 1
+    params = src[start:comma].rstrip().lower().split(";")
+    return payload * 3 // 4 if params[-1] == _BASE64 else payload
+
+
 def _svg_ref(raw: RawImage, name: str, data: bytes) -> ImageRef:
     """Return the image of the bytes of an SVG."""
     try:
@@ -393,15 +417,16 @@ class ImageResolver:
         Returns:
             The image. An inline SVG is identified by its source. A source
             longer than `DATA_URL_MAX_CHARS`, a data URL in practice, is
-            `TOO_LARGE`, never cleaned nor decoded. The source is then read
+            `TOO_LARGE`, never cleaned nor decoded, of the size that
+            `_data_url_size` estimates. The source is then read
             as a browser does, without its tabs and line breaks: an image
             without a source is `NOT_FOUND`; a data URL is decoded; an
             external image is `EXTERNAL`, named by its normalized URL.
             Another source is a file of the site: `OUTSIDE` if it goes
             above the root, or is not under it once the symbolic links are
             followed; `NOT_FOUND` if it has no path, such as ``#part``, or
-            is not a file; `TOO_LARGE` beyond `MAX_FILE_BYTES`; else read
-            as an SVG or a raster image.
+            is not a file; `TOO_LARGE` beyond `MAX_FILE_BYTES`, with the
+            size of its file; else read as an SVG or a raster image.
         """
         if raw.svg is not None:
             return ImageRef(
@@ -413,8 +438,9 @@ class ImageResolver:
                 alt=raw.alt,
                 shown=raw.shown,
             )
-        if len(raw.src or "") > DATA_URL_MAX_CHARS:
-            return _unreadable(raw, "", TOO_LARGE)
+        src = raw.src or ""
+        if len(src) > DATA_URL_MAX_CHARS:
+            return _unreadable(raw, "", TOO_LARGE, size=_data_url_size(src))
         target = clean_href(raw.src or "")
         if not target:
             return _unreadable(raw, "", NOT_FOUND)
@@ -469,7 +495,7 @@ class ImageResolver:
             file = self._site_file(path)
             data = read_image_file(file, MAX_FILE_BYTES)
         except UnreadableImage as error:
-            return _unreadable(raw, path, error.reason)
+            return _unreadable(raw, path, error.reason, size=error.size)
         if _format(path) == _SVG_FORMAT or _looks_like_svg(data):
             return _svg_ref(raw, path, data)
         return raster_ref(

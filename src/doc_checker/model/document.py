@@ -164,6 +164,9 @@ class ImageRef:
         texts: Texts of an SVG, in document order.
         source: Where the pixels are read again; None without pixels.
         problem: Why the pixels cannot be read, such as "too large".
+        web_format: For bytes that cannot be decoded, the format of the
+            web that their signature tells, which browsers show though it
+            is not decoded here: "avif" or "jxl"; None otherwise.
     """
 
     name: str
@@ -183,6 +186,7 @@ class ImageRef:
     texts: tuple[str, ...] = ()
     source: PixelSource | None = None
     problem: str | None = None
+    web_format: str | None = None
 
     @property
     def readable(self) -> bool:

@@ -4,17 +4,24 @@
 The family `STRUCTURE` checks the headings, the references, the captions
 and the pages of the document, by `structure_drafts` of
 `doc_checker.audit.structure`, then its links, by `broken_link_drafts` of
-`doc_checker.audit.links`. The drafts of the families then become findings
-as those of `compare` do, by `finalize_drafts` of
+`doc_checker.audit.links`. The family `A11Y` checks its accessibility, by
+`accessibility_drafts` of `doc_checker.audit.accessibility`, after the
+structure. The family `IMAGES` checks its images, when they were read, by
+`image_quality_drafts` of `doc_checker.audit.images`, last, with a
+`PixelLoader` that reads their pixels again. The drafts of the families
+then become findings as those of `compare` do, by `finalize_drafts` of
 `doc_checker.compare.aggregate`: severities, filters, identifiers, groups.
 """
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from doc_checker.audit.accessibility import accessibility_drafts
+from doc_checker.audit.images import image_quality_drafts
 from doc_checker.audit.links import broken_link_drafts
 from doc_checker.audit.structure import structure_drafts
 from doc_checker.compare.aggregate import finalize_drafts
+from doc_checker.images.load import PixelLoader
 from doc_checker.model.document import BlockKind
 
 if TYPE_CHECKING:
@@ -66,11 +73,12 @@ def audit_document(doc: Document, cfg: Config) -> AuditResult:
     Args:
         doc: The document, loaded with its audit facts.
         cfg: Run configuration: its families of checks, its profile, its
-            severities and its filters.
+            thresholds, its severities and its filters.
 
     Returns:
-        The findings, those of the structure first, in the order of the
-        document, and statistics.
+        The findings, those of the structure first, then those of the
+        accessibility, then those of the images, each family in its order,
+        and statistics.
     """
     drafts: list[Draft] = []
     links = 0
@@ -78,6 +86,11 @@ def audit_document(doc: Document, cfg: Config) -> AuditResult:
         drafts += structure_drafts(doc)
         broken, links = broken_link_drafts(doc)
         drafts += broken
+    if A11Y in cfg.checks:
+        drafts += accessibility_drafts(doc, cfg.audit)
+    if IMAGES in cfg.checks and cfg.images:
+        with PixelLoader(doc.path) as loader:
+            drafts += image_quality_drafts(doc, loader, cfg.audit, cfg.profile)
     images = sum(block.kind is BlockKind.IMAGE for block in doc.blocks)
     stats = AuditStats(
         pages=len(doc.parts),

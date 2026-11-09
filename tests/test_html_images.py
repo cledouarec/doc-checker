@@ -95,6 +95,17 @@ def test_file_over_the_size_limit_is_not_read(
     assert (image.problem, image.readable) == ("too large", False)
 
 
+def test_file_over_the_size_limit_keeps_its_size(
+    site: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file too large to be read keeps the size of its file."""
+    monkeypatch.setattr(html_images, "MAX_FILE_BYTES", len(PNG) - 1)
+    image = _read(site, "img/ok.png")
+    assert (image.problem, image.size) == ("too large", len(PNG))
+    assert _read(site, "img/gone.png").size is None
+
+
 def test_external_image_is_never_fetched(
     site: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -126,6 +137,27 @@ def test_data_url_over_the_limit_is_not_decoded(
     image = _read(site, src)
     assert (image.problem, image.readable) == ("too large", False)
     assert image.digest == content_digest(src.encode())
+
+
+@pytest.mark.parametrize(
+    ("src", "size"),
+    [
+        (f"data:image/png;base64,{PNG_DATA}", len(PNG_DATA) * 3 // 4),
+        (f"  DATA:image/png;BASE64,{PNG_DATA}", len(PNG_DATA) * 3 // 4),
+        ("data:image/svg+xml," + "x" * 200, 200),
+        ("img/" + "x" * 200 + ".png", None),
+    ],
+)
+def test_data_url_over_the_limit_has_an_estimated_size(
+    site: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    src: str,
+    size: int | None,
+) -> None:
+    """A long data URL is as heavy as its payload, decoded or not."""
+    monkeypatch.setattr(html_images, "DATA_URL_MAX_CHARS", 100)
+    image = _read(site, src)
+    assert (image.problem, image.size) == ("too large", size)
 
 
 # PostScript that Pillow would hand to Ghostscript, which prints a line.
