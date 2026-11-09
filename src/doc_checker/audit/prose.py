@@ -21,7 +21,7 @@ from operator import itemgetter
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.audit.accessibility import prose_sample
-from doc_checker.model.document import BlockKind
+from doc_checker.model.document import SPELLED_KINDS, BlockKind
 from doc_checker.spell.words import (
     BLANKS,
     CHUNK,
@@ -47,19 +47,6 @@ if TYPE_CHECKING:
 # How many times the text of a block the search of its inline code reads at
 # most.
 CODE_SCAN_FACTOR: Final = 2
-# The blocks whose words and typography are checked.
-SPELLED_KINDS: Final = frozenset(
-    {
-        BlockKind.HEADING,
-        BlockKind.PARAGRAPH,
-        BlockKind.LIST_ITEM,
-        BlockKind.TABLE,
-        BlockKind.CAPTION,
-        BlockKind.QUOTE,
-        BlockKind.ADMONITION,
-        BlockKind.FOOTNOTE,
-    },
-)
 # The blocks of sentences: their sentences and their language are judged.
 SENTENCE_KINDS: Final = SPELLED_KINDS - {BlockKind.HEADING, BlockKind.TABLE}
 # What makes a chunk of a block a chunk of code, for `code_like`.

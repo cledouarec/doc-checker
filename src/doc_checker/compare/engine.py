@@ -2,7 +2,9 @@
 """Turn the alignment of two documents into findings.
 
 Each pair of the alignment gives its drafts: a missing, added, moved, split
-or merged block, and the word level differences of matched blocks. An
+or merged block, and the word level differences of matched blocks, which
+`classify_hunk` of `doc_checker.compare.classify` classifies, with a
+speller that tells a typo from a word replaced or corrected. An
 unmatched default admonition title or chapter label gives none, as the
 generator adds them, and so does the number of a title that lost its
 heading.
@@ -36,7 +38,11 @@ from typing import TYPE_CHECKING, Final
 
 from doc_checker.compare.aggregate import finalize_drafts, text_pattern
 from doc_checker.compare.align import Pair, PairKind, align
-from doc_checker.compare.classify import HunkContext, classify_hunk
+from doc_checker.compare.classify import (
+    Classification,
+    HunkContext,
+    classify_hunk,
+)
 from doc_checker.compare.drafts import MATCHED, Draft, whole
 from doc_checker.compare.images import (
     image_drafts,
@@ -46,18 +52,21 @@ from doc_checker.compare.images import (
 from doc_checker.compare.links import link_drafts
 from doc_checker.compare.structure import kind_drafts, level_drafts
 from doc_checker.compare.textdiff import Hunk, diff_tokens, span_text
+from doc_checker.errors import DictionaryError
 from doc_checker.images.load import PixelLoader
 from doc_checker.model.document import (
     CELL_SEPARATOR,
     NUMBER_ATTR,
+    SPELLED_KINDS,
     Block,
     BlockKind,
     Document,
     carry_anchors,
 )
 from doc_checker.model.findings import DiffSegment, Finding, Side
+from doc_checker.spell.speller import Speller
 from doc_checker.text.lexicon import is_admonition_title, is_chapter_label
-from doc_checker.text.normalize import loose_key
+from doc_checker.text.normalize import loose_key, printable
 from doc_checker.text.numbers import HEADING_NUMBER
 from doc_checker.text.tokenize import Token, TokenKind, tokenize
 
@@ -70,6 +79,9 @@ if TYPE_CHECKING:
 CONTEXT_TOKENS: Final = 8
 
 _CONTENTS: Final = frozenset({BlockKind.TOC, BlockKind.INDEX})
+# The start of the warnings of the dictionaries that confirm the typos.
+_TYPO_CHECK: Final = "typo check: "
+_VOCABULARY_ONLY: Final = "told by the reference vocabulary only"
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +190,13 @@ def _segments(
 
 
 class _Drafter:
-    """Build the draft findings of the pairs of an alignment."""
+    """Build the draft findings of the pairs of an alignment.
+
+    Attributes:
+        speller: The speller that confirms the typos.
+        broken: Why a dictionary could not be loaded, each reason once, in
+            order.
+    """
 
     def __init__(
         self,
@@ -187,11 +205,14 @@ class _Drafter:
         langs: tuple[str | None, str | None],
         *,
         pdf: bool,
+        speller: Speller,
     ) -> None:
         self.ref = ref
         self.new = new
         self.langs = langs
         self.pdf = pdf
+        self.speller = speller
+        self.broken: dict[str, None] = {}
         self.vocabulary = frozenset(
             token.text.casefold()
             for block in ref
@@ -244,7 +265,9 @@ class _Drafter:
         side has a heading, and that heading has its number set apart or
         the document of the block numbers its headings: a title that lost
         its heading keeps the number that its generator gave it, and the
-        numbers of the headings are never compared.
+        numbers of the headings are never compared. The speller judges the
+        differences only when every block of the pair is of
+        `SPELLED_KINDS`, and never a word of their inline code.
         """
         flat = {block.kind for block in ref_blocks} != {
             block.kind for block in new_blocks
@@ -260,6 +283,8 @@ class _Drafter:
             for block in new_blocks
         )
         ref_tokens, new_tokens = tokenize(ref_text), tokenize(new_text)
+        blocks = (*ref_blocks, *new_blocks)
+        prose = all(block.kind in SPELLED_KINDS for block in blocks)
         ctx = HunkContext(
             ref_text,
             new_text,
@@ -267,21 +292,35 @@ class _Drafter:
             new_tokens,
             self.vocabulary,
             *self.langs,
+            speller=self.speller if prose else None,
+            code_words=_code_words(blocks) if prose else frozenset(),
         )
         return [
             self.hunk_draft(hunk, ctx, ref_blocks[0], new_blocks[0])
             for hunk in diff_tokens(ref_tokens, new_tokens)
         ]
 
-    @staticmethod
+    def classify(self, hunk: Hunk, ctx: HunkContext) -> Classification:
+        """Return the classification of a difference.
+
+        A dictionary that cannot be loaded is noted in `broken`, and the
+        difference is classified without the speller.
+        """
+        try:
+            return classify_hunk(hunk, ctx)
+        except DictionaryError as exc:
+            self.broken[str(exc)] = None
+            return classify_hunk(hunk, replace(ctx, speller=None))
+
     def hunk_draft(
+        self,
         hunk: Hunk,
         ctx: HunkContext,
         ref_block: Block,
         new_block: Block,
     ) -> Draft:
         """Return the draft of one word level difference."""
-        classification = classify_hunk(hunk, ctx)
+        classification = self.classify(hunk, ctx)
         ref_segments = _segments(
             ctx.ref_text,
             ctx.ref_tokens,
@@ -342,6 +381,29 @@ class _Drafter:
             drafts += self.hunks(ref_blocks, new_blocks)
         return drafts
 
+    def warnings(self) -> list[str]:
+        """Return what the dictionaries could not do, each on one line.
+
+        Returns:
+            Each dictionary that could not be loaded, then the spent budget,
+            then the words that spylls failed on.
+        """
+        notes = [
+            f"{reason}; the typos that needed it were {_VOCABULARY_ONLY}"
+            for reason in self.broken
+        ]
+        if self.speller.exhausted:
+            notes.append(
+                f"the dictionaries stopped after {self.speller.lookups} "
+                f"distinct words; the other typos were {_VOCABULARY_ONLY}",
+            )
+        if self.speller.failed:
+            notes.append(
+                f"{self.speller.failed} word(s) could not be looked up and "
+                "were taken as known",
+            )
+        return [printable(_TYPO_CHECK + note) for note in notes]
+
     def drafts(self, pairs: Sequence[Pair]) -> list[Draft]:
         """Return the drafts of all pairs, in pair order.
 
@@ -394,6 +456,17 @@ class _Drafter:
             drafts += levels.get(position, [])
             drafts += links.get(position, [])
         return drafts
+
+
+def _code_words(blocks: Iterable[Block]) -> frozenset[str]:
+    """Return the casefolded words of the inline code of blocks."""
+    return frozenset(
+        token.text.casefold()
+        for block in blocks
+        for span in block.code_spans
+        for token in tokenize(span)
+        if token.kind is TokenKind.WORD
+    )
 
 
 def _numbered(blocks: Sequence[Block]) -> bool:
@@ -539,7 +612,9 @@ def compare_documents(
     The table of contents and index blocks of PDF documents are neither
     compared nor counted, unless ``cfg.pdf.compare_toc`` is set. Nor are
     the images that either document removed as page chrome, nor any image
-    without ``cfg.images``.
+    without ``cfg.images``. A word of prose replaced by a close one is
+    judged by a speller with the personal words of ``cfg.spelling``, whose
+    dictionaries are loaded at the first such word.
 
     Args:
         ref: Reference document.
@@ -548,7 +623,9 @@ def compare_documents(
 
     Returns:
         The findings, in reference order, those of the images after those
-        of the text, and statistics.
+        of the text, and statistics. If the dictionaries could not judge
+        every such word, the new document is a copy whose warnings end
+        with the reasons.
     """
     chrome = ref.chrome_keys | new.chrome_keys
     patterns = [re.compile(pattern) for pattern in cfg.ignore.patterns]
@@ -576,7 +653,12 @@ def compare_documents(
         new_blocks,
         (ref.lang, new.lang),
         pdf=ref.format == "pdf",
+        speller=Speller(cfg.spelling.words),
     )
+    text_drafts = drafter.drafts(pairs)
+    notes = drafter.warnings()
+    if notes:
+        new = replace(new, warnings=[*new.warnings, *notes])
     images = (
         _images((ref, new), (ref_kept, new_kept), pairs)
         if cfg.images
@@ -592,5 +674,5 @@ def compare_documents(
         matched_images=images.matched,
         images=cfg.images,
     )
-    drafts = [*drafter.drafts(pairs), *images.drafts]
+    drafts = [*text_drafts, *images.drafts]
     return CompareResult(ref, new, finalize_drafts(drafts, cfg), stats)

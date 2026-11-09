@@ -74,6 +74,12 @@ DEFECTS: list[tuple[DocSpec, Transform, str, Severity]] = [
     ),
     (
         SAMPLE_EN,
+        lambda s: replace_text(s, "before you start", "before you stare"),
+        "text.word_replaced",
+        MA,
+    ),
+    (
+        SAMPLE_EN,
         lambda s: replace_text(s, "100 requests", "10 requests"),
         "text.number_changed",
         C,
@@ -187,6 +193,21 @@ def test_injected_defect_is_reported(
         if f.severity >= MI or f.rule == rule
     ]
     assert relevant == [(rule, severity)]
+
+
+def test_a_corrected_typo_is_info(tmp_path: Path) -> None:
+    """A typo of the reference corrected in the new build is information."""
+    typo = replace_text(
+        SAMPLE_EN,
+        "installer downloads",
+        "installer donwloads",
+    )
+    ref = build_sphinx_like(typo, tmp_path / "ref")
+    new = build_sphinx_like(SAMPLE_EN, tmp_path / "new")
+    findings = run_compare(ref, new, Config()).findings
+    assert [(f.rule, f.severity) for f in findings] == [
+        ("text.typo_fixed", IN),
+    ]
 
 
 # Changes of structure, each with the one finding of at least minor

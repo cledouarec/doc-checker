@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from doc_checker.config import AuditThresholds, Config
+from doc_checker.config import AuditThresholds, Config, SpellingConfig
 from doc_checker.images.pixels import open_raster
 from doc_checker.model.findings import Category, Finding, Severity
 from doc_checker.pipeline import run_audit
@@ -25,6 +25,7 @@ from tests.builders import (
     plant,
     replace_text,
     rule_counts,
+    sentence,
 )
 from tests.image_builders import blurred, drawing, encode, photo, pixelated
 from tests.pdf_builders import (
@@ -76,6 +77,12 @@ CLEAN_BUILDS: list[tuple[str, Build, dict[str, int]]] = [
         {"a11y.alt_missing": 1},
     ),
     ("tagged", lambda out: build_tagged_pdf(out.with_suffix(".pdf")), {}),
+    ("mkdocs-fr", lambda out: build_mkdocs_like(SAMPLE_FR, out), {}),
+    (
+        "fpdf2-fr",
+        lambda out: build_fpdf2_pdf(SAMPLE_FR, out.with_suffix(".pdf")),
+        {"a11y.alt_missing": 1},
+    ),
 ]
 
 
@@ -525,6 +532,200 @@ def test_low_resolution_figure_in_pdf(tmp_path: Path) -> None:
     before = rule_counts(run_audit(clean, CONFIG).findings, minimum=major)
     after = rule_counts(run_audit(planted, CONFIG).findings, minimum=major)
     assert after - before == Counter({"image.low_dpi": 1})
+
+
+TEXT_SPECS = {"en": FIGURES_EN, "fr": SAMPLE_FR}
+MISSPELLED: Edit = (GUIDE, "installer downloads", "installer donwloads")
+REPEATED: Edit = (GUIDE, "with the default", "with the the default")
+START = "prise-en-main.html"
+ATTENTION = "Attention\xa0: le mode"
+
+TEXT_DEFECTS: list[tuple[str, str, tuple[Edit, ...], dict[str, int]]] = [
+    ("en", "unknown_word", (MISSPELLED,), {"text.unknown_word": 1}),
+    ("en", "repeated", (REPEATED,), {"text.repeated_word": 1}),
+    (
+        "en",
+        "space_before",
+        (("user-guide.html", "has an owner who", "has an owner , who"),),
+        {"text.space_before_punctuation": 1},
+    ),
+    (
+        "en",
+        "long_minor",
+        (_before_first_steps(f"<p>{sentence(45)}</p>"),),
+        {"text.long_sentence": 1},
+    ),
+    (
+        "en",
+        "long_major",
+        (_before_first_steps(f"<p>{sentence(65)}</p>"),),
+        {"text.long_sentence": 1},
+    ),
+    (
+        "en",
+        "ordinal",
+        (_before_first_steps("<p>Restart the service a 2th time.</p>"),),
+        {"text.ordinal": 1},
+    ),
+    (
+        "en",
+        "unit",
+        ((GUIDE, "2 GB of free", "2GB of free"),),
+        {"text.unit_space": 1},
+    ),
+    (
+        "en",
+        "double",
+        ((GUIDE, "before you start.", "before you start.."),),
+        {"text.double_punctuation": 1},
+    ),
+    (
+        "en",
+        "block_language",
+        (
+            _before_first_steps(
+                "<p>Le service redémarre tout seul après chaque mise à jour, "
+                "et vous pouvez suivre son état depuis la page des réglages "
+                "du projet.</p>",
+            ),
+        ),
+        {"text.block_language": 1},
+    ),
+    (
+        "en",
+        "name",
+        (_before_first_steps("<p>Zorblax exports the reports.</p>"),),
+        {"text.unknown_name": 1},
+    ),
+    (
+        "en",
+        "jargon",
+        (
+            _before_first_steps(
+                "<p>Run frobnicate first, then frobnicate again; "
+                "frobnicate stops.</p>",
+            ),
+        ),
+        {"text.jargon": 1},
+    ),
+    (
+        "fr",
+        "space_missing",
+        ((START, ATTENTION, "Attention: le mode"),),
+        {"text.space_missing": 1},
+    ),
+    (
+        "fr",
+        "breakable",
+        ((START, ATTENTION, "Attention : le mode"),),
+        {"text.space_breakable": 1},
+    ),
+    (
+        "fr",
+        "quotes",
+        ((START, "\xab\xa0strict\xa0\xbb", '"strict"'),),
+        {"text.quotes": 1},
+    ),
+    (
+        "fr",
+        "unknown_word",
+        (("guide.html", "peut inviter", "peut invitter"),),
+        {"text.unknown_word": 1},
+    ),
+    (
+        "fr",
+        "repeated",
+        ((START, "redémarrer le service", "redémarrer le le service"),),
+        {"text.repeated_word": 1},
+    ),
+    (
+        "fr",
+        "ordinal",
+        ((START, "Cette procédure a été", "La 2ème procédure a été"),),
+        {"text.ordinal": 1},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("lang", "name", "edits", "expected"),
+    TEXT_DEFECTS,
+    ids=[f"{case[0]}-{case[1]}" for case in TEXT_DEFECTS],
+)
+def test_each_planted_text_problem_gives_its_findings(
+    tmp_path: Path,
+    lang: str,
+    name: str,
+    edits: tuple[Edit, ...],
+    expected: dict[str, int],
+) -> None:
+    """A planted text problem adds exactly its findings to the clean build."""
+    spec = TEXT_SPECS[lang]
+    site = build_sphinx_like(spec, tmp_path / name, split="chapters")
+    clean = rule_counts(run_audit(site, CONFIG).findings)
+    for file, old, new in edits:
+        plant(site, file, old, new)
+    planted = rule_counts(run_audit(site, CONFIG).findings)
+    assert planted - clean == Counter(expected)
+    assert not clean - planted
+
+
+def test_long_sentences_take_the_severity_of_their_length(
+    tmp_path: Path,
+) -> None:
+    """A sentence of 45 words is minor, one of 65 words is major."""
+    site = build_sphinx_like(FIGURES_EN, tmp_path / "s", split="chapters")
+    for count in (45, 65):
+        plant(site, *_before_first_steps(f"<p>{sentence(count)}</p>"))
+    findings = run_audit(site, CONFIG).findings
+    long = [f.severity for f in findings if f.rule == "text.long_sentence"]
+    assert sorted(long) == [Severity.MINOR, Severity.MAJOR]
+
+
+def test_french_spacing_in_a_pdf(tmp_path: Path) -> None:
+    """In a PDF, a colon after a space is no finding; a glued colon is one."""
+    clean = build_reportlab_pdf(SAMPLE_FR, tmp_path / "a.pdf")
+    spec = replace_text(SAMPLE_FR, "Attention : le mode", "Attention: le mode")
+    planted = build_reportlab_pdf(spec, tmp_path / "b.pdf")
+    before = rule_counts(run_audit(clean, CONFIG).findings)
+    after = rule_counts(run_audit(planted, CONFIG).findings)
+    assert not [rule for rule in before if rule.startswith("text.")]
+    assert after - before == Counter({"text.space_missing": 1})
+    assert not before - after
+
+
+def test_misspelled_word_in_a_pdf(tmp_path: Path) -> None:
+    """A misspelled word of a PDF paragraph is reported once."""
+    clean = build_reportlab_pdf(SAMPLE_EN, tmp_path / "a.pdf")
+    spec = replace_text(SAMPLE_EN, *MISSPELLED[1:])
+    planted = build_reportlab_pdf(spec, tmp_path / "b.pdf")
+    before = rule_counts(run_audit(clean, CONFIG).findings)
+    after = rule_counts(run_audit(planted, CONFIG).findings)
+    assert after - before == Counter({"text.unknown_word": 1})
+    assert not before - after
+
+
+def test_personal_words_in_the_configuration(tmp_path: Path) -> None:
+    """A personal word of the configuration is no unknown word."""
+    cfg = replace(CONFIG, spelling=SpellingConfig(("donwloads",)))
+    site = build_sphinx_like(FIGURES_EN, tmp_path / "s", split="chapters")
+    clean = rule_counts(run_audit(site, cfg).findings)
+    plant(site, *MISSPELLED)
+    planted = rule_counts(run_audit(site, cfg).findings)
+    assert planted == clean
+
+
+def test_text_audit_is_deterministic(tmp_path: Path) -> None:
+    """Two audits of a site with text problems give the same findings."""
+    site = build_sphinx_like(FIGURES_EN, tmp_path / "s", split="chapters")
+    plant(site, *MISSPELLED)
+    plant(site, *REPEATED)
+    findings = run_audit(site, CONFIG).findings
+    rules = {f.rule for f in findings}
+    assert {"text.unknown_word", "text.repeated_word"} <= rules
+    first = [f.id for f in findings]
+    second = [f.id for f in run_audit(site, CONFIG).findings]
+    assert first == second
 
 
 def test_audit_is_deterministic(tmp_path: Path) -> None:

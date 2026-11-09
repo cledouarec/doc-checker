@@ -1,20 +1,30 @@
 # Copyright 2026 Christophe Le Douarec
 """Tests for the comparison engine."""
 
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from functools import partial
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
+from doc_checker.compare import engine as engine_module
 from doc_checker.compare.engine import (
     CompareResult,
     CompareStats,
     compare_documents,
 )
-from doc_checker.config import Config, IgnoreConfig, PdfConfig
+from doc_checker.config import (
+    Config,
+    IgnoreConfig,
+    PdfConfig,
+    SpellingConfig,
+)
 from doc_checker.errors import InputError
 from doc_checker.model.document import Block, BlockKind
 from doc_checker.model.findings import DiffSegment, Severity
 from doc_checker.pipeline import run_compare
+from doc_checker.spell import speller as speller_module
+from doc_checker.spell.speller import Speller
 from tests.builders import (
     PARAGRAPHS,
     SAMPLE_EN,
@@ -30,6 +40,18 @@ if TYPE_CHECKING:
 
 P = PARAGRAPHS
 ADDED = "An extra paragraph was added here."
+CFG = Config()
+DOWNLOADS = "The installer downloads files."
+DOWNLOADS_TYPO = "The installer donwloads files."
+
+
+class _FailingDictionary:
+    """A dictionary whose every lookup fails."""
+
+    @staticmethod
+    def lookup(word: str) -> bool:
+        """Fail, as spylls might on a hostile word."""
+        raise IndexError(word)
 
 
 def _rules(result: CompareResult) -> list[tuple[str, Severity]]:
@@ -295,3 +317,143 @@ def test_cell_separators_are_compared_between_two_tables() -> None:
     assert _rules(result) == [("text.punctuation_changed", Severity.INFO)]
     assert result.findings[0].ref is not None
     assert result.findings[0].ref.kind is BlockKind.TABLE
+
+
+def _one_change(ref_text: str, new_text: str, cfg: Config) -> CompareResult:
+    """Compare two documents of one paragraph each."""
+    ref = make_document(make_block(ref_text))
+    return compare_documents(ref, make_document(make_block(new_text)), cfg)
+
+
+def test_dictionary_is_loaded_only_for_a_typo_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No dictionary is loaded until a close word substitution needs one."""
+    calls = _counted_loads(monkeypatch)
+    same = make_document(*_b(*P))
+    assert compare_documents(same, same, CFG).findings == []
+    number = _one_change("Accepts 100 requests.", "Accepts 10 requests.", CFG)
+    assert _rules(number) == [("text.number_changed", Severity.CRITICAL)]
+    assert calls == []
+    typo = _one_change(DOWNLOADS, DOWNLOADS_TYPO, CFG)
+    assert _rules(typo) == [("text.typo", Severity.MAJOR)]
+    assert calls
+
+
+def test_personal_words_are_known_words_in_a_comparison() -> None:
+    """A personal word of the configuration is a word, not a typo."""
+    cfg = Config(spelling=SpellingConfig(words=("donwloads",)))
+    result = _one_change(DOWNLOADS, DOWNLOADS_TYPO, cfg)
+    assert _rules(result) == [("text.word_replaced", Severity.MAJOR)]
+    assert result.new.warnings == []
+
+
+def test_a_dictionary_that_cannot_be_loaded_is_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without its dictionary, the reference vocabulary tells a typo."""
+
+    def broken(lang: str) -> NoReturn:
+        raise OSError(lang)
+
+    monkeypatch.setattr(speller_module, "load_dictionary", broken)
+    new = make_document(make_block("Please receive the file."))
+    ref = make_document(make_block("Please recieve the file."))
+    result = compare_documents(ref, new, Config())
+    assert _rules(result) == [("text.typo", Severity.MAJOR)]
+    assert result.new.warnings == [
+        (
+            "typo check: cannot load the 'en' dictionary: OSError: en; the "
+            "typos that needed it were told by the reference vocabulary only"
+        ),
+    ]
+    assert new.warnings == []
+    assert result.ref.warnings == []
+
+
+def test_a_spent_budget_is_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A word that the budget left unchecked is classified as in phase 1."""
+    monkeypatch.setattr(engine_module, "Speller", partial(Speller, work=0))
+    result = _one_change("Please recieve it.", "Please receive it.", CFG)
+    assert _rules(result) == [("text.typo", Severity.MAJOR)]
+    assert result.new.warnings == [
+        (
+            "typo check: the dictionaries stopped after 0 distinct words; "
+            "the other typos were told by the reference vocabulary only"
+        ),
+    ]
+
+
+def test_failed_lookups_are_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new word that spylls fails on is judged as in phase 1, and counted."""
+    monkeypatch.setattr(
+        speller_module,
+        "load_dictionary",
+        lambda _: _FailingDictionary(),
+    )
+    result = _one_change("Please recieve it.", "Please receive it.", CFG)
+    assert _rules(result) == [("text.typo", Severity.MAJOR)]
+    assert result.new.warnings == [
+        "typo check: 1 word(s) could not be looked up and were taken as known",
+    ]
+
+
+def _counted_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Count the dictionaries that the speller loads."""
+    calls: list[str] = []
+    load = speller_module.load_dictionary
+
+    def counted(lang: str) -> object:
+        calls.append(lang)
+        return load(lang)
+
+    monkeypatch.setattr(speller_module, "load_dictionary", counted)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (BlockKind.PARAGRAPH, ("text.typo_fixed", Severity.INFO)),
+        (BlockKind.CODE, ("text.typo", Severity.MAJOR)),
+        (BlockKind.FORMULA, ("text.typo", Severity.MAJOR)),
+    ],
+)
+def test_only_prose_is_judged_by_the_dictionaries(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: BlockKind,
+    expected: tuple[str, Severity],
+) -> None:
+    """A code block keeps the classification of phase 1, with no lookup."""
+    calls = _counted_loads(monkeypatch)
+    ref = make_document(make_block("Please recieve the file.", kind))
+    new = make_document(make_block("Please receive the file.", kind))
+    result = compare_documents(ref, new, CFG)
+    assert _rules(result) == [expected]
+    assert bool(calls) is (kind is BlockKind.PARAGRAPH)
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ((), ("text.typo_fixed", Severity.INFO)),
+        ((("pcell",), ("cell",)), ("text.typo", Severity.MAJOR)),
+    ],
+    ids=["prose", "inline-code"],
+)
+def test_inline_code_keeps_the_classification_of_phase_1(
+    monkeypatch: pytest.MonkeyPatch,
+    code: tuple[tuple[str, ...], ...],
+    expected: tuple[str, Severity],
+) -> None:
+    """A word of the inline code of a block is not judged by a dictionary."""
+    calls = _counted_loads(monkeypatch)
+    ref_block = make_block("Set the pcell option.")
+    new_block = make_block("Set the cell option.")
+    if code:
+        ref_block = replace(ref_block, code_spans=code[0])
+        new_block = replace(new_block, code_spans=code[1])
+    ref, new = make_document(ref_block), make_document(new_block)
+    result = compare_documents(ref, new, CFG)
+    assert _rules(result) == [expected]
+    assert bool(calls) is not bool(code)
