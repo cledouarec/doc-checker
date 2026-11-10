@@ -7,6 +7,10 @@
 3. The gaps between consecutive anchors are aligned by dynamic
    programming, after looking for split and merged blocks.
 4. Blocks still unmatched are paired as moved blocks when similar enough.
+
+Two blocks are similar as `fuzz.ratio` finds their loose keys, but two long
+blocks of lines, as `_by_lines` tells, as their lines are, in a time linear
+in their size: `_line_similarity`.
 """
 
 import bisect
@@ -18,10 +22,12 @@ from typing import TYPE_CHECKING, Final
 
 from rapidfuzz import fuzz, process
 
+from doc_checker.compare.textdiff import LINES_MIN_CHARS
 from doc_checker.model.document import Block, BlockKind
+from doc_checker.text.normalize import loose_key, strict_key
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
 MIN_ANCHOR_WORDS: Final = 4
 MAX_DP_CELLS: Final = 40_000
@@ -41,6 +47,11 @@ _CHARS_PER_WORD: Final = 64
 # texts, and of one more choice of `process.extractOne`.
 _CALL_COST: Final = 200
 _CHOICE_COST: Final = 50
+# Units of work per character, at about 2 ns each, of reading the lines of a
+# block, once, and of comparing the lines of two blocks: about 180 ns and 12 ns
+# a character were measured.
+_LINES_READ_COST: Final = 100
+_LINES_MATCH_COST: Final = 8
 # The score of `fuzz.ratio` that a split or a merge must reach.
 _SPLIT_SCORE: Final = SPLIT_MERGE_RATIO * _PERCENT
 # The kinds whose blocks may split into many parts: a table into one block
@@ -96,12 +107,15 @@ class _Budget:
         spent: Units spent so far.
         exhausted: Whether a comparison did not fit.
         skipped: The blocks, as (side, index), that were not fully searched.
+        lines: The lines of the blocks read so far, as `_lines_of` gives
+            them, by the identity of the block.
     """
 
     limit: int
     spent: int = 0
     exhausted: bool = False
     skipped: set[tuple[str, int]] = field(default_factory=set)
+    lines: dict[int, Counter[str]] = field(default_factory=dict)
 
     def take(self, cost: int) -> bool:
         """Charge a cost and return whether it fits.
@@ -132,8 +146,13 @@ class _Budget:
         Returns:
             Whether the comparison may be made.
         """
-        cost = (query // _CHARS_PER_WORD + 1) * chars + count * _CHOICE_COST
-        return self.take(cost + query + _CALL_COST)
+        return self.take(_search_cost(query, chars, count))
+
+
+def _search_cost(query: int, chars: int, count: int) -> int:
+    """Return the work of ``process.extractOne``, as `_Budget.search` tells."""
+    cost = (query // _CHARS_PER_WORD + 1) * chars + count * _CHOICE_COST
+    return cost + query + _CALL_COST
 
 
 def _call_cost(first: int, second: int) -> int:
@@ -193,9 +212,250 @@ class _Exact:
         return None
 
 
-def _similarity(first: Block, second: Block) -> float:
-    """Return the similarity of the loose keys of two blocks, in [0, 1]."""
+def lines_compared(sizes: tuple[int, int], *, structure: bool) -> bool:
+    """Return whether two texts are compared by their lines.
+
+    The alignment and the diff of a pair ask the same question.
+
+    Args:
+        sizes: The characters of the loose key of each text, its blocks
+            joined by blanks.
+        structure: Whether one of them holds a table or a code block.
+
+    Returns:
+        Whether both have `LINES_MIN_CHARS` characters at least, and one
+        holds a table or a code block.
+    """
+    return structure and min(sizes) >= LINES_MIN_CHARS
+
+
+def pair_by_lines(ref: Sequence[Block], new: Sequence[Block]) -> bool:
+    """Return whether the blocks of two sides are compared by their lines.
+
+    Args:
+        ref: The blocks of one side, in order.
+        new: The blocks of the other side, in order.
+
+    Returns:
+        What `lines_compared` tells of their loose keys, joined by blanks.
+    """
+    return lines_compared(
+        (_joined_size(ref), _joined_size(new)),
+        structure=any(block.kind in _STRUCTURES for block in (*ref, *new)),
+    )
+
+
+def _joined_size(blocks: Sequence[Block]) -> int:
+    """Return the length of the loose keys of blocks joined by blanks."""
+    return sum(len(block.key_loose) for block in blocks) + max(
+        len(blocks) - 1,
+        0,
+    )
+
+
+def _by_lines(first: Block, second: Block) -> bool:
+    """Return whether two blocks are compared by their lines.
+
+    They are when both have `LINES_MIN_CHARS` characters of loose key at
+    least, and one is a table or a code block, as `pair_by_lines` tells.
+    """
+    return pair_by_lines((first,), (second,))
+
+
+def _lines_of(block: Block) -> Counter[str]:
+    """Return the loose keys of the lines of a block, as a multiset.
+
+    Args:
+        block: Any block.
+
+    Returns:
+        The non-empty loose key of each line of a code block, or of each row
+        of a table, when their keys joined by blanks are the loose key of the
+        block; else its loose key alone, as for another block.
+    """
+    whole = Counter([block.key_loose] if block.key_loose else [])
+    if block.kind is BlockKind.CODE:
+        lined = block.key_strict
+    elif block.kind is BlockKind.TABLE:
+        lined = strict_key(block.text, Counter(), lines=True)
+    else:
+        return whole
+    lines = [key for line in lined.split("\n") if (key := loose_key(line))]
+    return Counter(lines) if " ".join(lines) == block.key_loose else whole
+
+
+def _weight(lines: Mapping[str, int]) -> int:
+    """Return the characters of lines, each with the blank that ends it."""
+    return sum((len(line) + 1) * count for line, count in lines.items())
+
+
+def _line_similarity(first: Counter[str], second: Counter[str]) -> float:
+    """Return the similarity of two multisets of lines, in [0, 1].
+
+    The characters of the lines found on both sides, each with a blank,
+    count as found; the words of the other lines are found as a multiset in
+    the same way, so that a line changed by a word still counts for its
+    other words. The similarity is twice the characters found over all the
+    characters of both sides, as `fuzz.ratio` measures it.
+
+    Args:
+        first: The lines of a text, as `_lines_of` gives them.
+        second: The lines of another text.
+
+    Returns:
+        The similarity: 1 for two empty texts.
+    """
+    size = _weight(first) + _weight(second)
+    if not size:
+        return 1.0
+    found = 0
+    first_words: Counter[str] = Counter()
+    second_words: Counter[str] = Counter()
+    for line, count in first.items():
+        other = second.get(line, 0)
+        found += min(count, other) * (len(line) + 1)
+        for word in line.split() if count > other else ():
+            first_words[word] += count - other
+    for line, count in second.items():
+        other = first.get(line, 0)
+        for word in line.split() if count > other else ():
+            second_words[word] += count - other
+    found += _weight(first_words & second_words)
+    return 2 * found / size
+
+
+def _read_cost(budget: _Budget, blocks: Sequence[Block]) -> int:
+    """Return the work of reading the lines of the blocks not read yet."""
+    unread = {
+        id(block): block for block in blocks if id(block) not in budget.lines
+    }
+    return _LINES_READ_COST * sum(
+        len(block.key_loose) for block in unread.values()
+    )
+
+
+def _match_cost(first: int, second: int) -> int:
+    """Return the work of comparing the lines of two texts of given lengths."""
+    return _LINES_MATCH_COST * (first + second) + _CALL_COST
+
+
+def _block_lines(budget: _Budget, block: Block) -> Counter[str]:
+    """Return the lines of a block, as `_lines_of` gives them, read once."""
+    if id(block) not in budget.lines:
+        budget.lines[id(block)] = _lines_of(block)
+    return budget.lines[id(block)]
+
+
+def _run_lines(budget: _Budget, blocks: Sequence[Block]) -> Counter[str]:
+    """Return the lines of a run of blocks together."""
+    found: Counter[str] = Counter()
+    for block in blocks:
+        found.update(_block_lines(budget, block))
+    return found
+
+
+def _pair_cost(first: Block, second: Block) -> int:
+    """Return the work of `_similarity` on two blocks, their lines read."""
+    if _by_lines(first, second):
+        return _match_cost(len(first.key_loose), len(second.key_loose))
+    return _call_cost(len(first.key_loose), len(second.key_loose))
+
+
+def _similarity(first: Block, second: Block, budget: _Budget) -> float:
+    """Return the similarity of two blocks, in [0, 1].
+
+    It is that of their lines if `_by_lines` tells so, as
+    `_line_similarity` measures it, else that of their loose keys, by
+    `fuzz.ratio`. Its work, `_pair_cost`, and the reading of the lines,
+    `_read_cost`, are charged beforehand.
+    """
+    if _by_lines(first, second):
+        return _line_similarity(
+            _block_lines(budget, first),
+            _block_lines(budget, second),
+        )
     return fuzz.ratio(first.key_loose, second.key_loose) / _PERCENT
+
+
+def _searched_by_lines(query: Block, choices: Iterable[Block]) -> bool:
+    """Return whether a query is compared by lines with some choice."""
+    return len(query.key_loose) >= LINES_MIN_CHARS and any(
+        _by_lines(query, choice) for choice in choices
+    )
+
+
+def _choices_cost(
+    query: Block,
+    choices: Mapping[int, Block],
+    budget: _Budget,
+) -> int:
+    """Return the work of `_best_choice`, the reading of lines included."""
+    lined = [block for block in choices.values() if _by_lines(query, block)]
+    others = [
+        len(block.key_loose)
+        for block in choices.values()
+        if not _by_lines(query, block)
+    ]
+    size = len(query.key_loose)
+    cost = sum(_match_cost(size, len(block.key_loose)) for block in lined)
+    if lined:
+        cost += _read_cost(budget, [query, *lined])
+    if others:
+        cost += _search_cost(size, sum(others), len(others))
+    return cost
+
+
+def _best_choice(
+    query: Block,
+    choices: Mapping[int, Block],
+    match: float,
+    budget: _Budget,
+) -> int | None:
+    """Return the choice most similar to a query, as `_similarity` finds.
+
+    The choices compared by lines are scored one by one, the others by
+    ``process.extractOne``. The work, `_choices_cost`, is charged
+    beforehand.
+
+    Args:
+        query: The block searched for.
+        choices: The blocks searched, by their position, in order.
+        match: Least similarity of the choice.
+        budget: The work left, which holds the lines read.
+
+    Returns:
+        The position of the first choice of the highest similarity, if it is
+        `match` at least.
+    """
+    order = {position: rank for rank, position in enumerate(choices)}
+    others = {
+        position: block.key_loose
+        for position, block in choices.items()
+        if not _by_lines(query, block)
+    }
+    best: tuple[float, int] | None = None
+    found = (
+        process.extractOne(
+            query.key_loose,
+            others,
+            scorer=fuzz.ratio,
+            score_cutoff=match * _PERCENT,
+        )
+        if others
+        else None
+    )
+    if found is not None:
+        best = (found[1] / _PERCENT, found[2])
+    for position, block in choices.items():
+        if position in others:
+            continue
+        score = _similarity(query, block, budget)
+        if score >= match and (
+            best is None
+            or (score, -order[position]) > (best[0], -order[best[1]])
+        ):
+            best = (score, position)
+    return None if best is None else best[1]
 
 
 def _matched(
@@ -307,10 +567,17 @@ def _greedy(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] 
         chars = sum(
             len(new[columns[k]].key_loose) for k in range(pointer, stop)
         )
-        if budget.search(len(ref[i].key_loose), chars, stop - pointer):
+        blocks = {k: new[columns[k]] for k in range(pointer, stop)}
+        lined = _searched_by_lines(ref[i], blocks.values())
+        if lined and budget.take(_choices_cost(ref[i], blocks, budget)):
+            position = _best_choice(ref[i], blocks, match, budget)
+        elif not lined and budget.search(
+            len(ref[i].key_loose),
+            chars,
+            stop - pointer,
+        ):
             window = {
-                position: new[columns[position]].key_loose
-                for position in range(pointer, stop)
+                position: block.key_loose for position, block in blocks.items()
             }
             found = process.extractOne(
                 ref[i].key_loose,
@@ -440,8 +707,10 @@ def _best_run(
     best: tuple[float, int, int] | None = None
     for start in range(len(runs)):
         parts = MAX_SPLIT_PARTS
-        if structure:
-            prefix = min(len(runs[start].key_loose), size)
+        prefix = min(len(runs[start].key_loose), size)
+        # A part as long as `LINES_MIN_CHARS` opens no long run: it is
+        # compared by its lines.
+        if structure and prefix < LINES_MIN_CHARS:
             if not budget.take(_call_cost(prefix, prefix)):
                 budget.skipped.add(who)
                 return best
@@ -449,25 +718,68 @@ def _best_run(
                 parts = MAX_STRUCTURE_PARTS
         # The length of the keys of the run joined by blanks.
         length = len(runs[start].key_loose)
+        lined = structure or runs[start].kind in _STRUCTURES
         for end in range(start + 2, min(start + parts, len(runs)) + 1):
             length += 1 + len(runs[end - 1].key_loose)
+            lined = lined or runs[end - 1].kind in _STRUCTURES
             if length > longest:
                 break
             if length < shortest:
                 continue
-            if not budget.take(_call_cost(size, length)):
+            ratio = _run_similarity(
+                single,
+                runs[start:end],
+                (length, lined),
+                budget,
+            )
+            if ratio is None:
                 budget.skipped.add(who)
                 return best
-            joined = " ".join(block.key_loose for block in runs[start:end])
-            ratio = (
-                fuzz.ratio(single.key_loose, joined, score_cutoff=_SPLIT_SCORE)
-                / _PERCENT
-            )
             if ratio >= SPLIT_MERGE_RATIO and (
                 best is None or ratio > best[0]
             ):
                 best = (ratio, start, end)
     return best
+
+
+def _run_similarity(
+    single: Block,
+    run: Sequence[Block],
+    shape: tuple[int, bool],
+    budget: _Budget,
+) -> float | None:
+    """Return the similarity of a block and a run of blocks, its work charged.
+
+    Args:
+        single: The block that may have been split or merged.
+        run: The blocks of the other side that may be its parts.
+        shape: The length of the keys of the run joined by blanks, and
+            whether the block or the run holds a table or a code block.
+        budget: The work left.
+
+    Returns:
+        The similarity of their lines, as `_line_similarity` measures it, if
+        both are `LINES_MIN_CHARS` long and one holds a table or code; else
+        that of the loose keys, by ``fuzz.ratio``, 0 below
+        `SPLIT_MERGE_RATIO`; ``None`` if its work does not fit the budget.
+    """
+    length, lined = shape
+    size = len(single.key_loose)
+    if lines_compared((size, length), structure=lined):
+        cost = _match_cost(size, length) + _read_cost(budget, [single, *run])
+        if not budget.take(cost):
+            return None
+        return _line_similarity(
+            _block_lines(budget, single),
+            _run_lines(budget, run),
+        )
+    if not budget.take(_call_cost(size, length)):
+        return None
+    joined = " ".join(block.key_loose for block in run)
+    return (
+        fuzz.ratio(single.key_loose, joined, score_cutoff=_SPLIT_SCORE)
+        / _PERCENT
+    )
 
 
 def _candidates(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] - the two documents, a gap of them and the shared budget
@@ -538,12 +850,16 @@ def _align_gap(  # ruff: ignore[too-many-arguments, too-many-positional-argument
         return _unmatched(rows, columns)
     if len(rows) * len(columns) > MAX_DP_CELLS:
         return _greedy(ref, new, rows, columns, match, budget)
-    lengths = [len(new[j].key_loose) for j in columns]
-    cost = sum(
-        _call_cost(len(ref[i].key_loose), length)
+    lined = {
+        id(block): block
         for i in rows
-        for length in lengths
-    )
+        for j in columns
+        if _by_lines(ref[i], new[j])
+        for block in (ref[i], new[j])
+    }
+    cost = sum(
+        _pair_cost(ref[i], new[j]) for i in rows for j in columns
+    ) + _read_cost(budget, list(lined.values()))
     if not budget.take(cost):
         # No similarity matrix: align the identical blocks, in order.
         budget.skipped.update(("ref", i) for i in rows)
@@ -556,7 +872,9 @@ def _align_gap(  # ruff: ignore[too-many-arguments, too-many-positional-argument
             1.0,
             lambda i, j: _matched(ref, new, (i, j)),
         )
-    scores = [[_similarity(ref[i], new[j]) for j in columns] for i in rows]
+    scores = [
+        [_similarity(ref[i], new[j], budget) for j in columns] for i in rows
+    ]
 
     def pair_of(i: int, j: int) -> Pair:
         return _matched(ref, new, (i, j))
@@ -613,6 +931,10 @@ def _match_leftovers(
         for pair in pairs
         if pair.kind is PairKind.INSERTED
     }
+    # The added blocks that a long block may be compared with by lines.
+    long_inserted = {
+        j for j, key in inserted.items() if len(key) >= LINES_MIN_CHARS
+    }
     chars = sum(len(key) for key in inserted.values())
     deleted = sorted(
         pair.ref[0] for pair in pairs if pair.kind is PairKind.DELETED
@@ -626,7 +948,18 @@ def _match_leftovers(
     for i in deleted:
         j = None
         if inserted and by_key is None:
-            if budget.search(len(ref[i].key_loose), chars, len(inserted)):
+            lined = _searched_by_lines(
+                ref[i],
+                (new[k] for k in long_inserted),
+            )
+            blocks = {k: new[k] for k in inserted} if lined else {}
+            if lined and budget.take(_choices_cost(ref[i], blocks, budget)):
+                j = _best_choice(ref[i], blocks, moved_match, budget)
+            elif not lined and budget.search(
+                len(ref[i].key_loose),
+                chars,
+                len(inserted),
+            ):
                 found = process.extractOne(
                     ref[i].key_loose,
                     inserted,
@@ -648,6 +981,7 @@ def _match_leftovers(
             result.append(Pair(PairKind.DELETED, (i,), ()))
             continue
         chars -= len(inserted.pop(j))
+        long_inserted.discard(j)
         result.append(_matched(ref, new, (i, j), moved=True))
     result += [Pair(PairKind.INSERTED, (), (j,)) for j in sorted(inserted)]
     return result

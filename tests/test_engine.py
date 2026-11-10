@@ -33,6 +33,7 @@ from tests.builders import (
     build_mkdocs_like,
     make_block,
     make_document,
+    parts_tables,
     random_blocks,
 )
 
@@ -474,3 +475,16 @@ def test_cut_alignment_is_a_warning(
         "the alignment reached its work limit"
     )
     assert result.new.warnings == [note]
+
+
+def test_a_long_table_in_both_documents_is_never_missing() -> None:
+    """A long table changed here and there gives a finding per changed row."""
+    ref_text, new_text, changed = parts_tables(6_000, 0.3)
+    ref = make_document(make_block(ref_text, BlockKind.TABLE))
+    new = make_document(make_block(new_text, BlockKind.TABLE))
+    result = compare_documents(ref, new, Config())
+    assert len(ref.blocks[0].key_loose) > 130_000
+    assert {f.rule for f in result.findings} == {"text.number_changed"}
+    occurrences = sum(len(f.occurrences) or 1 for f in result.findings)
+    assert occurrences == changed
+    assert result.new.warnings == []

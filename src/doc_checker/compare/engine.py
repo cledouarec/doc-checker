@@ -32,13 +32,20 @@ disabled rules, below the minimum severity or ignored, and replaces the
 findings of one rule and pattern, once there are five of them, by one group.
 """
 
+import bisect
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.compare.aggregate import finalize_drafts, text_pattern
-from doc_checker.compare.align import Alignment, Pair, PairKind, align_blocks
+from doc_checker.compare.align import (
+    Alignment,
+    Pair,
+    PairKind,
+    align_blocks,
+    pair_by_lines,
+)
 from doc_checker.compare.classify import (
     Classification,
     HunkContext,
@@ -52,7 +59,11 @@ from doc_checker.compare.images import (
 )
 from doc_checker.compare.links import link_drafts
 from doc_checker.compare.structure import kind_drafts, level_drafts
-from doc_checker.compare.textdiff import Hunk, diff_tokens, span_text
+from doc_checker.compare.textdiff import (
+    Hunk,
+    diff_tokens,
+    span_text,
+)
 from doc_checker.errors import DictionaryError
 from doc_checker.extract.common import share_numbering
 from doc_checker.images.load import PixelLoader
@@ -68,7 +79,7 @@ from doc_checker.model.document import (
 from doc_checker.model.findings import DiffSegment, Finding, Side
 from doc_checker.spell.speller import Speller
 from doc_checker.text.lexicon import is_admonition_title, is_chapter_label
-from doc_checker.text.normalize import loose_key, printable
+from doc_checker.text.normalize import loose_key, printable, strict_key
 from doc_checker.text.numbers import HEADING_NUMBER
 from doc_checker.text.tokenize import Token, TokenKind, tokenize
 
@@ -81,6 +92,12 @@ if TYPE_CHECKING:
 CONTEXT_TOKENS: Final = 8
 
 _CONTENTS: Final = frozenset({BlockKind.TOC, BlockKind.INDEX})
+_LINE_BREAK: Final = re.compile(r"\n")
+# A cell separator in the key of a table that keeps its rows apart: its
+# blanks may be line breaks.
+_LINED_SEPARATOR: Final = re.compile(
+    "[ \n]" + re.escape(CELL_SEPARATOR.strip()) + "[ \n]",
+)
 # The start of the warnings of the dictionaries that confirm the typos.
 _TYPO_CHECK: Final = "typo check: "
 _VOCABULARY_ONLY: Final = "told by the reference vocabulary only"
@@ -269,23 +286,42 @@ class _Drafter:
         its heading keeps the number that its generator gave it, and the
         numbers of the headings are never compared. The speller judges the
         differences only when every block of the pair is of
-        `SPELLED_KINDS`, and never a word of their inline code.
+        `SPELLED_KINDS`, and never a word of their inline code. A pair that
+        the alignment compares by lines, as `pair_by_lines` tells, is diffed
+        line by line first, as `diff_tokens` tells.
         """
         flat = {block.kind for block in ref_blocks} != {
             block.kind for block in new_blocks
         }
         ref_numbered = _numbers_left_out(new_blocks, own=self.numbered[0])
         new_numbered = _numbers_left_out(ref_blocks, own=self.numbered[1])
-        ref_text = " ".join(
+        ref_keys = [
             _diff_key(block, flat=flat, numbered=ref_numbered)
             for block in ref_blocks
-        )
-        new_text = " ".join(
+        ]
+        new_keys = [
             _diff_key(block, flat=flat, numbered=new_numbered)
             for block in new_blocks
-        )
+        ]
+        ref_text, new_text = " ".join(ref_keys), " ".join(new_keys)
         ref_tokens, new_tokens = tokenize(ref_text), tokenize(new_text)
         blocks = (*ref_blocks, *new_blocks)
+        lines = None
+        if pair_by_lines(ref_blocks, new_blocks):
+            lines = (
+                _line_starts(
+                    ref_blocks,
+                    ref_keys,
+                    ref_tokens,
+                    (flat, ref_numbered),
+                ),
+                _line_starts(
+                    new_blocks,
+                    new_keys,
+                    new_tokens,
+                    (flat, new_numbered),
+                ),
+            )
         prose = all(block.kind in SPELLED_KINDS for block in blocks)
         ctx = HunkContext(
             ref_text,
@@ -299,7 +335,7 @@ class _Drafter:
         )
         return [
             self.hunk_draft(hunk, ctx, ref_blocks[0], new_blocks[0])
-            for hunk in diff_tokens(ref_tokens, new_tokens)
+            for hunk in diff_tokens(ref_tokens, new_tokens, lines=lines)
         ]
 
     def classify(self, hunk: Hunk, ctx: HunkContext) -> Classification:
@@ -518,6 +554,86 @@ def _diff_key(block: Block, *, flat: bool, numbered: bool) -> str:
         match = HEADING_NUMBER.match(key)
         key = key[match.end() :] if match else key
     return key
+
+
+def _separator_blank(match: re.Match[str]) -> str:
+    """Return a line break for a cell separator next to one, else a blank."""
+    return "\n" if "\n" in match.group() else " "
+
+
+def _lined_key(
+    block: Block,
+    key: str,
+    shape: tuple[bool, bool],
+) -> str | None:
+    """Return the diff key of a table or code block with its line breaks.
+
+    Args:
+        block: A block of a pair.
+        key: Its diff key, as `_diff_key` gives it.
+        shape: Whether the kinds of the blocks of its pair differ, and
+            whether the block may lose the number it starts with, as
+            `_diff_key` takes them.
+
+    Returns:
+        The key of a code block, which keeps its lines; that of a table, its
+        rows apart, if it is the key with line breaks where the key has
+        blanks: the cell separators of a table whose pair differs in kind
+        leave as `_diff_key` leaves them, a line break kept. Else ``None``,
+        as for another block.
+    """
+    if block.kind is BlockKind.CODE:
+        return key
+    if block.kind is not BlockKind.TABLE:
+        return None
+    flat, numbered = shape
+    lined = strict_key(block.text, Counter(), lines=True)
+    if flat:
+        lined = _LINED_SEPARATOR.sub(_separator_blank, lined)
+        match = HEADING_NUMBER.match(lined) if numbered else None
+        lined = lined[match.end() :] if match else lined
+    return lined if lined.replace("\n", " ") == key else None
+
+
+def _line_starts(
+    blocks: Sequence[Block],
+    keys: Sequence[str],
+    tokens: Sequence[Token],
+    shape: tuple[bool, bool],
+) -> list[int]:
+    """Return the position of the first token of each line of a diff text.
+
+    Args:
+        blocks: The blocks of one side of a pair.
+        keys: Their diff keys, which the text joins with blanks.
+        tokens: The tokens of the text.
+        shape: Whether the kinds of the blocks of the pair differ, and
+            whether the blocks of this side may lose the number they start
+            with, as `_diff_key` takes them.
+
+    Returns:
+        The positions, from 0 and increasing: each block starts a line, and
+        so does each line of a table or code block, as `_lined_key` tells.
+    """
+    breaks: list[int] = []
+    offset = 0
+    for block, key in zip(blocks, keys, strict=True):
+        breaks.append(offset)
+        lined = _lined_key(block, key, shape)
+        if lined is not None:
+            breaks += [
+                offset + match.end() for match in _LINE_BREAK.finditer(lined)
+            ]
+        offset += len(key) + 1
+    token_starts = [token.start for token in tokens]
+    starts: list[int] = []
+    for position in breaks:
+        index = bisect.bisect_left(token_starts, position)
+        if index < len(tokens) and (not starts or index > starts[-1]):
+            starts.append(index)
+    if tokens and starts[:1] != [0]:
+        starts.insert(0, 0)
+    return starts
 
 
 def _unreported(block: Block) -> bool:
