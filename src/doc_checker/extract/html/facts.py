@@ -15,9 +15,13 @@ The walks are iterative, as the document is not trusted.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from lxml import etree
-
-from doc_checker.extract.html.dom import in_formula, in_svg, is_formula
+from doc_checker.extract.html.css import select
+from doc_checker.extract.html.dom import (
+    in_admonition_block,
+    in_formula,
+    in_svg,
+    is_formula,
+)
 from doc_checker.extract.html.images import first_role
 from doc_checker.images.svg import local_name
 from doc_checker.model.document import CELL_SEPARATOR
@@ -59,8 +63,6 @@ _HEADING_TAGS: Final = frozenset(f"h{level}" for level in range(1, 7))
 # The class of the list of the pages of a Sphinx toctree.
 _TOCTREE: Final = "toctree-wrapper"
 _PROBLEMATIC: Final = "problematic"
-# The elements that may hold an identifier: an id, or the name of an anchor.
-_IDENTIFIED: Final = etree.XPath("//*[@id] | //a[@name]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +104,9 @@ def page_ids(tree: HtmlElement) -> frozenset[str]:
         but the empty ones.
     """
     found: set[str] = set()
-    for node in _IDENTIFIED(tree):
+    # One walk, not an XPath union, which libxml2 merges in a time that
+    # grows as the product of what its two sides find.
+    for node in _elements(tree.getroottree().getroot()):
         names = ("id", "name") if node.tag == "a" else ("id",)
         found.update(
             identifier
@@ -245,6 +249,8 @@ def _is_data_table(table: HtmlElement) -> bool:
         return False
     if first_role(table) in LAYOUT_ROLES:
         return False
+    if in_admonition_block(table):
+        return False
     classes = (table.get("class") or "").split()
     return not LAYOUT_TABLE_CLASSES.intersection(classes)
 
@@ -329,9 +335,7 @@ def content_spots(
         `_blockless`.
     """
     removed = frozenset(
-        element
-        for selector in selectors
-        for element in root.cssselect(selector)
+        element for selector in selectors for element in select(root, selector)
     )
     left = _left_out(root, removed)
     links: list[Spot] = []

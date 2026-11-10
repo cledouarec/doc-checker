@@ -8,8 +8,9 @@ from typing import Final
 # joined by dots, such as ``2.1.3``, or a capital letter followed by them,
 # such as ``A.1`` in an appendix. A dot may follow it, then blanks and the
 # title, which the match leaves out.
+HEADING_NUMBER_VALUE: Final = re.compile(r"\d+(?:\.\d+)*|[A-Z](?:\.\d+)+")
 HEADING_NUMBER: Final = re.compile(
-    r"^(\d+(?:\.\d+)*|[A-Z](?:\.\d+)+)\.?\s+(?=\S)",
+    rf"^({HEADING_NUMBER_VALUE.pattern})\.?\s+(?=\S)",
 )
 
 # The labels of captions, in English and in French.

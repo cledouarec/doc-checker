@@ -14,7 +14,7 @@ from doc_checker.config import Config, HtmlConfig
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import detect_format, load_document
 from doc_checker.extract.html import images as html_images
-from doc_checker.extract.html import load_html
+from doc_checker.extract.html import load_html, profiles
 from doc_checker.extract.html.links import LinkResolver
 from doc_checker.images.refs import content_digest
 from doc_checker.model.document import NUMBER_ATTR, BlockKind
@@ -22,20 +22,26 @@ from tests.builders import (
     FIGURES_EN,
     SAMPLE_EN,
     SAMPLE_FR,
+    build_antora_like,
+    build_docsy_like,
     build_docusaurus_like,
     build_mkdocs_like,
     build_pandoc_like,
     build_sphinx_like,
+    build_tex4ht_like,
+    build_texinfo_like,
+    build_vitepress_like,
     link_text,
     replace_text,
 )
 from tests.image_builders import drawing, encode
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from doc_checker.model.document import Document, ImageRef, Link
+    from tests.builders import DocSpec
 
 BANNER = "Docs for version 2.0."
 
@@ -571,3 +577,203 @@ def test_page_links_are_resolved_once_per_folder(
     for page in doc.html_pages:
         others = {p.file for p in doc.html_pages} - {page.file}
         assert page.links_to == others
+
+
+def test_generic_content_is_never_a_span(tmp_path: Path) -> None:
+    """A caption span named content does not become the content root."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        "<html><body><p>First paragraph of the page.</p><figure><figcaption>"
+        '<span class="content">The settings</span></figcaption></figure>'
+        "<p>Last paragraph of the page.</p></body></html>",
+        encoding="utf-8",
+    )
+    texts = [b.text for b in load_html(page, HtmlConfig(), lang="en").blocks]
+    assert "First paragraph of the page." in texts
+    assert "Last paragraph of the page." in texts
+
+
+def test_profile_titles_and_code_reach_the_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The titles and code selectors of a profile act on a loaded page."""
+    generic = dataclasses.replace(
+        profiles.GENERIC,
+        titles=(".alert-heading",),
+        code=("span.mono",),
+    )
+    monkeypatch.setattr(profiles, "GENERIC", generic)
+    monkeypatch.setattr(
+        profiles,
+        "PROFILES",
+        (*profiles.PROFILES[:-1], generic),
+    )
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<html><body><main><div class="alert"><h4 class="alert-heading">'
+        "Note</h4><p>Back up the settings.</p></div>"
+        '<div class="alert"><h4 class="alert-heading">Before you start</h4>'
+        '<p>Run <span class="mono">orbit sync</span> now.</p></div>'
+        "</main></body></html>",
+        encoding="utf-8",
+    )
+    blocks = load_html(page, HtmlConfig(), lang="en").blocks
+    assert [b.text for b in blocks] == [
+        "Back up the settings.",
+        "Before you start",
+        "Run orbit sync now.",
+    ]
+    assert blocks[2].code_spans == ("orbit sync",)
+
+
+@pytest.mark.parametrize(
+    ("builder", "name"),
+    [
+        (build_docusaurus_like, "docusaurus"),
+        (build_vitepress_like, "vitepress"),
+        (build_antora_like, "antora"),
+        (build_docsy_like, "docsy"),
+        (build_texinfo_like, "texinfo"),
+        (build_tex4ht_like, "tex4ht"),
+    ],
+)
+def test_generator_profile_is_detected(
+    tmp_path: Path,
+    builder: Callable[[DocSpec, Path], Path],
+    name: str,
+) -> None:
+    """Each generator is recognized by its own markup."""
+    site = builder(SAMPLE_EN, tmp_path / "site")
+    assert load_html(site, HtmlConfig(), lang="en").generator == name
+
+
+def test_docusaurus_table_of_contents_is_not_content(tmp_path: Path) -> None:
+    """The table of contents of a page gives no block."""
+    site = build_docusaurus_like(SAMPLE_EN, tmp_path / "site")
+    doc = load_html(site, HtmlConfig(), lang="en")
+    titles = {s.title for s in SAMPLE_EN.sections}
+    assert not [
+        b
+        for b in doc.blocks
+        if b.kind is BlockKind.LIST_ITEM and b.text in titles
+    ]
+
+
+def test_vitepress_language_label_is_not_content(tmp_path: Path) -> None:
+    """The language label of a code block is no paragraph."""
+    site = build_vitepress_like(SAMPLE_EN, tmp_path / "site")
+    doc = load_html(site, HtmlConfig(), lang="en")
+    assert "bash" not in [b.text for b in doc.blocks]
+
+
+def test_profile_without_its_content_reads_the_body(tmp_path: Path) -> None:
+    """A page that a profile detects but whose content it cannot find."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<html><head><meta name="generator" content="VitePress v1.6.4">'
+        "</head><body><div><p>A page of its own layout.</p></div>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    doc = load_html(page, HtmlConfig(), lang="en")
+    assert doc.generator == "vitepress"
+    assert [b.text for b in doc.blocks] == ["A page of its own layout."]
+
+
+def test_docsy_alert_heading_is_no_heading(tmp_path: Path) -> None:
+    """An alert title of Docsy is neither a heading nor a default block."""
+    site = build_docsy_like(SAMPLE_EN, tmp_path / "site", lead="Learn Orbit.")
+    doc = load_html(site, HtmlConfig(), lang="en")
+    assert not [b for b in doc.blocks if b.text in {"Note", "Remarque"}]
+    assert not [b for b in doc.blocks if b.text.startswith("Last modified")]
+    assert "Learn Orbit." in [b.text for b in doc.blocks]
+
+
+def test_texinfo_navigation_menus_and_index_are_chrome(tmp_path: Path) -> None:
+    """Panels, menus, pilcrow links and index tables give no block."""
+    site = build_texinfo_like(SAMPLE_EN, tmp_path / "site", index=True)
+    assert (site / "Concept-Index.html").exists()
+    doc = load_html(site, HtmlConfig(), lang="en")
+    texts = [b.text for b in doc.blocks]
+    assert not [
+        t for t in texts if t.startswith(("Next:", "Previous:", "Up:"))
+    ]
+    assert not [t for t in texts if "\xb6" in t]
+    assert not [
+        b
+        for b in doc.blocks
+        if b.kind is BlockKind.TABLE and "Index Entry" in b.text
+    ]
+
+
+def test_older_texinfo_panels_are_chrome(tmp_path: Path) -> None:
+    """The header panels and menu tables of texinfo 6 give no block."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<html><head><meta name="Generator" content="makeinfo"></head><body>'
+        '<div class="header"><p>Next: <a href="b.html">Setup</a></p></div>'
+        '<h1 class="settitle">Orbit</h1><p>Orbit copies files.</p>'
+        '<table class="menu"><tr><td><a href="b.html">Setup</a></td></tr>'
+        "</table>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    doc = load_html(page, HtmlConfig(), lang="en")
+    assert [b.text for b in doc.blocks] == ["Orbit", "Orbit copies files."]
+
+
+def test_tex4ht_reads_the_whole_page(tmp_path: Path) -> None:
+    """A tex4ht page with a captioned table keeps all its paragraphs."""
+    site = build_tex4ht_like(
+        SAMPLE_EN,
+        tmp_path / "site",
+        table_caption="The options",
+    )
+    doc = load_html(site, HtmlConfig(), lang="en")
+    paragraphs = [p for s in SAMPLE_EN.sections for p in s.paragraphs]
+    texts = " ".join(b.text for b in doc.blocks)
+    assert all(link_text(p) in texts for p in paragraphs)
+    assert not [b for b in doc.blocks if b.text.startswith("[next]")]
+    assert "The options" in texts
+
+
+def test_tex4ht_monospaced_spans_are_inline_code(tmp_path: Path) -> None:
+    """The monospaced spans of tex4ht are inline code."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<html><head><meta content="TeX4ht (https://tug.org/tex4ht/)" '
+        'name="generator"></head><body><p class="noindent">Run '
+        '<span class="cmtt-10">orbit sync</span> now.</p></body></html>',
+        encoding="utf-8",
+    )
+    blocks = load_html(page, HtmlConfig(), lang="en").blocks
+    assert [b.text for b in blocks] == ["Run orbit sync now."]
+    assert blocks[0].code_spans == ("orbit sync",)
+
+
+def test_tex4ht_lm_typewriter_spans_are_inline_code(tmp_path: Path) -> None:
+    """The Latin Modern typewriter spans of the TeX Live guide are code."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<html><head><meta content="TeX4ht (https://tug.org/tex4ht/)" '
+        'name="generator"></head><body><p>Run '
+        '<span class="ec-lmtk-10x-x-120">tlmgr</span> and '
+        '<span class="ec-lmtto-10x-x-120">info</span>.</p></body></html>',
+        encoding="utf-8",
+    )
+    blocks = load_html(page, HtmlConfig(), lang="en").blocks
+    assert blocks[0].code_spans == ("tlmgr", "info")
+
+
+def test_texinfo_is_detected_by_a_versioned_makeinfo_meta(
+    tmp_path: Path,
+) -> None:
+    """A makeinfo 4.x page is recognized, whatever the version string."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<html><head><meta name="generator" content="makeinfo 4.13">'
+        "</head><body><p>Orbit copies files.</p></body></html>",
+        encoding="utf-8",
+    )
+    assert load_html(page, HtmlConfig(), lang="en").generator == "texinfo"

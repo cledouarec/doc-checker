@@ -1042,7 +1042,7 @@ def _docusaurus_section(
     if section.note:
         parts.append(
             '<div class="theme-admonition theme-admonition-note alert">'
-            '<div class="admonitionHeading"><span class="admonitionIcon">'
+            '<div class="admonitionHeading_Gvgb"><span class="admonitionIcon">'
             '<svg viewBox="0 0 14 16"><path d="M6 5h2v2H6z"></path></svg>'
             f"</span>{_DOCUSAURUS_NOTE[lang]}</div>"
             '<div class="admonitionContent">'
@@ -1085,25 +1085,659 @@ def build_docusaurus_like(
         body = "\n".join(
             _docusaurus_section(s, resolve, spec.lang, base) for s in chapter
         )
+        toc = "".join(
+            f'<li><a href="#{s.slug}" class="table-of-contents__link">'
+            f"{_esc(s.title)}</a></li>"
+            for s in chapter[1:]
+        )
         page = (
             f'<!DOCTYPE html><html lang="{spec.lang}" dir="ltr"><head>'
             f'<meta charset="utf-8"><title>{_esc(head.title)} | {title}'
-            '</title><meta name="generator" content="Docusaurus v3.9.2">'
-            f"</head><body>{navbar}"
+            "</title></head>"
+            f"<body>{navbar}"
             '<div class="main-wrapper"><aside '
             'class="theme-doc-sidebar-container"><ul class="menu__list">'
             f'{sidebar}</ul></aside><main class="docMainContainer">'
-            '<article><nav class="theme-doc-breadcrumbs"><ul>'
+            '<div class="container"><div class="row">'
+            '<div class="col docItemCol"><article>'
+            '<nav class="theme-doc-breadcrumbs"><ul>'
             f'<li><a href="{safe}">Home</a></li></ul></nav>'
             '<div class="theme-doc-markdown markdown"><header>'
             f"<h1>{_esc(head.title)}</h1></header>\n{body}\n</div>"
             f'<nav class="pagination-nav"><a href="{safe}">Home</a></nav>'
-            '</article></main></div><footer class="footer">'
+            '</article></div><div class="col col--3">'
+            '<div class="tableOfContents theme-doc-toc-desktop">'
+            f'<ul class="table-of-contents">{toc}</ul></div></div>'
+            '</div></div></main></div><footer class="footer">'
             "<p>\xa9 Copyright 2026.</p></footer></body></html>\n"
         )
         (out / "docs" / head.slug).mkdir(parents=True, exist_ok=True)
         (out / "docs" / head.slug / "index.html").write_text(
             page,
+            encoding="utf-8",
+        )
+    return out
+
+
+def _vitepress_section(section: Section, resolve: Resolver) -> str:
+    tag = f"h{section.level}"
+    title = _esc(section.title)
+    heading = (
+        f'<{tag} id="{section.slug}" tabindex="-1">{title} '
+        f'<a class="header-anchor" href="#{section.slug}" '
+        f'aria-label="Permalink to &quot;{_attr(section.title)}&quot;">'
+        f"\U0000200b</a></{tag}>"
+    )
+    parts = [heading]
+    parts += _plain_lists(
+        section,
+        resolve,
+        figures=[
+            _mkdocs_figure(f).replace("../img/", "img/")
+            for f in section.figures
+        ],
+    )
+    if section.code:
+        lines = "\n".join(
+            f'<span class="line"><span style="--shiki-light:#24292E;">'
+            f"{_esc(line)}</span></span>"
+            for line in section.code.split("\n")
+        )
+        parts.append(
+            '<div class="language-bash vp-adaptive-theme">'
+            '<button title="Copy Code" class="copy"></button>'
+            '<span class="lang">bash</span>'
+            '<pre class="shiki shiki-themes github-light github-dark vp-code" '
+            f'tabindex="0"><code>{lines}</code></pre></div>',
+        )
+    if section.table:
+        parts.append(_mkdocs_table(section))
+    if section.note:
+        parts.append(
+            '<div class="warning custom-block">'
+            '<p class="custom-block-title">WARNING</p>'
+            f"<p>{_render(section.note, resolve)}</p></div>",
+        )
+    return "\n".join(parts)
+
+
+def _vitepress_page(spec: DocSpec, title: str, body: str) -> str:
+    links = "".join(
+        f'<li><a class="VPLink link" href="/{c[0].slug}.html">'
+        f"{_esc(c[0].title)}</a></li>"
+        for c in _chapters(spec)
+    )
+    return (
+        f'<!DOCTYPE html>\n<html lang="{spec.lang}" dir="ltr"><head>'
+        f'<meta charset="utf-8"><title>{_esc(title)} | {_esc(spec.title)}'
+        '</title><meta name="generator" content="VitePress v1.6.4">'
+        '</head>\n<body><div id="app"><div class="Layout">'
+        '<header class="VPNav"><nav class="VPNavBar">'
+        f'<a href="/">{_esc(spec.title)}</a></nav></header>\n'
+        '<aside class="VPSidebar"><nav id="VPSidebarNav" class="nav">'
+        f"<ul>{links}</ul></nav></aside>\n"
+        '<div class="VPContent"><div class="VPDoc"><div class="container">'
+        '<div class="content"><main class="main">'
+        '<div style="position:relative;" class="vp-doc"><div>'
+        f"{body}</div></div></main>"
+        '<footer class="VPDocFooter"><a href="/">Home</a></footer>'
+        "</div></div></div></div></div></div></body></html>\n"
+    )
+
+
+def build_vitepress_like(spec: DocSpec, out: Path) -> Path:
+    """Write the documentation as a VitePress build, a page a chapter."""
+    out.mkdir(parents=True, exist_ok=True)
+    _write_figures(spec, out / "img", "{name}.{suffix}")
+    (out / "index.html").write_text(
+        _vitepress_page(spec, spec.title, ""),
+        encoding="utf-8",
+    )
+    for chapter in _chapters(spec):
+        slug = chapter[0].slug
+        resolve = _resolver(spec, slug, "{chapter}.html#{slug}")
+        body = "\n".join(_vitepress_section(s, resolve) for s in chapter)
+        page = _vitepress_page(spec, chapter[0].title, body)
+        (out / f"{slug}.html").write_text(page, encoding="utf-8")
+    return out
+
+
+def _antora_figure(figure: Figure) -> str:
+    """Write a figure as Asciidoctor does, the title after the image."""
+    title = f'<div class="title">{_esc(figure.caption)}</div>'
+    if figure.defect == "dropped":
+        return f'<div class="imageblock">{title}</div>'
+    suffix, _ = figure_file(figure)
+    alt = "" if figure.defect == "noalt" else f'alt="{_attr(figure.alt)}" '
+    return (
+        '<div class="imageblock"><div class="content">'
+        f'<img src="_images/{figure.name}.{suffix}" {alt}></div>{title}</div>'
+    )
+
+
+def _antora_section(section: Section, resolve: Resolver) -> str:
+    tag = f"h{section.level}"
+    title = _esc(section.title)
+    if section.level == 1:
+        parts = [f'<h1 class="page">{title}</h1>']
+    else:
+        heading = (
+            f'<div class="sect{section.level - 1}"><{tag} '
+            f'id="{section.slug}"><a class="anchor" '
+            f'href="#{section.slug}"></a>{title}</{tag}>'
+        )
+        parts = [heading]
+    parts += [
+        f'<div class="paragraph"><p>{_render(p, resolve)}</p></div>'
+        for p in section.paragraphs
+    ]
+    parts += [_antora_figure(f) for f in section.figures]
+    if section.bullets:
+        items = "".join(
+            f"<li><p>{_render(b, resolve)}</p></li>" for b in section.bullets
+        )
+        parts.append(f'<div class="ulist"><ul>{items}</ul></div>')
+    if section.code:
+        parts.append(
+            '<div class="listingblock"><div class="content">'
+            '<pre class="highlightjs highlight"><code class="language-bash '
+            f'hljs" data-lang="bash">{_esc(section.code)}</code></pre>'
+            "</div></div>",
+        )
+    if section.table:
+        header, *rows = section.table
+        head = "".join(
+            f'<th class="tableblock halign-left valign-top">{_esc(c)}</th>'
+            for c in header
+        )
+        body = "".join(
+            "<tr>"
+            + "".join(
+                '<td class="tableblock halign-left valign-top">'
+                f'<p class="tableblock">{_esc(c)}</p></td>'
+                for c in row
+            )
+            + "</tr>"
+            for row in rows
+        )
+        parts.append(
+            '<table class="tableblock frame-all grid-all stretch">'
+            f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>",
+        )
+    if section.note:
+        parts.append(
+            '<div class="admonitionblock note"><table><tr>'
+            '<td class="icon"><i class="fa icon-note" title="Note"></i></td>'
+            f'<td class="content">{_render(section.note, resolve)}</td>'
+            "</tr></table></div>",
+        )
+    if section.level > 1:
+        parts.append("</div>")
+    return "\n".join(parts)
+
+
+def _antora_page(spec: DocSpec, title: str, body: str) -> str:
+    links = "".join(
+        f'<li class="nav-item" data-depth="1"><a class="nav-link" '
+        f'href="{c[0].slug}.html">{_esc(c[0].title)}</a></li>'
+        for c in _chapters(spec)
+    )
+    return (
+        f'<!DOCTYPE html>\n<html lang="{spec.lang}"><head>'
+        f'<meta charset="utf-8"><title>{_esc(title)} :: {_esc(spec.title)}'
+        '</title><meta name="generator" content="Antora 3.2.2"></head>\n'
+        '<body class="article"><header class="header"><nav class="navbar">'
+        f'<a class="navbar-item" href="..">{_esc(spec.title)}</a></nav>'
+        '</header><div class="body"><div class="nav-container"><aside '
+        'class="nav"><div class="panels"><nav class="nav-menu">'
+        f'<ul class="nav-list">{links}</ul></nav></div></aside></div>\n'
+        '<main class="article"><div class="toolbar" role="navigation">'
+        '<button class="nav-toggle"></button>'
+        '<a href="index.html" class="home-link"></a>'
+        '<div class="edit-this-page"><a href="#">Edit this Page</a></div>'
+        '</div>\n<div class="content"><aside class="toc sidebar" '
+        'data-title="Contents" data-levels="2"><div class="toc-menu">'
+        "</div></aside>\n"
+        f'<article class="doc">\n{body}\n</article></div></main></div>'
+        '<footer class="footer"><p>This page was built using the Antora '
+        "default UI.</p></footer></body></html>\n"
+    )
+
+
+def build_antora_like(spec: DocSpec, out: Path) -> Path:
+    """Write the documentation as an Antora build.
+
+    The pages are in the folder of the component, and the root page only
+    redirects to it, as Antora writes it.
+    """
+    component = out / "orbit"
+    component.mkdir(parents=True, exist_ok=True)
+    _write_figures(spec, component / "_images", "{name}.{suffix}")
+    (out / "index.html").write_text(
+        '<!DOCTYPE html>\n<meta charset="utf-8">\n'
+        '<script>location="orbit/index.html"</script>\n'
+        '<meta http-equiv="refresh" content="0; url=orbit/index.html">\n'
+        '<meta name="robots" content="noindex">\n'
+        "<title>Redirect Notice</title>\n<h1>Redirect Notice</h1>\n"
+        "<p>The page you requested has been relocated to "
+        '<a href="orbit/index.html">orbit/index.html</a>.</p>\n',
+        encoding="utf-8",
+    )
+    (component / "index.html").write_text(
+        _antora_page(spec, spec.title, ""),
+        encoding="utf-8",
+    )
+    for chapter in _chapters(spec):
+        slug = chapter[0].slug
+        resolve = _resolver(spec, slug, "{chapter}.html#{slug}")
+        body = "\n".join(_antora_section(s, resolve) for s in chapter)
+        page = _antora_page(spec, chapter[0].title, body)
+        (component / f"{slug}.html").write_text(page, encoding="utf-8")
+    return out
+
+
+_DOCSY_NOTE = {"en": "Note", "fr": "Remarque"}
+
+
+def _docsy_section(section: Section, lang: str, resolve: Resolver) -> str:
+    tag = f"h{section.level}"
+    heading = (
+        f'<{tag} id="{section.slug}">{_esc(section.title)}'
+        f'<a class="td-heading-self-link" href="#{section.slug}" '
+        'aria-label="Heading self-link"></a>'
+        f"</{tag}>"
+    )
+    parts = [heading]
+    parts += _plain_lists(section, resolve)
+    if section.code:
+        parts.append(
+            '<div class="highlight"><pre tabindex="0" class="chroma">'
+            f'<code class="language-bash" data-lang="bash">'
+            f"{_esc(section.code)}</code></pre></div>",
+        )
+    if section.table:
+        parts.append(_mkdocs_table(section))
+    if section.note:
+        parts.append(
+            '<div class="alert alert-primary" role="alert">'
+            f'<h4 class="alert-heading">{_DOCSY_NOTE[lang]}</h4>'
+            f"<p>{_render(section.note, resolve)}</p></div>",
+        )
+    return "\n".join(parts)
+
+
+def build_docsy_like(
+    spec: DocSpec,
+    out: Path,
+    *,
+    lead: str | None = None,
+) -> Path:
+    """Write the documentation as a Hugo Docsy build, a page a chapter.
+
+    The markup is the one the theme documents, not one checked on a real
+    build. The last modified date and the section index are on the first
+    page only; the lead paragraph is written only if it is given.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    chapters = _chapters(spec)
+    links = "".join(
+        f'<li class="td-sidebar-nav__section-title"><a class="td-sidebar-link"'
+        f' href="/{c[0].slug}/">{_esc(c[0].title)}</a></li>'
+        for c in chapters
+    )
+    sidebar = (
+        '<div id="td-sidebar-menu" class="td-sidebar__inner"><nav '
+        f'class="td-sidebar-nav"><ul class="td-sidebar-nav__section">{links}'
+        "</ul></nav></div>"
+    )
+    for number, chapter in enumerate(chapters):
+        slug = chapter[0].slug
+        resolve = _resolver(spec, slug, "/{chapter}/#{slug}")
+        body = "\n".join(
+            _docsy_section(s, spec.lang, resolve) for s in chapter
+        )
+        extra = ""
+        if number == 0:
+            entries = "".join(
+                f'<div class="entry"><h5><a href="/{c[0].slug}/">'
+                f"{_esc(c[0].title)}</a></h5></div>"
+                for c in chapters
+            )
+            extra = (
+                f'<div class="section-index"><hr class="panel-line">'
+                f"{entries}</div>"
+                '<div class="td-page-meta__lastmod">Last modified '
+                'November 9, 2026: <a href="/commit/">Update the guide '
+                "(1a2b3c4)</a></div>"
+            )
+        lead_html = ""
+        if lead and number == 0:
+            lead_html = f'<div class="lead">{_esc(lead)}</div>'
+        page = (
+            f'<!doctype html><html lang="{spec.lang}" class="no-js"><head>'
+            f'<meta charset="utf-8"><title>{_esc(chapter[0].title)} | '
+            f"{_esc(spec.title)}</title></head>"
+            '<body class="td-page"><header><nav class="js-navbar-scroll '
+            'navbar"><a class="navbar-brand" href="/">'
+            f"{_esc(spec.title)}</a></nav></header>"
+            '<div class="container-fluid td-outer"><div class="td-main">'
+            '<div class="row flex-xl-nowrap">'
+            '<aside class="col-12 col-md-3 col-xl-2 td-sidebar d-print-none">'
+            f"{sidebar}</aside>"
+            '<aside class="d-none d-xl-block col-xl-2 td-sidebar-toc">'
+            '<nav id="TableOfContents"><ul>'
+            + "".join(
+                f'<li><a href="#{s.slug}">{_esc(s.title)}</a></li>'
+                for s in chapter[1:]
+            )
+            + '</ul></nav></aside><main class="col-12 col-md-9 col-xl-8 '
+            'ps-md-5" role="main"><div class="td-content">'
+            f"{lead_html}\n{body}\n{extra}</div></main></div></div>"
+            '<footer class="td-footer"><p>Copyright 2026</p></footer></div>'
+            "</body></html>\n"
+        )
+        (out / slug).mkdir(exist_ok=True)
+        (out / slug / "index.html").write_text(page, encoding="utf-8")
+    # The root page has no content, as on a real Hugo site; mkdocs has no such
+    # page for the chapters, which gives the INFO-only block.moved findings of
+    # the docsy/mkdocs pair, since the pages are at other paths.
+    (out / "index.html").write_text(
+        f'<!doctype html><html lang="{spec.lang}"><head><meta charset="utf-8">'
+        f"<title>{_esc(spec.title)}</title></head>"
+        '<body class="td-page"><main role="main"><div class="td-content">'
+        "</div></main></body></html>\n",
+        encoding="utf-8",
+    )
+    return out
+
+
+def _texinfo_nav(chapters: list[list[Section]], k: int, title: str) -> str:
+    """Write the navigation panel of the page of the k-th chapter."""
+    parts = []
+    if k + 1 < len(chapters):
+        nxt = chapters[k + 1][0]
+        parts.append(
+            f'Next: <a href="{nxt.slug}.html" accesskey="n" rel="next">'
+            f"{_esc(nxt.title)}</a>",
+        )
+    if k == 0:
+        before = ("index.html", title)
+    else:
+        before = (f"{chapters[k - 1][0].slug}.html", chapters[k - 1][0].title)
+    previous = (
+        f'Previous: <a href="{before[0]}" accesskey="p" rel="prev">'
+        f"{_esc(before[1])}</a>"
+    )
+    up = f'Up: <a href="index.html" accesskey="u" rel="up">{_esc(title)}</a>'
+    parts += [previous, up]
+    return (
+        '<div class="nav-panel"><p>\n'
+        + ", ".join(parts)
+        + " &nbsp; </p></div>"
+    )
+
+
+def _texinfo_section(
+    section: Section,
+    number: str,
+    resolve: Resolver,
+    mini_toc: str,
+) -> str:
+    level = min(section.level, 3)
+    kind = ("chapter", "section", "subsection")[level - 1]
+    tag = f"h{level + 1}"
+    heading = (
+        f'<{tag} class="{kind}" id="{section.slug}"><span>{number} '
+        f"{_esc(section.title)}"
+        f'<a class="copiable-link" href="#{section.slug}"> &para;</a>'
+        f"</span></{tag}>"
+    )
+    parts = [heading, mini_toc]
+    parts += [
+        p.replace("<ul>", '<ul class="itemize mark-bullet">')
+        for p in _plain_lists(section, resolve)
+    ]
+    if section.code:
+        parts.append(
+            '<div class="example"><pre class="example-preformatted">'
+            f"{_esc(section.code)}\n</pre></div>",
+        )
+    if section.table:
+        header, *rows = section.table
+        head = "".join(f'<th width="50%">{_esc(c)}</th>' for c in header)
+        body = "".join(
+            "<tr>"
+            + "".join(f'<td width="50%">{_esc(c)}</td>' for c in row)
+            + "</tr>"
+            for row in rows
+        )
+        parts.append(
+            '<table class="multitable"><thead><tr>'
+            f"{head}</tr></thead><tbody>{body}</tbody></table>",
+        )
+    if section.note:
+        parts.append(
+            '<blockquote class="quotation"><p><b class="b">Note:</b> '
+            f"{_render(section.note, resolve)}\n</p></blockquote>",
+        )
+    return "\n".join(p for p in parts if p)
+
+
+def build_texinfo_like(
+    spec: DocSpec,
+    out: Path,
+    *,
+    index: bool = False,
+) -> Path:
+    """Write the documentation as texinfo 7.2 HTML, a page a chapter.
+
+    The language is on ``body``, as texinfo writes it. With ``index``, a
+    page of the concept index is added; it is ``Concept-Index.html`` and
+    never ``Index.html``, which would overwrite ``index.html`` on a disk
+    that ignores the case.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    chapters = _chapters(spec)
+    numbers = section_numbers(spec)
+
+    def page(title: str, body: str) -> str:
+        return (
+            '<!DOCTYPE html>\n<html>\n<head>\n<meta http-equiv="Content-Type"'
+            f' content="text/html; charset=utf-8">\n<title>{_esc(title)} '
+            f'({_esc(spec.title)})</title>\n<meta name="Generator" '
+            'content="texi2any">\n</head>\n\n'
+            f'<body lang="{spec.lang}">\n{body}\n\n</body>\n</html>\n'
+        )
+
+    top = (
+        '<div class="top-level-extent" id="Top">\n'
+        '<div class="nav-panel"><p>\n'
+        f'Next: <a href="{chapters[0][0].slug}.html" accesskey="n" '
+        'rel="next">' + _esc(chapters[0][0].title) + "</a> &nbsp; </p></div>\n"
+        '<ul class="mini-toc">\n'
+        + "".join(
+            f'<li><a href="{c[0].slug}.html" accesskey="{n}">'
+            f"{_esc(c[0].title)}</a></li>\n"
+            for n, c in enumerate(chapters, 1)
+        )
+        + "</ul>\n</div>"
+    )
+    (out / "index.html").write_text(page(spec.title, top), encoding="utf-8")
+    for k, chapter in enumerate(chapters):
+        slug = chapter[0].slug
+        resolve = _resolver(spec, slug, "{chapter}.html#{slug}")
+        entries = "".join(
+            f'<li><a href="#{s.slug}" accesskey="{n}">{_esc(s.title)}</a></li>'
+            for n, s in enumerate(chapter[1:], 1)
+        )
+        mini = f'<ul class="mini-toc">\n{entries}\n</ul>' if entries else ""
+        sections = [
+            _texinfo_section(
+                s,
+                numbers[s.slug],
+                resolve,
+                mini if n == 0 else "",
+            )
+            for n, s in enumerate(chapter)
+        ]
+        panel = _texinfo_nav(chapters, k, spec.title)
+        body = (
+            f'<div class="chapter-level-extent" id="{slug}-page">\n{panel}\n'
+            "<hr>\n" + "\n".join(sections) + f"\n<hr>\n{panel}\n</div>"
+        )
+        (out / f"{slug}.html").write_text(
+            page(chapter[0].title, body),
+            encoding="utf-8",
+        )
+    if index:
+        rows = "".join(
+            f'<tr><td></td><td class="printindex-index-entry"><a href='
+            f'"{c[0].slug}.html">{_esc(c[0].title)}</a></td>'
+            f'<td class="printindex-index-section"><a href='
+            f'"{c[0].slug}.html">{_esc(c[0].title)}</a></td></tr>'
+            for c in chapters
+        )
+        body = (
+            '<div class="unnumbered-level-extent" id="Concept-Index">\n'
+            '<div class="nav-panel"><p>\nUp: <a href="index.html" '
+            f'accesskey="u" rel="up">{_esc(spec.title)}</a></p></div>\n'
+            '<h2 class="unnumbered" id="Concept-Index-1"><span>Concept '
+            'Index<a class="copiable-link" href="#Concept-Index-1"> &para;'
+            "</a></span></h2>\n"
+            '<div class="printindex cp-printindex">\n'
+            '<table class="index-cp"><tr><th>Index Entry</th>'
+            '<th>Section</th></tr><tr><td colspan="3"><hr></td></tr>'
+            f"{rows}</table>\n</div>\n</div>"
+        )
+        (out / "Concept-Index.html").write_text(
+            page("Concept Index", body),
+            encoding="utf-8",
+        )
+    return out
+
+
+def _tex4ht_nav(chapters: list[list[Section]], k: int) -> str:
+    """Write the cross links of the page of the k-th chapter."""
+    parts = []
+    if k + 1 < len(chapters):
+        parts.append(
+            f' <a href="{chapters[k + 1][0].slug}.html">[next]</a> ',
+        )
+    before = "index.html" if k == 0 else f"{chapters[k - 1][0].slug}.html"
+    parts += [
+        f' <a href="{before}">[prev]</a> ',
+        ' <a href="index.html">[up]</a> ',
+    ]
+    return (
+        "<div class='crosslinks'><p class='noindent'>"
+        + "".join(parts)
+        + "</p></div>"
+    )
+
+
+def _tex4ht_section(
+    section: Section,
+    number: str,
+    resolve: Resolver,
+    table_caption: str | None,
+) -> str:
+    level = min(section.level, 3)
+    kind = ("section", "subsection", "subsubsection")[level - 1]
+    tag = f"h{level + 2}"
+    heading = (
+        f"<{tag} class='{kind}Head'>"
+        f"<span class='titlemark'>{number}   </span> "
+        f"<a id='{section.slug}'></a>{_esc(section.title)}"
+        f"</{tag}>"
+    )
+    parts = [heading]
+    for n, text in enumerate(section.paragraphs):
+        css = "noindent" if n == 0 else "indent"
+        parts.append(f"<p class='{css}'>{_render(text, resolve)} </p>")
+    if section.bullets:
+        items = "".join(
+            f"<li class='itemize'>{_render(b, resolve)}</li>"
+            for b in section.bullets
+        )
+        parts.append(f"<ul class='itemize1'>{items}</ul>")
+    if section.code:
+        parts.append(
+            f"<pre class='verbatim' id='verbatim-1'>\n{_esc(section.code)}\n"
+            "</pre>",
+        )
+    if section.table:
+        rows = "".join(
+            "<tr style='vertical-align:baseline;'>"
+            + "".join(
+                f"<td class='td11' style='text-align:left;'> {_esc(c)} </td>"
+                for c in row
+            )
+            + "</tr>"
+            for row in section.table
+        )
+        caption = (
+            "<figcaption class='caption'><span class='id'>Table 1: </span>"
+            f"<span class='content'>{_esc(table_caption)}</span></figcaption>"
+            if table_caption
+            else ""
+        )
+        parts.append(
+            "<div class='table'><figure class='float'>"
+            f"<div class='tabular'> <table class='tabular'>{rows}</table>"
+            f" </div>{caption}</figure></div>",
+        )
+    if section.note:
+        parts.append(
+            f"<p class='noindent'>{_render(section.note, resolve)} </p>",
+        )
+    return "\n".join(parts)
+
+
+def build_tex4ht_like(
+    spec: DocSpec,
+    out: Path,
+    *,
+    table_caption: str | None = None,
+) -> Path:
+    """Write the documentation as a TeX4ht build, a page a chapter.
+
+    A table has a caption only if ``table_caption`` is given.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    chapters = _chapters(spec)
+    numbers = section_numbers(spec)
+
+    def page(title: str, body: str) -> str:
+        return (
+            "<!DOCTYPE html> \n<html lang='en-US' xml:lang='en-US'> \n"
+            f"<head><title>{_esc(title)}</title> \n<meta charset='utf-8' /> \n"
+            "<meta content='TeX4ht (https://tug.org/tex4ht/)' "
+            "name='generator' /> \n</head><body>\n"
+            f"{body}\n</body> \n</html>\n"
+        )
+
+    entries = "".join(
+        f"<span class='sectionToc'>{numbers[c[0].slug]} "
+        f"<a href='{c[0].slug}.html'>{_esc(c[0].title)}</a></span><br />"
+        for c in chapters
+    )
+    # The title and the heading of the contents are left out: the other
+    # generators of the pairs write no block for them.
+    front = f"<div class='tableofcontents'>{entries}</div>"
+    (out / "index.html").write_text(
+        page(spec.title, front),
+        encoding="utf-8",
+    )
+    for k, chapter in enumerate(chapters):
+        slug = chapter[0].slug
+        resolve = _resolver(spec, slug, "{chapter}.html#{slug}")
+        sections = "\n".join(
+            _tex4ht_section(s, numbers[s.slug], resolve, table_caption)
+            for s in chapter
+        )
+        nav = _tex4ht_nav(chapters, k)
+        (out / f"{slug}.html").write_text(
+            page(chapter[0].title, f"{nav}\n{sections}\n{nav}"),
             encoding="utf-8",
         )
     return out

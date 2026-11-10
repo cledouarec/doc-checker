@@ -33,6 +33,7 @@ findings of one rule and pattern, once there are five of them, by one group.
 """
 
 import re
+from collections import Counter
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
@@ -53,6 +54,7 @@ from doc_checker.compare.links import link_drafts
 from doc_checker.compare.structure import kind_drafts, level_drafts
 from doc_checker.compare.textdiff import Hunk, diff_tokens, span_text
 from doc_checker.errors import DictionaryError
+from doc_checker.extract.common import share_numbering
 from doc_checker.images.load import PixelLoader
 from doc_checker.model.document import (
     CELL_SEPARATOR,
@@ -613,6 +615,20 @@ def _unsearched_notes(alignment: Alignment) -> list[str]:
     return [message]
 
 
+def _shared_numbering(
+    ref: Document,
+    new: Document,
+) -> tuple[Document, Document]:
+    """Return the documents, their headings numbered or not as a pair."""
+    counters = (Counter(ref.normalization), Counter(new.normalization))
+    blocks = share_numbering(ref.blocks, new.blocks, counters)
+    if counters[0] != ref.normalization:
+        ref = replace(ref, blocks=blocks[0], normalization=counters[0])
+    if counters[1] != new.normalization:
+        new = replace(new, blocks=blocks[1], normalization=counters[1])
+    return ref, new
+
+
 def compare_documents(
     ref: Document,
     new: Document,
@@ -638,20 +654,20 @@ def compare_documents(
         every such word, the new document is a copy whose warnings end
         with the reasons.
     """
+    ref, new = _shared_numbering(ref, new)
     chrome = ref.chrome_keys | new.chrome_keys
     patterns = [re.compile(pattern) for pattern in cfg.ignore.patterns]
-    toc = cfg.pdf.compare_toc
     ref_blocks, ref_kept = _prepare(
         ref.blocks,
         chrome,
         patterns,
-        compare_toc=toc,
+        compare_toc=cfg.pdf.compare_toc,
     )
     new_blocks, new_kept = _prepare(
         new.blocks,
         chrome,
         patterns,
-        compare_toc=toc,
+        compare_toc=cfg.pdf.compare_toc,
     )
     alignment = align_blocks(
         ref_blocks,

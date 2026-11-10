@@ -290,3 +290,13 @@ def test_toctrees_and_unread_pictures_give_their_lines() -> None:
     assert content_spots(root, GLOBAL_STRIP).blockless == (4,)
     unread = content_spots(root, GLOBAL_STRIP, images=False)
     assert unread.blockless == (4, 8, 9, 10, 10)
+
+
+def test_admonition_table_is_a_layout_table() -> None:
+    """The table of an Asciidoctor admonition is not a table without header."""
+    root = _page(
+        '<div class="admonitionblock note"><table><tr><td class="icon">'
+        '<i class="fa icon-note" title="Note"></i></td><td class="content">'
+        "Back up the settings file.</td></tr></table></div>",
+    )
+    assert content_spots(root, GLOBAL_STRIP).bare_tables == ()
