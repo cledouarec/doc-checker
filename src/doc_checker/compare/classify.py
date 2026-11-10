@@ -417,7 +417,8 @@ def classify_hunk(hunk: Hunk, ctx: HunkContext) -> Classification:
     """Return the rule and severity of a difference.
 
     The rules are tried in order and the first that applies wins; a
-    difference no rule recognizes is a plain modification. Only a word
+    difference no rule recognizes is a plain modification, and so is a
+    whole run of lines, too long to be diffed token by token. Only a word
     replaced by a close one, that no rule before claims, is looked up in
     the dictionaries; one that cannot be loaded raises the
     `DictionaryError` of the speller.
@@ -436,7 +437,7 @@ def classify_hunk(hunk: Hunk, ctx: HunkContext) -> Classification:
         ctx.ref_tokens[hunk.ref_start : hunk.ref_end],
         ctx.new_tokens[hunk.new_start : hunk.new_end],
     )
-    for rule in _RULES:
+    for rule in () if hunk.whole else _RULES:
         result = rule(view, ctx)
         if result is not None:
             return result

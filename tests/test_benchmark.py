@@ -9,13 +9,25 @@ from typing import TYPE_CHECKING, Final
 
 import lxml.html
 
+from doc_checker.compare.engine import compare_documents
 from doc_checker.config import Config
 from doc_checker.extract import load_document
+from doc_checker.extract.html.dom import mark_titles
 from doc_checker.extract.html.facts import page_ids
 from doc_checker.extract.html.ordering import nav_links, resolve_href
+from doc_checker.extract.html.profiles import GLOBAL_TITLES
 from doc_checker.extract.html.site import HtmlPage
+from doc_checker.model.document import BlockKind
 from doc_checker.pipeline import run_audit, run_compare
-from tests.builders import DocSpec, Section, build_sphinx_like, map_texts
+from tests.builders import (
+    DocSpec,
+    Section,
+    build_sphinx_like,
+    make_block,
+    make_document,
+    map_texts,
+    parts_tables,
+)
 from tests.pdf_builders import build_reportlab_pdf, filler_sections
 
 if TYPE_CHECKING:
@@ -304,3 +316,35 @@ def test_nested_navigation_is_walked_once(
     found = nav_links(page, ["div.menu"])
     assert found == [f"p{i}.html" for i in range(100)]
     assert len(resolved) == 100
+
+
+def _table_pair(rows: int) -> Callable[[], object]:
+    """Return the comparison of a long table, a third of its rows changed."""
+    ref_text, new_text, _ = parts_tables(rows, 0.3)
+    ref = make_document(make_block(ref_text, BlockKind.TABLE))
+    new = make_document(make_block(new_text, BlockKind.TABLE))
+    return lambda: compare_documents(ref, new, Config())
+
+
+def test_a_modified_long_table_scales_linearly() -> None:
+    """Four times the rows of a changed table cost at most eight times."""
+    ratio = cost(_table_pair(4_000)) / cost(_table_pair(1_000))
+    assert ratio <= SCALE_MAX
+
+
+def _nested_titles(depth: int) -> lxml.html.HtmlElement:
+    """Parse nested block titles over 20,000 inline elements and a block."""
+    titles = '<div class="callout-title-container">' * depth
+    body = f"{titles}{'<span>w</span>' * 20_000}<p>x</p>{'</div>' * depth}"
+    return lxml.html.fromstring(
+        f"<html><body><main>{body}</main></body></html>",
+    )
+
+
+def test_nested_titles_are_marked_once() -> None:
+    """Two hundred levels of nested titles cost at most eight times one."""
+    deep, flat = _nested_titles(200), _nested_titles(1)
+    ratio = cost(lambda: mark_titles(deep, GLOBAL_TITLES)) / cost(
+        lambda: mark_titles(flat, GLOBAL_TITLES),
+    )
+    assert ratio <= SCALE_MAX

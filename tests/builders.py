@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from hashlib import blake2b
 from operator import itemgetter
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from doc_checker.audit.engine import audit_document
 from doc_checker.compare.engine import compare_documents
@@ -89,6 +89,47 @@ def random_blocks(
         make_block(" ".join(word() for _ in range(words)))
         for _ in range(count)
     ]
+
+
+_PART_KINDS: Final = (
+    "valve",
+    "pump",
+    "sensor",
+    "relay",
+    "filter",
+    "gasket",
+    "bearing",
+    "shaft",
+)
+
+
+def parts_tables(rows: int, share: float) -> tuple[str, str, int]:
+    """Return two versions of a long table of parts, some counts changed.
+
+    Args:
+        rows: The rows of the table, besides its header.
+        share: The share of the rows whose count the new version changes.
+
+    Returns:
+        The text of the reference table and that of the new one, one line
+        per row and ``|`` between the cells, and how many rows differ.
+    """
+    rng = random.Random(rows)  # ruff: ignore[suspicious-non-cryptographic-random-usage] - test data
+    header = "Part | Kind | Count | Price"
+    ref = [header]
+    new = [header]
+    changed = 0
+    for row in range(rows):
+        kind = rng.choice(_PART_KINDS)
+        count = rng.randrange(1, 500)
+        price = f"{rng.randrange(100, 99_999) / 100:.2f}"
+        later = count
+        if rng.random() < share:
+            later = count % 499 + 1
+            changed += 1
+        ref.append(f"P-{row:05d} | {kind} | {count} | {price}")
+        new.append(f"P-{row:05d} | {kind} | {later} | {price}")
+    return "\n".join(ref), "\n".join(new), changed
 
 
 type Defect = Literal[
