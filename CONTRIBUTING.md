@@ -69,9 +69,9 @@ uv run pytest
 stage, with its seconds and the peak memory of the process so far:
 
 ```bash
-uv run python tools/benchmark.py extract PATH
-uv run python tools/benchmark.py audit PATH [--no-images] [-o DIR]
-uv run python tools/benchmark.py compare REF NEW [--no-images] [-o DIR]
+uv run python tools/benchmark.py extract PATH [--no-images] [--pdf-tables]
+uv run python tools/benchmark.py audit PATH [--no-images] [--pdf-tables] [-o DIR]
+uv run python tools/benchmark.py compare REF NEW [--no-images] [--pdf-tables] [-o DIR]
 ```
 
 The stages are `extract` for `extract`; `extract (audit facts)`,
@@ -81,16 +81,10 @@ reports are written in `-o`, by default in a temporary folder that is
 removed. The peak memory comes from `resource.getrusage` and is shown only
 on POSIX systems; elsewhere the tool prints `n/a`.
 
-The benchmark of the robustness phase used `pgfmanual.pdf` of TeX Live
-(1,323 pages) and the git manual of `/usr/share/doc/git` (259 pages), on a
-14-core Intel Core Ultra 7 265U, with Python 3.14:
-
-| Run | Stages | Peak memory |
-|---|---|---|
-| `extract` pgfmanual | 35.9 s | 169 MB |
-| `audit` pgfmanual | extraction 37.8 s, structure 0.06 s, a11y 0.16 s, images 0.03 s, text 3.65 s | 390 MB |
-| `audit` git | extraction 2.2 s, structure 0.13 s, text 5.2 s | 285 MB |
-| `compare` git, edited git | extraction 1.8 s + 1.7 s, compare 1.6 s, reports 0.3 s | 256 MB |
+The [Performance](README.md#performance) section of the README gives the
+figures that it measured on `pgfmanual.pdf` of TeX Live (1,323 pages) and
+the git manual of `/usr/share/doc/git` (259 pages), and the computer that
+they were measured on.
 
 `tests/test_benchmark.py` guards the scaling: a document four times larger
 must cost at most eight times the processor time of extraction, audit and
