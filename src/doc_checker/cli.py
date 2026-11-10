@@ -23,6 +23,7 @@ from doc_checker.config import (
 )
 from doc_checker.errors import ConfigError, InputError
 from doc_checker.extract import load_document
+from doc_checker.extract.pdf.tables import require_pdfplumber
 from doc_checker.model.findings import Severity
 from doc_checker.pipeline import (
     check_wordlist_path,
@@ -48,6 +49,9 @@ _NO_IMAGES_COMPARE: Final = (
 )
 _NO_IMAGES_AUDIT: Final = (
     "Leave the images out of the extraction and the checks."
+)
+_PDF_TABLES: Final = (
+    "Read the ruled tables of PDF documents, with the pdf-tables extra."
 )
 
 
@@ -92,6 +96,11 @@ def _config_options[F: Callable[..., object]](
     Returns:
         The command.
     """
+    function = click.option(
+        "--pdf-tables",
+        is_flag=True,
+        help=_PDF_TABLES,
+    )(function)
     function = click.option(
         "--no-images",
         is_flag=True,
@@ -207,8 +216,16 @@ def _split_checks(
 
 
 def _load(config: Path | None, overrides: CliOverrides) -> Config:
-    """Return the configuration with the command line options applied."""
-    return apply_overrides(load_config(config, cwd=Path.cwd()), overrides)
+    """Return the configuration with the command line options applied.
+
+    The tables of PDF documents asked for, by the option or by the
+    configuration, without the pdf-tables extra raise the `ConfigError` of
+    `require_pdfplumber`, whatever the documents.
+    """
+    cfg = apply_overrides(load_config(config, cwd=Path.cwd()), overrides)
+    if cfg.pdf.tables:
+        require_pdfplumber()
+    return cfg
 
 
 def _overrides(
@@ -246,6 +263,7 @@ def extract(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
     content_selector: str | None,
     exclude: tuple[str, ...],
     no_images: bool,
+    pdf_tables: bool,
 ) -> None:
     """Print the normalized blocks of DOC, to tune selectors."""
     with _exit_on_error():
@@ -256,6 +274,7 @@ def extract(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
                 content_selector=content_selector,
                 exclude=exclude,
                 no_images=no_images,
+                pdf_tables=pdf_tables,
             ),
         )
         document = load_document(doc, cfg)
@@ -287,6 +306,7 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
     content_selector: str | None,
     exclude: tuple[str, ...],
     no_images: bool,
+    pdf_tables: bool,
 ) -> None:
     """Compare the NEW build of a documentation with its REF build."""
     with _exit_on_error():
@@ -303,6 +323,7 @@ def compare(  # ruff: ignore[too-many-arguments] - Click passes options as keywo
                 words=words,
                 ignore_moves=ignore_moves,
                 no_images=no_images,
+                pdf_tables=pdf_tables,
             ),
         )
         result = run_compare(ref, new, cfg)
@@ -352,6 +373,7 @@ def audit(  # ruff: ignore[too-many-arguments] - Click passes options as keyword
     content_selector: str | None,
     exclude: tuple[str, ...],
     no_images: bool,
+    pdf_tables: bool,
 ) -> None:
     """Audit the documentation DOC.
 
@@ -374,6 +396,7 @@ def audit(  # ruff: ignore[too-many-arguments] - Click passes options as keyword
                 no_images=no_images,
                 checks=checks,
                 profile=profile,
+                pdf_tables=pdf_tables,
             ),
         )
         if emit_wordlist is not None:

@@ -17,8 +17,8 @@ import re
 import zlib
 from dataclasses import dataclass, field
 from functools import partial
-from itertools import chain, pairwise
-from typing import TYPE_CHECKING, Final, override
+from itertools import accumulate, chain, pairwise
+from typing import TYPE_CHECKING, Final, Literal, override
 
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
@@ -26,8 +26,8 @@ from fpdf.fonts import TextStyle
 from PIL import Image as PILImage
 from PIL import ImageDraw
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject, NumberObject
-from reportlab.lib.colors import HexColor
+from pypdf.generic import NameObject, NumberObject, RectangleObject
+from reportlab.lib.colors import HexColor, black
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -38,6 +38,7 @@ from reportlab.platypus import (
     BaseDocTemplate,
     Flowable,
     Frame,
+    FrameBreak,
     Image,
     ListFlowable,
     ListItem,
@@ -75,7 +76,7 @@ from tests.image_builders import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
 _SHY = "\xad"
@@ -2573,6 +2574,10 @@ class ProseStyle:
             numbers start again at 1 after them.
         page_labels: Whether the PDF has page labels that tell those numbers:
             roman lower case on the first pages, then arabic from 1.
+        ruled_header: Whether a ruled table heads each page, within the top
+            7 % of its height, as a page template of a word processor draws
+            it: 2 rows of 2 cells, the title and the version of the manual,
+            then a mark and the number of the page.
     """
 
     leading: float = 12.0
@@ -2583,9 +2588,33 @@ class ProseStyle:
     watermark: bool = False
     roman_pages: int = 0
     page_labels: bool = False
+    ruled_header: bool = False
 
 
 _ROMAN_FOLIOS: Final = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix")
+# The edges of the columns and of the rows of the ruled header of a page, in
+# points, from 20 to 56 pt under the top of the page.
+_HEADER_COLUMNS: Final = (_PAGE_MARGIN, _PAGE_MARGIN + 200, _W - _PAGE_MARGIN)
+_HEADER_ROWS: Final = (_H - 20, _H - 38, _H - 56)
+
+
+def _draw_ruled_header(canvas: Canvas, page: int) -> None:
+    """Draw the ruled header of a page of `build_prose_pdf`.
+
+    Args:
+        canvas: The canvas of the page.
+        page: The number of the page, from 1.
+    """
+    canvas.setLineWidth(0.5)
+    canvas.grid(list(_HEADER_COLUMNS), list(_HEADER_ROWS))
+    canvas.setFont("Helvetica", 8)
+    cells = (
+        ("Service manual", "Version 2.1"),
+        ("Internal use only", f"Page {page}"),
+    )
+    for top, row in zip(_HEADER_ROWS, cells, strict=False):
+        for left, text in zip(_HEADER_COLUMNS, row, strict=False):
+            canvas.drawString(left + 6, top - 12, text)
 
 
 def _draw_prose_page(
@@ -2614,6 +2643,8 @@ def _draw_prose_page(
         )
         canvas.setFont("Times-Roman", 10)
         canvas.drawCentredString(_W / 2, style.page_number_y, folio)
+    if style.ruled_header:
+        _draw_ruled_header(canvas, doc.page)
     if style.watermark:
         canvas.translate(_W / 2, _H / 2)
         canvas.rotate(45)
@@ -2749,67 +2780,82 @@ _TABLE_TEXT = ParagraphStyle(
     leading=12,
     spaceAfter=6,
 )
+# The sentences that introduce the long tables and end their text.
+_TABLE_INTRO: Final = (
+    "The settings of the service are listed below with their default values."
+)
+_TABLE_OUTRO: Final = (
+    "All the values can be changed in the configuration file."
+)
+# The long table of settings: the header row ``Option`` and ``Default``, and
+# 160 rows, the row ``i``, counted from 0, holding a setting name made of a
+# letter and a number, such as ``setting_c0``, and the number ``10 * i + 7``.
+SETTING_ROWS: Final = (
+    ("Option", "Default"),
+    *(
+        (f"setting_{chr(97 + i % 26)}{i // 26}", str(10 * i + 7))
+        for i in range(160)
+    ),
+)
 
 
-def build_table_pdf(
+def build_table_pdf(  # ruff: ignore[too-many-arguments] - one keyword per feature of the table
     out: Path,
     *,
     margin: float,
     rows: Sequence[Sequence[str]] | None = None,
     padding: float | None = None,
+    grid: bool = False,
+    repeat_header: bool = False,
+    intro: str = _TABLE_INTRO,
+    outro: str = _TABLE_OUTRO,
 ) -> Path:
     """Write a long table as an A4 PDF.
 
     A sentence introduces the table and another one ends the text, both in
-    Times-Roman 10. The table runs over several pages, and its header row is
-    not repeated on the next pages. Its first column is 120 pt wide, and the
-    other ones share 300 pt. Its cells are in Helvetica 10 on a 12 pt
-    leading, which their padding sets apart.
+    Times-Roman 10. The table runs over several pages. Its first column is
+    120 pt wide, and the other ones share 300 pt. Its cells are in Helvetica
+    10 on a 12 pt leading, which their padding sets apart.
 
     Args:
         out: The PDF file to write.
         margin: The distance between the text and each edge of the page, in
             points.
-        rows: The rows of the table, the header row first. If omitted, a
-            table of settings: the header row ``Option`` and ``Default``, and
-            160 rows, the row ``i``, counted from 0, holding a setting name
-            made of a letter and a number, such as ``setting_c0``, and the
-            number ``10 * i + 7``.
+        rows: The rows of the table, the header row first; `SETTING_ROWS`
+            if omitted.
         padding: The space above and below the text of each cell, in
             points. The 3 pt of reportlab if omitted.
+        grid: Whether a rule of 0.5 pt borders each cell.
+        repeat_header: Whether the header row is repeated at the top of each
+            page.
+        intro: The sentence that introduces the table.
+        outro: The sentence that ends the text.
 
     Returns:
         The PDF file.
     """
     if rows is None:
-        rows = [
-            ("Option", "Default"),
-            *(
-                (f"setting_{chr(97 + i % 26)}{i // 26}", str(10 * i + 7))
-                for i in range(160)
-            ),
-        ]
+        rows = SETTING_ROWS
     others = len(rows[0]) - 1
     widths = [120, *[300 / others] * others]
-    style = None
+    commands: list[tuple[object, ...]] = []
     if padding is not None:
-        style = TableStyle(
-            [
-                ("TOPPADDING", (0, 0), (-1, -1), padding),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
-            ],
-        )
+        commands += [
+            ("TOPPADDING", (0, 0), (-1, -1), padding),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
+        ]
+    if grid:
+        commands.append(("GRID", (0, 0), (-1, -1), 0.5, black))
     story: list[Flowable] = [
-        Paragraph(
-            "The settings of the service are listed below with their "
-            "default values.",
-            _TABLE_TEXT,
+        Paragraph(intro, _TABLE_TEXT),
+        Table(
+            rows,
+            hAlign="LEFT",
+            colWidths=widths,
+            style=TableStyle(commands) if commands else None,
+            repeatRows=1 if repeat_header else 0,
         ),
-        Table(rows, hAlign="LEFT", colWidths=widths, style=style),
-        Paragraph(
-            "All the values can be changed in the configuration file.",
-            _TABLE_TEXT,
-        ),
+        Paragraph(outro, _TABLE_TEXT),
     ]
     SimpleDocTemplate(
         str(out),
@@ -2820,6 +2866,1416 @@ def build_table_pdf(
         topMargin=margin,
         bottomMargin=margin,
     ).build(story)
+    return out
+
+
+def build_fpdf2_table_pdf(
+    out: Path,
+    rows: Sequence[Sequence[str]],
+    *,
+    repeat_header: bool,
+) -> Path:
+    """Write a long ruled table as an A4 PDF made with fpdf2.
+
+    The sentences of `build_table_pdf` introduce the table and end the text,
+    in Times 10, 25 mm from each edge of the page. The table runs over
+    several pages, and a rule borders each of its cells. Its first column is
+    120 pt wide, and the other ones share 300 pt. Its cells are in Helvetica
+    10 on a 12 pt line, its header row in bold, as fpdf2 sets it.
+
+    Args:
+        out: The PDF file to write.
+        rows: The rows of the table, the header row first.
+        repeat_header: Whether the header row is repeated at the top of each
+            page.
+
+    Returns:
+        The PDF file.
+    """
+    margin = 25 * mm
+    pdf = FPDF(format="A4", unit="pt")
+    pdf.set_margins(margin, margin, margin)
+    pdf.set_auto_page_break(auto=True, margin=margin)
+    pdf.add_page()
+    pdf.set_font("times", size=10)
+    pdf.multi_cell(0, 12, _TABLE_INTRO, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(6)
+    pdf.set_font("helvetica", size=10)
+    others = len(rows[0]) - 1
+    with pdf.table(
+        width=420,
+        col_widths=(120, *[300 / others] * others),
+        align="L",
+        line_height=12,
+        text_align="LEFT",
+        repeat_headings=1 if repeat_header else 0,
+    ) as table:
+        for row in rows:
+            table.row(row)
+    pdf.ln(6)
+    pdf.set_font("times", size=10)
+    pdf.multi_cell(0, 12, _TABLE_OUTRO, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.output(out)
+    return out
+
+
+# The rows of the table of a cropped page, and the edges of its columns and of
+# its rows on the page, in points.
+_CROPPED_ROWS: Final = (("Option", "Default", "Unit"), ("timeout", "30", "s"))
+_CROPPED_COLUMNS: Final = (100.0, 100 + 200 / 3, 100 + 400 / 3, 300.0)
+_CROPPED_TOPS: Final = (700.0, 600.0, 500.0)
+
+
+def build_cropped_table_pdf(
+    out: Path,
+    *,
+    crop: tuple[float, float, float, float] = (50, 50, _W, _H),
+    rotate: int = 0,
+    media: tuple[float, float, float, float] | None = None,
+) -> Path:
+    """Write an A4 page of a sentence and a small ruled table, cropped.
+
+    The table has 2 rows and 3 columns, in Helvetica 10, ruled by a grid of
+    0.5 pt whose frame goes from 100 to 300 pt across the page and from 500
+    to 700 pt up it: with the default crop box, from 50 to 250 and from 450
+    to 650 from the corner of the crop box.
+
+    Args:
+        out: The PDF file to write.
+        crop: The crop box of the page: its left, bottom, right and top
+            edges, in points.
+        rotate: The ``/Rotate`` of the page.
+        media: The media box of the page, if not ``(0, 0)`` and the A4 size:
+            the drawing stays where it is on the page.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setCropBox(crop)
+    if rotate:
+        canvas.setPageRotation(rotate)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(100, 720, "The settings of the service follow.")
+    canvas.setLineWidth(0.5)
+    canvas.grid(list(_CROPPED_COLUMNS), list(_CROPPED_TOPS))
+    canvas.setFont("Helvetica", 10)
+    for top, row in zip(_CROPPED_TOPS, _CROPPED_ROWS, strict=False):
+        for left, text in zip(_CROPPED_COLUMNS, row, strict=False):
+            canvas.drawString(left + 6, top - 55, text)
+    canvas.showPage()
+    canvas.save()
+    if media is not None:
+        writer = PdfWriter(clone_from=PdfReader(out))
+        writer.pages[0].mediabox = RectangleObject(media)
+        writer.write(out)
+    return out
+
+
+_FRAMED_CODE: Final = (
+    "import service",
+    "",
+    "def main() -> None:",
+    "    service.start(workers=4)",
+    "    service.wait()",
+)
+
+
+def build_framed_code_pdf(out: Path) -> Path:
+    """Write an A4 page of framed code, then of a drawn grid of empty cells.
+
+    A sentence introduces the code: numbered lines of Courier 9 in a frame of
+    0.5 pt, whose title bar names the file and whose gutter, split from the
+    code by a rule, holds the numbers of the lines. Another sentence
+    introduces a drawing: a grid of 4 by 4 empty cells, 30 pt wide, which a
+    caption follows.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 760, "The service starts with this script.")
+    canvas.setLineWidth(0.5)
+    canvas.rect(72, 600, 328, 140)
+    canvas.line(72, 720, 400, 720)
+    canvas.line(95, 600, 95, 720)
+    canvas.setFont("Helvetica", 9)
+    canvas.drawString(78, 726, "start.py")
+    canvas.setFont("Courier", 9)
+    for number, line in enumerate(_FRAMED_CODE, 1):
+        y = 720 - 15 * number
+        canvas.drawString(80, y, str(number))
+        canvas.drawString(102, y, line)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 560, "The workers share the board below.")
+    canvas.grid(
+        [72 + 30 * k for k in range(5)],
+        [520 - 30 * k for k in range(5)],
+    )
+    canvas.drawString(72, 380, "Figure 1: the board of the workers.")
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+_PLOT_WORDS: Final = (("north", "west", "east"), ("south", "up", "down"))
+
+
+def build_labelled_grid_pdf(
+    out: Path,
+    *,
+    labels: Literal["over", "against"] | None = "over",
+) -> Path:
+    """Write an A4 page of a plot drawn over a grid of help lines.
+
+    The grid has 2 rows and 3 columns of 30 pt, ruled by lines of 0.5 pt
+    from 72 to 162 pt across the page and from 600 to 660 pt up it. A word
+    in Helvetica 8 lies in the middle of each cell, and the labels of the
+    plot are placed as a drawing places them, over its lines.
+
+    Args:
+        out: The PDF file to write.
+        labels: ``over`` for the labels ``0.25``, ``0.5`` and ``0.75``
+            centred on the inner lines of the columns; ``against`` for the
+            label ``cross out``, cut by the line between the first two
+            columns right after its first letter, which touches it; None
+            for no label, which leaves a table.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 680, "The curve below rises over the help lines.")
+    canvas.setLineWidth(0.5)
+    canvas.grid([72, 102, 132, 162], [660, 630, 600])
+    canvas.setFont("Helvetica", 8)
+    for top, words in zip((660, 630), _PLOT_WORDS, strict=True):
+        for left, word in zip((72, 102, 132), words, strict=True):
+            canvas.drawCentredString(left + 15, top - 12, word)
+    if labels == "over":
+        canvas.drawCentredString(102, 604, "0.25")
+        canvas.drawCentredString(132, 634, "0.5")
+        canvas.drawCentredString(132, 646, "0.75")
+    elif labels == "against":
+        first = canvas.stringWidth("c", "Helvetica", 8)
+        canvas.drawString(102 - first, 604, "cross out")
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+# A font of two-byte codes and its descendant, with neither a Unicode mapping
+# nor a font program: pdfminer writes each of its glyphs ``(cid:N)``.
+_UNMAPPED_FONT: Final = (
+    "<< /Type /Font /Subtype /Type0 /BaseFont /Unmapped"
+    " /Encoding /Identity-H /DescendantFonts [6 0 R] >>"
+)
+_UNMAPPED_DESCENDANT: Final = (
+    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Unmapped"
+    " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity)"
+    " /Supplement 0 >> /DW 600 >>"
+)
+
+
+def build_unmapped_table_pdf(out: Path) -> Path:
+    """Write a page of a ruled table whose glyphs have no Unicode mapping.
+
+    The page is 595 by 842 pt. The table has 2 rows and 2 columns, ruled
+    from 100 to 300 pt across the page and from 500 to 700 pt up it, and
+    each cell holds three glyphs of a font of two-byte codes without
+    Unicode mapping.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    rules = [
+        *(f"100 {y} m 300 {y} l S" for y in (500, 600, 700)),
+        *(f"{x} 500 m {x} 700 l S" for x in (100, 200, 300)),
+    ]
+    texts = [
+        f"BT /F1 10 Tf {x} {y} Td <002400250026> Tj ET"
+        for x in (110, 210)
+        for y in (550, 650)
+    ]
+    return build_single_page_pdf(
+        out,
+        "\n".join(["0.5 w", *rules, *texts]),
+        font=_UNMAPPED_FONT,
+        page="/MediaBox [0 0 595 842]",
+        extra=(_UNMAPPED_DESCENDANT,),
+    )
+
+
+def build_ruled_grid_pdf(
+    out: Path,
+    rows: Sequence[Sequence[str]],
+    *,
+    boxed: bool = False,
+) -> Path:
+    """Write an A4 page of a ruled grid, with a text in each cell.
+
+    Each cell is 80 by 24 pt, the first one at 72 pt from the left of the
+    page and 760 pt from its bottom, ruled by lines of 0.5 pt; its text is in
+    Helvetica 10, 6 pt from its left rule, and an empty text leaves it empty.
+
+    Args:
+        out: The PDF file to write.
+        rows: The texts of the cells, row by row, the same number in each.
+        boxed: Whether each cell is a rectangle of its own, as Word and
+            LibreOffice draw the borders of cells, rather than the rules
+            running across the grid.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    xs = [72 + 80 * k for k in range(len(rows[0]) + 1)]
+    ys = [760 - 24 * k for k in range(len(rows) + 1)]
+    canvas.setLineWidth(0.5)
+    if boxed:
+        for left in xs[:-1]:
+            for bottom in ys[1:]:
+                canvas.rect(left, bottom, 80, 24)
+    else:
+        canvas.grid(xs, ys)
+    canvas.setFont("Helvetica", 10)
+    for top, row in zip(ys, rows, strict=False):
+        for left, text in zip(xs, row, strict=False):
+            canvas.drawString(left + 6, top - 16, text)
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+def build_digit_grid_pdf(out: Path, *, lines: int, pages: int = 1) -> Path:
+    """Write A4 pages of a square ruled grid, with a digit in each cell.
+
+    Each page is ruled by `lines` vertical and `lines` horizontal lines of
+    0.1 pt, from 20 pt off each edge of the page, so that pdfplumber crosses
+    `lines` squared pairs of rules. Each cell holds one digit in Helvetica,
+    half as high as the cell is narrow, in its middle.
+
+    Args:
+        out: The PDF file to write.
+        lines: The number of rules each way, 3 to 200.
+        pages: The number of pages, each the same.
+
+    Returns:
+        The PDF file.
+    """
+    width, height = A4[0] - 40, A4[1] - 40
+    xs = [20 + width * k / (lines - 1) for k in range(lines)]
+    ys = [20 + height * k / (lines - 1) for k in range(lines)]
+    size = min(xs[1] - xs[0], ys[1] - ys[0]) / 2
+    canvas = Canvas(str(out), pagesize=A4)
+    for _ in range(pages):
+        canvas.setLineWidth(0.1)
+        canvas.grid(xs, ys)
+        canvas.setFont("Helvetica", size)
+        for row, (bottom, top) in enumerate(pairwise(ys)):
+            for column, (left, right) in enumerate(pairwise(xs)):
+                canvas.drawCentredString(
+                    (left + right) / 2,
+                    (bottom + top - size) / 2,
+                    str((row + column) % 10),
+                )
+        canvas.showPage()
+    canvas.save()
+    return out
+
+
+def _cmap(size: int) -> bytes:
+    """Return a ToUnicode CMap of about `size` bytes, one code a block."""
+    block = b"1 beginbfchar\n<41> <0041>\nendbfchar\n"
+    return (
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        b"1 begincodespacerange <00> <FF> endcodespacerange\n"
+        + block * (size // len(block))
+        + b"endcmap CMapName currentdict /CMap defineresource pop end end"
+    )
+
+
+_RAW_CATALOG: Final = b"<< /Type /Catalog /Pages 2 0 R >>"
+_RAW_PAGES: Final = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+_RAW_PAGE: Final = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]"
+_RAW_FORM: Final = "/Type /XObject /Subtype /Form /BBox [0 0 10 10]"
+
+
+_PREDICTOR_COLUMNS: Final = 4096  # Bytes of a row of a predicted stream.
+
+
+def build_busy_page_pdf(
+    out: Path,
+    *,
+    pairs: int,
+    predictor: bool = False,
+) -> Path:
+    """Write a page whose content only saves and restores the graphic state.
+
+    The page is 595 by 842 pt. Its content stream, compressed with Flate,
+    repeats ``q Q`` `pairs` times: it draws nothing and holds no text, and
+    takes 4 bytes a pair once inflated, for a few bytes in the file.
+
+    Args:
+        out: The PDF file to write.
+        pairs: The number of ``q Q`` pairs, a multiple of 1,024 with a
+            predictor.
+        predictor: Whether the stream also has a PNG predictor: each row
+            of 4,096 bytes is written as the Sub filter writes it, its
+            first byte 1 then each byte less the one before it, which
+            pdfminer decodes byte by byte, in Python.
+
+    Returns:
+        The PDF file.
+    """
+    content = b"q Q " * pairs
+    entries = "/Filter /FlateDecode"
+    if predictor:
+        # Every row is the same, as a row holds whole pairs.
+        row = content[:_PREDICTOR_COLUMNS]
+        differences = bytes(
+            (row[k] - (row[k - 1] if k else 0)) % 256 for k in range(len(row))
+        )
+        content = (b"\x01" + differences) * (len(content) // len(row))
+        entries += (
+            " /DecodeParms << /Predictor 12 /Colors 1"
+            f" /BitsPerComponent 8 /Columns {_PREDICTOR_COLUMNS} >>"
+        )
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            f"{_RAW_PAGE} /Contents 4 0 R >>".encode("ascii"),
+            _stream_object(entries, zlib.compress(content, 9)),
+        ],
+    )
+
+
+def build_form_fanout_pdf(  # ruff: ignore[too-many-arguments] - one keyword per feature of the drawings
+    out: Path,
+    *,
+    calls: int,
+    form_bytes: int = 1024,
+    cmap_bytes: int = 0,
+    escaped: bool = False,
+    comment: bool = False,
+    inline: bool = False,
+    ascii85: str = "",
+) -> Path:
+    """Write a page that draws one form many times.
+
+    The page is 595 by 842 pt, and its content, compressed with Flate, draws
+    the form ``/Fm`` `calls` times. The form, 10 pt wide and high, holds
+    ``q Q`` pairs, `form_bytes` bytes of them. With `cmap_bytes`, the
+    resources of the form hold a font given in place rather than referred to,
+    whose ToUnicode CMap takes about that many bytes: pdfminer builds the
+    font again, and reads its CMap again, each time that it draws the form.
+
+    Args:
+        out: The PDF file to write.
+        calls: How many times the page draws the form.
+        form_bytes: The bytes of the content of the form, a multiple of 4.
+        cmap_bytes: The bytes of the CMap of the font of the form, or 0 for
+            a form without resources.
+        escaped: Whether the content writes the name of the form ``/F#6d``,
+            which reads ``/Fm``.
+        comment: Whether a comment, rather than a blank, stands between the
+            name of the form and ``Do``.
+        inline: Whether the content starts with an inline image whose data
+            is an opening parenthesis, which pdfminer skips as data.
+        ascii85: The entry of the dictionary of an inline image that names
+            its filter ASCII85, as written, such as ``/F /A#385``; or empty.
+            The content then starts with that image, whose data pdfminer
+            ends at ``~>``, and ends with ``EI``.
+
+    Returns:
+        The PDF file.
+    """
+    name = b"/F#6d" if escaped else b"/Fm"
+    between = b"%drawn\n" if comment else b" "
+    image = b"BI /W 1 /H 1 /BPC 8 /CS /G ID (\nEI\n" if inline else b""
+    end = b""
+    if ascii85:
+        entry = ascii85.encode("ascii")
+        image = b"BI /W 1 /H 1 /BPC 8 /CS /G " + entry + b" ID z~>\n"
+        end = b"EI\n"
+    drawings = (name + between + b"Do\n") * calls
+    content = zlib.compress(image + drawings + end, 9)
+    form = _RAW_FORM
+    extra = []
+    if cmap_bytes:
+        cmap = _cmap(cmap_bytes)
+        form += (
+            " /Resources << /Font << /F1 << /Type /Font /Subtype /Type1"
+            " /BaseFont /Helvetica /ToUnicode 6 0 R >> >> >>"
+        )
+        extra.append(_stream_object("", cmap))
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            (
+                f"{_RAW_PAGE} /Resources << /XObject << /Fm 5 0 R >> >>"
+                " /Contents 4 0 R >>"
+            ).encode("ascii"),
+            _stream_object("/Filter /FlateDecode", content),
+            _stream_object(form, b"q Q " * (form_bytes // 4)),
+            *extra,
+        ],
+    )
+
+
+def build_nested_forms_pdf(
+    out: Path,
+    *,
+    depth: int,
+    cycle: bool = False,
+) -> Path:
+    """Write a page that draws a form, which draws a form, and so on.
+
+    The page is 595 by 842 pt and draws the form ``/F1``; each form ``/Fk``
+    draws ``/Fk+1``, down to the form of `depth`, which draws nothing, or
+    ``/F1`` again with `cycle`. The forms have no resources of their own:
+    they draw in those of the page.
+
+    Args:
+        out: The PDF file to write.
+        depth: The number of forms.
+        cycle: Whether the last form draws the first one.
+
+    Returns:
+        The PDF file.
+    """
+    names = " ".join(f"/F{k} {4 + k} 0 R" for k in range(1, depth + 1))
+    forms = [
+        _stream_object(
+            _RAW_FORM,
+            b"/F%d Do" % (k + 1)
+            if k < depth
+            else (b"/F1 Do" if cycle else b""),
+        )
+        for k in range(1, depth + 1)
+    ]
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            (
+                f"{_RAW_PAGE} /Resources << /XObject << {names} >> >>"
+                " /Contents 4 0 R >>"
+            ).encode("ascii"),
+            _stream_object("", b"/F1 Do"),
+            *forms,
+        ],
+    )
+
+
+_DENSE_SHAPES: Final = {
+    # Font size, top padding, bottom padding, widths of the columns.
+    "parts": (6, 1, 1, (90, 200, 60, 60, 60)),
+    "boxed parts": (6, 1, 1, (90, 200, 60, 60, 60)),
+    "registers": (4.5, 1.5, 0, (55, 50, 50, 30, 30, 30, 200, 90)),
+    "full registers": (3.2, 0.8, 0, (45, 42, 42, 22, 24, 22, 230, 128)),
+}
+
+
+def _dense_rows(shape: str, rows: int) -> list[tuple[str, ...]]:
+    """Return the rows of a dense table, the header row first."""
+    if shape.endswith("parts"):
+        return [
+            ("Part number", "Description", "Min", "Typ", "Max"),
+            *(
+                (
+                    f"PN-{i:06d}-AX",
+                    f"Supply current, mode {i % 17} at 25 C",
+                    f"{i % 7}.{i % 10}",
+                    f"{i % 9}.{i % 3}",
+                    f"{i % 11}.{i % 5}",
+                )
+                for i in range(rows)
+            ),
+        ]
+    full = shape == "full registers"
+    return [
+        (
+            "Register",
+            "Address",
+            "Field",
+            "Bits",
+            "Reset",
+            "Access",
+            "Description",
+            "Notes",
+        ),
+        *(
+            (
+                f"CTRL_{i:05d}",
+                f"0x{4096 + 4 * i:08X}",
+                f"FIELD_{i % 97:03d}",
+                f"{i % 32}:{i % 8}",
+                f"0x{i % 255:02X}",
+                "RW" if i % 3 else "RO",
+                f"Enables the block {i % 13} when set"
+                + (f" in domain {i % 5}" if full else ""),
+                f"see section {i % 41}.{i % 7}, table {i % 9}, note {i % 3}"
+                if full
+                else f"see {i % 41}.{i % 7}",
+            )
+            for i in range(rows)
+        ),
+    ]
+
+
+def build_dense_table_pdf(
+    out: Path,
+    *,
+    shape: Literal["parts", "boxed parts", "registers", "full registers"],
+    rows: int,
+) -> Path:
+    """Write a long ruled table of small text, many rows to a page.
+
+    The shapes are those of data sheets, ruled by a grid, the header row
+    repeated on each page of A4: ``parts``, 5 columns of 6 pt, about 4,500
+    characters a page; ``boxed parts``, the same with each cell drawn as a
+    box of its own too; ``registers``, 8 columns of 4.5 pt, about 9,100
+    characters a page; ``full registers``, 8 columns of 3.2 pt with longer
+    texts, about 20,000 characters a page, the most that the search takes.
+
+    Args:
+        out: The PDF file to write.
+        shape: The shape of the table.
+        rows: The number of rows besides the header row.
+
+    Returns:
+        The PDF file.
+    """
+    size, top, bottom, widths = _DENSE_SHAPES[shape]
+    content = _dense_rows(shape, rows)
+    commands: list[tuple[object, ...]] = [
+        ("FONT", (0, 0), (-1, -1), "Helvetica", size),
+        ("TOPPADDING", (0, 0), (-1, -1), top),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), bottom),
+        ("GRID", (0, 0), (-1, -1), 0.3, black),
+    ]
+    if shape.endswith("registers"):
+        commands.append(("LEFTPADDING", (0, 0), (-1, -1), 2))
+    if shape == "boxed parts":
+        commands += [
+            ("BOX", (column, row), (column, row), 0.3, black)
+            for row in range(len(content))
+            for column in range(len(widths))
+        ]
+    margin = 30 if shape.endswith("parts") else 20
+    SimpleDocTemplate(
+        str(out),
+        pagesize=A4,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
+    ).build(
+        [
+            Table(
+                content,
+                colWidths=list(widths),
+                repeatRows=1,
+                style=TableStyle(commands),
+            ),
+        ],
+    )
+    return out
+
+
+def build_quoted_draws_pdf(out: Path, *, form_bytes: int, lines: int) -> Path:
+    """Write a page that draws a large form once, among words that read Do.
+
+    The page is 595 by 842 pt. It draws the form ``/Fm``, of `form_bytes`
+    bytes of ``q Q``, once; then it shows `lines` lines of ``Do it now.`` in
+    Helvetica, each after a comment that ends with ``Do``. None of these
+    words draws the form.
+
+    Args:
+        out: The PDF file to write.
+        form_bytes: The bytes of the content of the form, a multiple of 4.
+        lines: The number of lines of text, and of comments.
+
+    Returns:
+        The PDF file.
+    """
+    text = b"".join(
+        b"%% then Do\nBT /F1 10 Tf 72 %d Td (Do it now.) Tj ET\n"
+        % (800 - 12 * k)
+        for k in range(lines)
+    )
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            (
+                f"{_RAW_PAGE} /Resources << /XObject << /Fm 5 0 R >>"
+                " /Font << /F1 6 0 R >> >> /Contents 4 0 R >>"
+            ).encode("ascii"),
+            _stream_object("", b"/Fm Do\n" + text),
+            _stream_object(_RAW_FORM, b"q Q " * (form_bytes // 4)),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ],
+    )
+
+
+def build_resource_reuse_pdf(out: Path, *, calls: int) -> Path:
+    """Write a page whose forms tempt a count to reuse a freed address.
+
+    The page is 595 by 842 pt and draws the form ``/A`` once, whose resources
+    are the number 1, not a dictionary; then the form ``/B`` `calls` times,
+    whose resources, an object of their own, hold a font given in place with
+    a ToUnicode CMap of 36 kB, which pdfminer builds again at each drawing.
+    The font of the page leads, through a chain of arrays, to ``/B``, so
+    that pdfminer reads ``/B`` before the resources of ``/B``: these then
+    come right after the count has looked at the resources of ``/A``.
+
+    Args:
+        out: The PDF file to write.
+        calls: How many times the page draws ``/B``.
+
+    Returns:
+        The PDF file.
+    """
+    content = b"/A Do\n" + b"/B Do\n" * calls
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            f"{_RAW_PAGE} /Resources 5 0 R /Contents 4 0 R >>".encode("ascii"),
+            _stream_object("/Filter /FlateDecode", zlib.compress(content, 9)),
+            (
+                b"<< /Font << /P << /Type /Font /Subtype /Type1"
+                b" /BaseFont /Helvetica /Foo 11 0 R >> >>"
+                b" /XObject << /A 7 0 R /B 8 0 R >> >>"
+            ),
+            _stream_object(
+                "/Filter /FlateDecode",
+                zlib.compress(_cmap(36_000)),
+            ),
+            _stream_object(f"{_RAW_FORM} /Resources 1", b"q Q"),
+            _stream_object(f"{_RAW_FORM} /Resources 9 0 R", b"q Q"),
+            b"<< /Font 10 0 R >>",
+            (
+                b"<< /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica"
+                b" /ToUnicode 6 0 R >> >>"
+            ),
+            b"[12 0 R]",
+            b"[13 0 R]",
+            b"[8 0 R]",
+        ],
+    )
+
+
+def build_shared_cmap_fonts_pdf(
+    out: Path,
+    *,
+    fonts: int,
+    cmap_bytes: int,
+) -> Path:
+    """Write a page whose resources name many fonts that share one CMap.
+
+    The page is 595 by 842 pt and draws nothing. Its resources name `fonts`
+    fonts, each an object of its own whose ToUnicode is one CMap of about
+    `cmap_bytes` bytes: pdfminer builds each font, and reads the CMap for
+    each, though no text uses them.
+
+    Args:
+        out: The PDF file to write.
+        fonts: The number of fonts.
+        cmap_bytes: The bytes of the CMap.
+
+    Returns:
+        The PDF file.
+    """
+    names = " ".join(f"/F{k} {6 + k} 0 R" for k in range(fonts))
+    font = (
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica"
+        b" /ToUnicode 5 0 R >>"
+    )
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            (
+                f"{_RAW_PAGE} /Resources << /Font << {names} >> >>"
+                " /Contents 4 0 R >>"
+            ).encode("ascii"),
+            _stream_object("", b"q Q"),
+            _stream_object(
+                "/Filter /FlateDecode",
+                zlib.compress(_cmap(cmap_bytes)),
+            ),
+            *[font] * fonts,
+        ],
+    )
+
+
+def build_run_length_page_pdf(out: Path, *, size: int) -> Path:
+    """Write a page whose content, in RunLength, decodes to many blanks.
+
+    The page is 595 by 842 pt. Its content stream holds `size` spaces, which
+    RunLength writes in runs of 128, two bytes each: pdfminer decodes them in
+    Python, into a list of a number for each byte.
+
+    Args:
+        out: The PDF file to write.
+        size: The bytes of the decoded content, a multiple of 128.
+
+    Returns:
+        The PDF file.
+    """
+    runs = bytes((129, 0x20)) * (size // 128) + bytes((128,))
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            f"{_RAW_PAGE} /Contents 4 0 R >>".encode("ascii"),
+            _stream_object("/Filter /RunLengthDecode", runs),
+        ],
+    )
+
+
+def build_bad_checksum_table_pdf(out: Path) -> Path:
+    """Write a page of a ruled table whose compressed content ends badly.
+
+    The page is 595 by 842 pt. Its content, compressed with Flate, rules a
+    table of 2 rows and 2 columns from 100 to 300 pt across the page and from
+    500 to 700 pt up it, with a word of Helvetica 10 in each cell; the last
+    byte of the stream, part of the checksum of the data, is spoiled.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    rules = [
+        *(f"100 {y} m 300 {y} l S" for y in (500, 600, 700)),
+        *(f"{x} 500 m {x} 700 l S" for x in (100, 200, 300)),
+    ]
+    words = [
+        f"BT /F1 10 Tf {x} {y} Td ({word}) Tj ET"
+        for y, row in ((650, ("Option", "Default")), (550, ("timeout", "30")))
+        for x, word in zip((110, 210), row, strict=True)
+    ]
+    content = zlib.compress("\n".join(["0.5 w", *rules, *words]).encode(), 9)
+    content = content[:-1] + bytes((content[-1] ^ 0xFF,))
+    return _write_objects(
+        out,
+        [
+            _RAW_CATALOG,
+            _RAW_PAGES,
+            (
+                f"{_RAW_PAGE} /Resources << /Font << /F1 5 0 R >> >>"
+                " /Contents 4 0 R >>"
+            ).encode("ascii"),
+            _stream_object("/Filter /FlateDecode", content),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ],
+    )
+
+
+# Draws the text of a cell of a ruled table on a canvas: the text, its left
+# edge, its baseline and the position of its row, from 0.
+type CellShow = Callable[[Canvas, str, float, float, int], None]
+_ROW_HEIGHT: Final = 20.0  # The height of a row of `_ruled_table`.
+_SMALL_ROWS: Final = (
+    ("Option", "Default"),
+    ("timeout", "30"),
+    ("retries", "3"),
+    ("workers", "4"),
+    ("cache", "256"),
+    ("level", "info"),
+)
+
+
+def _draw_cell(canvas: Canvas, text: str, x: float, y: float, _: int) -> None:
+    """Draw the text of a cell of a ruled table, as it is."""
+    canvas.drawString(x, y, text)
+
+
+def _ruled_table(  # ruff: ignore[too-many-arguments] - one keyword per feature of the table
+    canvas: Canvas,
+    rows: Sequence[Sequence[str]],
+    *,
+    left: float,
+    top: float,
+    widths: Sequence[float],
+    show: CellShow = _draw_cell,
+) -> float:
+    """Draw a ruled table on a canvas, a row every `_ROW_HEIGHT` points.
+
+    Lines of 0.5 pt rule each cell. The text of a cell is in Helvetica 10,
+    6 pt from its left rule, on a baseline 14 pt under its top.
+
+    Args:
+        canvas: The canvas.
+        rows: The texts of the cells, row by row.
+        left: The left edge of the table, in points.
+        top: Its top edge.
+        widths: The widths of its columns.
+        show: What draws the text of a cell.
+
+    Returns:
+        The bottom edge of the table.
+    """
+    xs = list(accumulate(widths, initial=left))
+    ys = [top - _ROW_HEIGHT * k for k in range(len(rows) + 1)]
+    canvas.setLineWidth(0.5)
+    canvas.grid(xs, ys)
+    canvas.setFont("Helvetica", 10)
+    for index, (row_top, row) in enumerate(zip(ys, rows, strict=False)):
+        for cell_left, text in zip(xs, row, strict=False):
+            show(canvas, text, cell_left + 6, row_top - 14, index)
+    return ys[-1]
+
+
+def build_drawn_grid_pdf(out: Path) -> Path:
+    """Write an A4 page of a drawing whose curve rises from a ruled grid.
+
+    The grid has 2 rows of 20 pt and 2 columns of 28 pt, ruled by lines of
+    0.5 pt, from 100 pt across the page and 700 pt up it; each of its cells
+    holds a word of Helvetica 8, 3 pt from its left rule. A curve rises from
+    its lower right corner, with a dot at each end, as a plot over help lines
+    draws it: the reader finds a vector figure, and leaves its text out;
+    pdfplumber finds a table. A sentence above the drawing and one under it
+    frame it.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 780, "The curve below rises from the board.")
+    canvas.setLineWidth(0.5)
+    xs, ys = [100, 128, 156], [700, 680, 660]
+    canvas.grid(xs, ys)
+    canvas.setFont("Helvetica", 8)
+    for top, words in zip(
+        ys,
+        (("north", "south"), ("east", "west")),
+        strict=False,
+    ):
+        for left, word in zip(xs, words, strict=False):
+            canvas.drawString(left + 3, top - 14, word)
+    canvas.bezier(156, 660, 200, 740, 260, 600, 300, 700)
+    for x, y in ((156, 660), (300, 700)):
+        canvas.circle(x, y, 2, stroke=0, fill=1)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 540, "The board shows the four sides of the field.")
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+def build_turned_table_pdf(out: Path) -> Path:
+    """Write two square pages of a sentence and a small ruled table.
+
+    Each page is 500 pt square. A sentence in Times-Roman 10 introduces a
+    table of the first 3 rows of `_SMALL_ROWS`, as `_ruled_table` draws it,
+    with 2 columns of 100 pt. The first page draws them turned a quarter, so
+    that they run up the page, as a landscape page that no ``/Rotate`` turns:
+    the reader turns the page upright, and pdfplumber finds a page of the
+    same size, square.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    size = 500
+    canvas = Canvas(str(out), pagesize=(size, size))
+    for page in range(2):
+        canvas.saveState()
+        if page == 0:
+            canvas.translate(size, 0)
+            canvas.rotate(90)
+        canvas.setFont("Times-Roman", 10)
+        canvas.drawString(72, 440, "The settings of the service follow.")
+        _ruled_table(
+            canvas,
+            _SMALL_ROWS[:3],
+            left=100,
+            top=400,
+            widths=(100, 100),
+        )
+        canvas.restoreState()
+        canvas.showPage()
+    canvas.save()
+    return out
+
+
+def build_crowded_table_pdf(out: Path, *, paths: int) -> Path:
+    """Write two A4 pages of a sentence and a small ruled table.
+
+    A sentence in Times-Roman 10 introduces a table of the first 3 rows of
+    `_SMALL_ROWS`, as `_ruled_table` draws it, with 2 columns of 100 pt. On
+    the first page, many filled squares of 2 pt follow the table, 6 pt apart
+    and 50 a row, as the dots of a dense drawing.
+
+    Args:
+        out: The PDF file to write.
+        paths: The number of squares of the first page.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    for page in range(2):
+        canvas.setFont("Times-Roman", 10)
+        canvas.drawString(72, 760, "The settings of the service follow.")
+        bottom = _ruled_table(
+            canvas,
+            _SMALL_ROWS[:3],
+            left=72,
+            top=740,
+            widths=(100, 100),
+        )
+        if page == 0:
+            for index in range(paths):
+                row, column = divmod(index, 50)
+                canvas.rect(
+                    72 + 6 * column,
+                    bottom - 20 - 6 * row,
+                    2,
+                    2,
+                    stroke=0,
+                    fill=1,
+                )
+        canvas.showPage()
+    canvas.save()
+    return out
+
+
+def _shifted(text: str) -> str:
+    """Move each ASCII letter of a text one place on, z and Z to a and A."""
+    letters = []
+    for char in text:
+        if char.isascii() and char.isalpha():
+            base = ord("a") if char.islower() else ord("A")
+            letters.append(chr((ord(char) - base + 1) % 26 + base))
+        else:
+            letters.append(char)
+    return "".join(letters)
+
+
+def _show_actual_text(canvas: Canvas, text: str, x: float, y: float) -> None:
+    """Draw a text as other glyphs, its true text the replacement text."""
+    canvas.addLiteral(f"/Span << /ActualText ({text}) >> BDC")
+    canvas.drawString(x, y, _shifted(text))
+    canvas.addLiteral("EMC")
+
+
+def build_actual_text_table_pdf(
+    out: Path,
+    *,
+    rows: Sequence[Sequence[str]] = _SMALL_ROWS[:3],
+    misread: Collection[int] | None = None,
+) -> Path:
+    """Write an A4 page of a ruled table whose glyphs are not all its text.
+
+    A sentence in Times-Roman 10 introduces the table, as `_ruled_table`
+    draws it, with 2 columns of 100 pt, under the top band of the page. Each
+    cell of a misread row shows its text with each letter moved one place on
+    in the alphabet, and gives its true text as the replacement text of a
+    marked span: PDFium reads the true text, and pdfminer the glyphs. A
+    sentence ends the page.
+
+    Args:
+        out: The PDF file to write.
+        rows: The rows of the table, 36 at most; the first 3 rows of
+            `_SMALL_ROWS` if omitted.
+        misread: The positions of the misread rows, from 0; every row if
+            omitted.
+
+    Returns:
+        The PDF file.
+    """
+
+    def show(canvas: Canvas, text: str, x: float, y: float, row: int) -> None:
+        if misread is None or row in misread:
+            _show_actual_text(canvas, text, x, y)
+        else:
+            canvas.drawString(x, y, text)
+
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 760, "The settings of the service follow.")
+    bottom = _ruled_table(
+        canvas,
+        rows,
+        left=72,
+        top=750,
+        widths=(100, 100),
+        show=show,
+    )
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, bottom - 20, "Restart the service to apply them.")
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+def _show_artifact_header(
+    canvas: Canvas,
+    text: str,
+    x: float,
+    y: float,
+    row: int,
+) -> None:
+    """Draw a text, marked as an artifact in the first row of a table."""
+    if row:
+        canvas.drawString(x, y, text)
+        return
+    canvas.addLiteral("/Artifact BMC")
+    canvas.drawString(x, y, text)
+    canvas.addLiteral("EMC")
+
+
+def build_split_table_pdf(
+    out: Path,
+    *,
+    artifact_header: bool = False,
+    note: str | None = None,
+    image: bool = False,
+) -> Path:
+    """Write a ruled table over two A4 pages, its header row on each page.
+
+    A sentence in Times-Roman 10 introduces the table at the top of the
+    first page, which holds its header row and 3 rows of `_SMALL_ROWS`; the
+    second page holds the header row again, then the last 2 rows, and a
+    sentence ends the text under it. The table, as `_ruled_table` draws it,
+    has 2 columns of 100 pt, with the same edges on both pages.
+
+    Args:
+        out: The PDF file to write.
+        artifact_header: Whether the header row of the second page is marked
+            as an artifact, as LibreOffice marks the header rows that it
+            repeats.
+        note: A sentence set at the top of the second page, above its
+            table, if any.
+        image: Whether a raster image of 120 by 80 pt, a gradient, stands
+            under the table of the first page.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 760, "The settings of the service follow.")
+    bottom = _ruled_table(
+        canvas,
+        _SMALL_ROWS[:4],
+        left=72,
+        top=740,
+        widths=(100, 100),
+    )
+    if image:
+        pixels = PILImage.linear_gradient("L").resize((120, 80))
+        canvas.drawImage(ImageReader(pixels), 72, bottom - 100, 120, 80)
+    canvas.showPage()
+    if note is not None:
+        canvas.setFont("Times-Roman", 10)
+        canvas.drawString(72, 760, note)
+    bottom = _ruled_table(
+        canvas,
+        [_SMALL_ROWS[0], *_SMALL_ROWS[4:]],
+        left=72,
+        top=740,
+        widths=(100, 100),
+        show=_show_artifact_header if artifact_header else _draw_cell,
+    )
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, bottom - 20, "Restart the service to apply them.")
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+def build_overflowing_table_pdf(out: Path, *, beyond: str = "seconds") -> Path:
+    """Write an A4 page of a ruled table, a line of which runs out of it.
+
+    A sentence in Times-Roman 10 introduces a table of the first 31 rows of
+    `SETTING_ROWS`, as `_ruled_table` draws it, with columns of 120 and
+    60 pt. The value of its second row, ``17 or fewer``, ends 4 pt before
+    the right rule of the table, and a text follows it in the content, 3 pt
+    past the rule, as text that a cell does not clip: the reader reads the
+    line whole, pdfminer the cell alone. A sentence ends the page.
+
+    Args:
+        out: The PDF file to write.
+        beyond: The text past the rule. The line keeps its middle in the
+            table with ``seconds``, and leaves it with a longer text.
+
+    Returns:
+        The PDF file.
+    """
+    left, widths = 72, (120, 60)
+
+    def show(canvas: Canvas, text: str, x: float, y: float, row: int) -> None:
+        canvas.drawString(x, y, text)
+        if row == 1 and x > left + widths[0]:
+            canvas.drawString(left + sum(widths) + 3, y, beyond)
+
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 790, "The settings of the service follow.")
+    rows = [list(row) for row in SETTING_ROWS[:31]]
+    rows[1][1] = "17 or fewer"
+    bottom = _ruled_table(
+        canvas,
+        rows,
+        left=left,
+        top=770,
+        widths=widths,
+        show=show,
+    )
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, bottom - 20, "Restart the service to apply them.")
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+def build_close_words_table_pdf(out: Path) -> Path:
+    """Write an A4 page of a small ruled table whose words stand close.
+
+    A sentence in Times-Roman 10 introduces a table of 2 rows and 2 columns,
+    ruled from 72 to 300 pt across the page and from 660 to 700 pt up it.
+    Its first cell holds ``Cell``, ``long`` and ``text`` in Helvetica 10, as
+    three text objects 2.8 pt apart, the width of a blank, with no blank
+    between them: PDFium reads three words, and pdfminer one. The other
+    cells hold ``value``, ``a`` and ``b``.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(72, 720, "The cells of the table follow.")
+    canvas.setLineWidth(0.5)
+    canvas.grid([72, 200, 300], [700, 680, 660])
+    canvas.setFont("Helvetica", 10)
+    x = 78.0
+    for word in ("Cell", "long", "text"):
+        canvas.drawString(x, 686, word)
+        x += canvas.stringWidth(word, "Helvetica", 10) + 2.8
+    for text, (left, baseline) in (
+        ("value", (206, 686)),
+        ("a", (78, 666)),
+        ("b", (206, 666)),
+    ):
+        canvas.drawString(left, baseline, text)
+    canvas.showPage()
+    canvas.save()
+    return out
+
+
+# Helvetica in the encoding of cp1252, its Unicode values from the CMap that
+# follows it: the ASCII characters, and the code B4, the acute accent of
+# cp1252, as the combining acute accent U+0301.
+_COMBINING_FONT: Final = (
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+    "/Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>"
+)
+_COMBINING_UNICODE: Final = {
+    **{f"{code:02X}": f"{code:04X}" for code in range(0x20, 0x7F)},
+    "B4": "0301",
+}
+
+
+def build_accent_table_pdf(out: Path) -> Path:
+    """Write a page of a small ruled table whose accent is decomposed.
+
+    The page is 595 by 842 pt. The table has 2 rows and 2 columns, ruled
+    from 72 to 300 pt across the page and from 660 to 700 pt up it, in
+    Helvetica 10. Its first cell holds ``Cafe`` and a combining acute
+    accent, then ``long`` 5 pt further, then ``text`` 2.8 pt further, each
+    word a text object of its own: PDFium reads ``Cafe`` and U+0301, then
+    ``long text``, and pdfminer ``longtext``. The other cells hold
+    ``value``, ``a`` and ``b``.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    rules = [
+        *(f"72 {y} m 300 {y} l S" for y in (660, 680, 700)),
+        *(f"{x} 660 m {x} 700 l S" for x in (72, 200, 300)),
+    ]
+    words = [
+        f"BT /F1 10 Tf {x} {y} Td ({text}) Tj ET"
+        for x, y, text in (
+            (78, 686, r"Cafe\264"),
+            (107.45, 686, "long"),
+            (129.15, 686, "text"),
+            (206, 686, "value"),
+            (78, 666, "a"),
+            (206, 666, "b"),
+        )
+    ]
+    return build_single_page_pdf(
+        out,
+        "\n".join(["0.5 w", *rules, *words]),
+        font=_COMBINING_FONT,
+        page="/MediaBox [0 0 595 842]",
+        extra=(to_unicode_cmap(_COMBINING_UNICODE),),
+    )
+
+
+# A sentence that fills the columns of `build_two_column_table_pdf`.
+_SETTINGS_FILL: Final = (
+    "The service reads its settings when it starts, and each of them has a "
+    "default value that suits most installations. "
+)
+
+
+def build_two_column_table_pdf(out: Path, *, intro: str) -> Path:
+    """Write an A4 page of two columns, a ruled table at the foot of the first.
+
+    The columns are 235 pt wide, 25 pt apart, their text in Times-Roman 10.
+    The first column holds a long paragraph, then `intro`, then a ruled
+    table of 9 rows of settings and 2 columns. The second column starts with
+    a sentence that the introduction may go on with, then another
+    paragraph.
+
+    Args:
+        out: The PDF file to write.
+        intro: The sentence above the table.
+
+    Returns:
+        The PDF file.
+    """
+    _, height = A4
+    frames = [
+        Frame(50, 60, 235, height - 120, id="left"),
+        Frame(310, 60, 235, height - 120, id="right"),
+    ]
+    doc = BaseDocTemplate(str(out), pagesize=A4)
+    doc.addPageTemplates([PageTemplate(id="two", frames=frames)])
+    rows = [
+        ("Option", "Default"),
+        *((f"setting_{i}", str(i)) for i in range(8)),
+    ]
+    doc.build(
+        [
+            Paragraph(_SETTINGS_FILL * 18, _TABLE_TEXT),
+            Paragraph(intro, _TABLE_TEXT),
+            Table(
+                rows,
+                hAlign="LEFT",
+                colWidths=[120, 100],
+                style=TableStyle([("GRID", (0, 0), (-1, -1), 0.5, black)]),
+            ),
+            FrameBreak(),
+            Paragraph(
+                "and all of them can be changed in the configuration file.",
+                _TABLE_TEXT,
+            ),
+            Paragraph(_SETTINGS_FILL * 5, _TABLE_TEXT),
+        ],
+    )
+    return out
+
+
+# The listing set beside a ruled table by `build_listing_beside_table_pdf`:
+# each line, or the two parts of a line that a wide gap splits, and the
+# baseline of each line. The gap before the sixth line is the widest.
+BESIDE_LISTING: Final = (
+    "1 rows = load(path)",
+    "2 for row in rows:",
+    "3     check(row, rules, strict=True, log=errors)",
+    "4 total = 0",
+    "5 for value in values_of_all_rows:",
+    ("6     total +=", "value * weight"),
+    "7 save(total)",
+    "8 report(total)",
+)
+_BESIDE_BASELINES: Final = (
+    705.2,
+    688.8,
+    672.4,
+    656.0,
+    639.6,
+    621.6,
+    605.2,
+    588.8,
+)
+
+
+def build_listing_beside_table_pdf(out: Path) -> Path:
+    """Write an A4 page of a ruled table, and of a listing on its right.
+
+    A sentence in Times-Roman 10 opens the page and another one ends it. The
+    table has 2 rows and 2 columns, from 122.6 to 292.8 pt across the page,
+    its text in Helvetica 10; the text of its last cell ends 5 pt before its
+    right rule. The listing of `BESIDE_LISTING`, in Courier 10, starts 2 pt
+    right of the table; its sixth line has a second part 404.3 pt from the
+    left of the page. The second row of the table holds its text between
+    the fifth and the sixth lines of the listing: with the table, the page
+    is cut between the sixth and the seventh lines first; without it,
+    between the fifth and the sixth, and then between the two parts of the
+    sixth line and the lines under it, read as two columns.
+
+    Args:
+        out: The PDF file to write.
+
+    Returns:
+        The PDF file.
+    """
+    canvas = Canvas(str(out), pagesize=A4)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(122, 740, "The table on the left is made by this code.")
+    canvas.setLineWidth(0.5)
+    canvas.grid([122.6, 196, 292.8], [684.7, 650, 618.4])
+    canvas.setFont("Helvetica", 10)
+    right = 287.5 - canvas.stringWidth("used used", "Helvetica", 10)
+    for x, y, text in (
+        (129.2, 665.5, "Time"),
+        (201.3, 665.5, "Mon Tue Wed"),
+        (129.1, 630.0, "Afternoon"),
+        (right, 630.0, "used used"),
+    ):
+        canvas.drawString(x, y, text)
+    canvas.setFont("Courier", 10)
+    for y, line in zip(_BESIDE_BASELINES, BESIDE_LISTING, strict=True):
+        if isinstance(line, tuple):
+            canvas.drawString(295, y, line[0])
+            canvas.drawString(404.3, y, line[1])
+        else:
+            canvas.drawString(295, y, line)
+    canvas.setFont("Times-Roman", 10)
+    canvas.drawString(122, 560, "Each row is checked against the rules.")
+    canvas.showPage()
+    canvas.save()
     return out
 
 

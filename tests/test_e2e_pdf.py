@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 from reportlab.lib.units import mm
 
-from doc_checker.config import Config
+from doc_checker.config import Config, PdfConfig
+from doc_checker.model.document import BlockKind
 from doc_checker.model.findings import Category, Severity
 from doc_checker.pipeline import run_compare
 from tests.builders import (
@@ -23,10 +24,12 @@ from tests.builders import (
     set_level,
 )
 from tests.pdf_builders import (
+    SETTING_ROWS,
     ProseStyle,
     build_bullets_pdf,
     build_contents_pdf,
     build_fpdf2_pdf,
+    build_fpdf2_table_pdf,
     build_lines_pdf,
     build_listing_pdf,
     build_numbered_pdf,
@@ -47,6 +50,7 @@ if TYPE_CHECKING:
     from doc_checker.compare.engine import CompareResult
 
 C, MI = Severity.CRITICAL, Severity.MINOR
+TABLES = Config(pdf=PdfConfig(tables=True))
 OPTIONS = {
     "plain": {},
     "toc": {"toc": True},
@@ -597,6 +601,57 @@ def test_layout_only_differences_produce_no_finding(
     result = run_compare(pdfs[order[0]], pdfs[order[1]], Config())
     # Two PDFs that extract to nothing would have no finding either.
     assert result.stats.matched > 0
+    assert [
+        (f.rule, f.severity) for f in result.findings if f.severity >= MI
+    ] == []
+
+
+# Each entry builds one ruled table, which the pdf-tables extra reads, as two
+# PDFs that differ only by their layout.
+TABLE_LAYOUTS: dict[str, tuple[Builder, Builder]] = {
+    # At 12 mm, the header row repeated on each page lies in the header band.
+    "grid-margins": (
+        partial(
+            build_table_pdf,
+            margin=25 * mm,
+            grid=True,
+            repeat_header=True,
+        ),
+        partial(
+            build_table_pdf,
+            margin=12 * mm,
+            grid=True,
+            repeat_header=True,
+        ),
+    ),
+    "grid-generators": (
+        partial(
+            build_table_pdf,
+            margin=25 * mm,
+            grid=True,
+            repeat_header=True,
+        ),
+        partial(build_fpdf2_table_pdf, rows=SETTING_ROWS, repeat_header=True),
+    ),
+}
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["forward", "swapped"])
+@pytest.mark.parametrize("layout", list(TABLE_LAYOUTS))
+def test_table_layouts_produce_no_finding(
+    tmp_path: Path,
+    layout: str,
+    order: tuple[int, int],
+) -> None:
+    """One ruled table in two layouts, read as tables, has no finding."""
+    first, second = TABLE_LAYOUTS[layout]
+    pdfs = (first(tmp_path / "first.pdf"), second(tmp_path / "second.pdf"))
+    result = run_compare(pdfs[order[0]], pdfs[order[1]], TABLES)
+    assert result.stats.matched > 0
+    assert [
+        [b.kind for b in doc.blocks].count(BlockKind.TABLE)
+        for doc in (result.ref, result.new)
+    ] == [1, 1]
     assert [
         (f.rule, f.severity) for f in result.findings if f.severity >= MI
     ] == []

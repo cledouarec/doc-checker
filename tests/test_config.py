@@ -119,6 +119,20 @@ def test_pdf_section_is_loaded(tmp_path: Path) -> None:
     )
 
 
+def test_pdf_tables_key(tmp_path: Path) -> None:
+    """The tables key is a boolean, off by default, on by the option too."""
+    assert load_config(None, cwd=tmp_path).pdf.tables is False
+    conf = tmp_path / "c.toml"
+    conf.write_text("[pdf]\ntables = true\n", encoding="utf-8")
+    assert load_config(conf, cwd=tmp_path).pdf.tables is True
+    conf.write_text("[pdf]\ntables = 'yes'\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=re.escape("pdf.tables")):
+        load_config(conf, cwd=tmp_path)
+    on = apply_overrides(Config(), CliOverrides(pdf_tables=True))
+    assert on.pdf == PdfConfig(tables=True)
+    assert apply_overrides(Config(), CliOverrides()).pdf.tables is False
+
+
 def test_pdf_ranges_include_their_upper_bound(tmp_path: Path) -> None:
     """A band can cover half of the page and a share all of the pages."""
     (tmp_path / "doc-checker.toml").write_text(

@@ -1050,7 +1050,24 @@ def vector_figures(
     page: pdfium.PdfPage,
     textpage: pdfium.PdfTextPage | None = None,
 ) -> list[VectorFigure]:
-    """Find the vector figures of a page.
+    """Find the vector figures of a page, as `search_figures` does.
+
+    Args:
+        page: The page.
+        textpage: The text page of the page, whose indices the characters of
+            the clusters take, or ``None`` to load one if needed.
+
+    Returns:
+        The figures, in the order of their first object on the page.
+    """
+    return search_figures(page, textpage)[0]
+
+
+def search_figures(
+    page: pdfium.PdfPage,
+    textpage: pdfium.PdfTextPage | None = None,
+) -> tuple[list[VectorFigure], bool]:
+    """Find the vector figures of a page, and tell whether it is crowded.
 
     The forms of the page itself that hold a path, at any depth, are
     figures, if the text of their text objects reads as labels, as
@@ -1067,7 +1084,9 @@ def vector_figures(
             the clusters take, or ``None`` to load one if needed.
 
     Returns:
-        The figures, in the order of their first object on the page.
+        The figures, in the order of their first object on the page, and
+        whether the page is crowded: whether it has more than
+        `MAX_PAGE_PATHS` paths, which were not searched for clusters.
     """
     crop = page.get_bbox()
     forms: list[tuple[int, VectorFigure]] = []
@@ -1082,14 +1101,13 @@ def vector_figures(
                     forms.append((position, figure))
             case _:
                 pass
-    drawings = (
-        _page_drawings(page, paths) if len(paths) <= MAX_PAGE_PATHS else []
-    )
+    crowded = len(paths) > MAX_PAGE_PATHS
+    drawings = [] if crowded else _page_drawings(page, paths)
     if not forms and not drawings:
-        return []
+        return [], crowded
     if textpage is None:
         with closing(page.get_textpage()) as own:
             found = _labelled(_PageText(own), forms, drawings)
     else:
         found = _labelled(_PageText(textpage), forms, drawings)
-    return [figure for _, figure in sorted(found, key=itemgetter(0))]
+    return [figure for _, figure in sorted(found, key=itemgetter(0))], crowded
