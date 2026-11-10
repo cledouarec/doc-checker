@@ -32,9 +32,15 @@ doc-checker = "doc_checker.cli:main"
 [project.urls]
 Repository = "https://github.com/cledouarec/doc-checker"
 
+[project.optional-dependencies]
+pdf-tables = [
+    "pdfplumber>=0.11.10",
+]
+
 [dependency-groups]
 dev = [
     "fpdf2>=2.9",
+    "pdfplumber>=0.11.10",
     "pre-commit>=4.5",
     "pytest>=9.0",
     "reportlab>=5.1",

@@ -95,12 +95,15 @@ class PdfConfig:
             the labels of their pages need the same share of the pages,
             unlike running titles.
         compare_toc: Whether tables of contents and indexes are compared.
+        tables: Whether the ruled tables are read as tables, which needs the
+            pdf-tables extra.
     """
 
     header_band: float = 0.08
     footer_band: float = 0.08
     repeat_share: float = 0.3
     compare_toc: bool = False
+    tables: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +253,7 @@ class CliOverrides:
     checks: tuple[str, ...] | None = None
     profile: str | None = None
     words: tuple[Path, ...] = ()
+    pdf_tables: bool = False
 
 
 class _Section:
@@ -425,13 +429,20 @@ def _parse_html(section: _Section) -> HtmlConfig:
 
 def _parse_pdf(section: _Section) -> PdfConfig:
     section.check_keys(
-        ("header_band", "footer_band", "repeat_share", "compare_toc"),
+        (
+            "header_band",
+            "footer_band",
+            "repeat_share",
+            "compare_toc",
+            "tables",
+        ),
     )
     return PdfConfig(
         header_band=section.ratio("header_band", 0.08, upper=0.5),
         footer_band=section.ratio("footer_band", 0.08, upper=0.5),
         repeat_share=section.ratio("repeat_share", 0.3),
         compare_toc=section.flag("compare_toc", default=False),
+        tables=section.flag("tables", default=False),
     )
 
 
@@ -693,6 +704,8 @@ def apply_overrides(cfg: Config, overrides: CliOverrides) -> Config:
         changes["spelling"] = SpellingConfig(cfg.spelling.words + tuple(extra))
     if overrides.no_images:
         changes["images"] = False
+    if overrides.pdf_tables:
+        changes["pdf"] = replace(cfg.pdf, tables=True)
     for name in (
         "lang",
         "min_severity",

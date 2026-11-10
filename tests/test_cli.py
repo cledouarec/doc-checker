@@ -2,6 +2,7 @@
 """Tests for the command line interface."""
 
 import re
+import sys
 from typing import TYPE_CHECKING
 
 import click
@@ -26,6 +27,7 @@ from tests.pdf_builders import (
     build_raw_pdf,
     build_reportlab_pdf,
     build_scanned_pdf,
+    build_table_pdf,
 )
 
 if TYPE_CHECKING:
@@ -108,6 +110,56 @@ def test_extract_bad_config_exits_2(tmp_path: Path) -> None:
     site = build_mkdocs_like(SAMPLE_EN, tmp_path / "site")
     result = CliRunner().invoke(main, ["extract", str(site), "-c", str(conf)])
     assert result.exit_code == 2
+
+
+def test_pdf_tables_without_the_extra_exits_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asking for the tables without the pdf-tables extra exits with 2."""
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+    pdf = build_table_pdf(tmp_path / "t.pdf", margin=72, grid=True)
+    result = CliRunner().invoke(main, ["extract", str(pdf), "--pdf-tables"])
+    assert result.exit_code == 2, result.output
+    assert "pip install 'doc-checker[pdf-tables]'" in result.output
+
+
+@pytest.mark.parametrize("command", ["compare", "audit"])
+def test_compare_and_audit_pass_the_pdf_tables_option(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """Compare and audit pass the option to the reading of the documents."""
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+    pdf = build_table_pdf(tmp_path / "t.pdf", margin=72, grid=True)
+    inputs = [str(pdf)] * (2 if command == "compare" else 1)
+    out = str(tmp_path / "out")
+    args = [command, *inputs, "--pdf-tables", "-o", out]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 2, result.output
+    assert "pdf-tables extra" in result.output
+
+
+@pytest.mark.parametrize("command", ["extract", "compare", "audit"])
+@pytest.mark.parametrize("asked", ["option", "file"])
+def test_pdf_tables_without_the_extra_exit_2_on_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    asked: str,
+) -> None:
+    """The tables asked for without the extra exit with 2, on HTML too."""
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+    site = str(build_mkdocs_like(SAMPLE_EN, tmp_path / "site"))
+    inputs = [site] * (2 if command == "compare" else 1)
+    out = [] if command == "extract" else ["-o", str(tmp_path / "out")]
+    conf = tmp_path / "c.toml"
+    conf.write_text("[pdf]\ntables = true\n", encoding="utf-8")
+    how = ["--pdf-tables"] if asked == "option" else ["-c", str(conf)]
+    result = CliRunner().invoke(main, [command, *inputs, *out, *how])
+    assert result.exit_code == 2, result.output
+    assert "pip install 'doc-checker[pdf-tables]'" in result.output
 
 
 def test_compare_writes_both_reports(tmp_path: Path) -> None:

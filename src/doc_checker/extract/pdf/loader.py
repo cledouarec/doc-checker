@@ -9,6 +9,12 @@ joined, and the block gets its kind: contents or index, code, heading, list
 item, caption or paragraph. The images repeated on many pages are removed, and
 each other image becomes a block, before the first block that starts under its
 top.
+
+With the pdf-tables extra, asked for by the settings, the ruled tables that
+pdfplumber finds become blocks too, placed as images are. The segments of a
+table leave the flow before the running headers are looked for, so that no
+row of a table is taken for one. A table continued on the next page is joined
+to its start, and the header row that it repeats is removed.
 """
 
 import re
@@ -29,7 +35,7 @@ from doc_checker.extract.common import (
     strip_caption_numbers,
     strip_heading_numbers,
 )
-from doc_checker.extract.pdf import reader
+from doc_checker.extract.pdf import reader, tables
 from doc_checker.extract.pdf.blocks import (
     group_lines,
     merge_flows,
@@ -51,6 +57,16 @@ from doc_checker.extract.pdf.reader import (
     read_page,
 )
 from doc_checker.extract.pdf.segments import body_size, build_segments
+from doc_checker.extract.pdf.table_blocks import (
+    KeptTables,
+    Placed,
+    flow,
+    place_order,
+    read_kept_tables,
+    table_breaks,
+    text_segments,
+    with_tables,
+)
 from doc_checker.model.document import (
     HEADING_SOURCE,
     Block,
@@ -71,13 +87,13 @@ from doc_checker.text.lang import (
 from doc_checker.text.normalize import ELLIPSIS, printable
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from pathlib import Path
 
     import pypdfium2 as pdfium
 
     from doc_checker.config import PdfConfig
-    from doc_checker.extract.pdf.blocks import DraftBlock
+    from doc_checker.extract.pdf.blocks import Apart, DraftBlock
     from doc_checker.extract.pdf.catalog import PdfCatalog
     from doc_checker.extract.pdf.layout import Line
     from doc_checker.extract.pdf.reader import (
@@ -88,6 +104,7 @@ if TYPE_CHECKING:
         PdfPageText,
     )
     from doc_checker.extract.pdf.segments import Segment
+    from doc_checker.extract.pdf.tables import Box
     from doc_checker.model.document import HeadingSource
     from doc_checker.model.facts import PdfLink, TagTree
 
@@ -105,6 +122,7 @@ class _Page:
 
     Attributes:
         label: Page label, such as ``iv``, or the page number from 1.
+        width: Width of the crop box of the page turned upright, in points.
         height: Height of the crop box of the page turned upright, in points.
         image_coverage: Share of the page covered by images, from 0 to 1.
         segments: The segments of the page, in the order of their first
@@ -124,9 +142,15 @@ class _Page:
             `LINK_TEXT_WORK` of the reader.
         code_words: Its words set in a monospaced font, as
             `monospaced_words` of the reader finds them, if they were read.
+        figures: The boxes of its vector figures, whether the images were
+            read or not, from the lower left corner of its crop box.
+        turned: Whether the reader turned the page upright.
+        crowded: Whether the page has too many paths for its drawings to be
+            looked for, as `PdfPageText.crowded` of the reader tells.
     """
 
     label: str
+    width: float
     height: float
     image_coverage: float
     segments: tuple[Segment, ...]
@@ -139,23 +163,9 @@ class _Page:
     more_links: bool = False
     untexted_links: int = 0
     code_words: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True, slots=True)
-class _PlacedImage:
-    """An image block, and where its image lies.
-
-    Attributes:
-        page: Position of the page of the image, from 0.
-        top: Top edge of the image on its page turned upright, in points.
-        x0: Left edge of the image.
-        block: The image block.
-    """
-
-    page: int
-    top: float
-    x0: float
-    block: Block
+    figures: tuple[Box, ...] = ()
+    turned: bool = False
+    crowded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +339,7 @@ def _read(
             pages.append(
                 _Page(
                     page.label,
+                    page.width,
                     page.height,
                     page.image_coverage,
                     segments,
@@ -345,6 +356,9 @@ def _read(
                         if audit
                         else frozenset()
                     ),
+                    figures=page.figure_boxes,
+                    turned=page.turn != 0,
+                    crowded=page.crowded,
                 ),
             )
     return _PdfFile(
@@ -361,6 +375,7 @@ def _read(
 
 def _strip_chrome(
     pdf: _PdfFile,
+    flow: Sequence[Sequence[Segment]],
     *,
     body: float,
     cfg: PdfConfig,
@@ -370,6 +385,8 @@ def _strip_chrome(
 
     Args:
         pdf: What is read from the file.
+        flow: The segments of each page that are looked at: all of them but
+            those of the tables.
         body: The body size of the document, in points.
         cfg: The PDF settings, which give the bands and the share of pages.
         counter: The counts of the normalizations, in which `header_footer`
@@ -381,7 +398,7 @@ def _strip_chrome(
         each run of digits written ``#``.
     """
     # The chrome steps take the position of a list as the page index.
-    pages = [page.segments for page in pdf.pages]
+    pages = flow
     heights = [page.height for page in pdf.pages]
     titles = title_pages(
         pages,
@@ -414,6 +431,8 @@ def _drafts(
     *,
     body: float,
     counter: Counter[str],
+    apart: Apart | None = None,
+    hidden: Sequence[Collection[Segment]] = (),
 ) -> tuple[dict[int, BlockKind], list[DraftBlock]]:
     """Order the lines of each page and group them into draft blocks.
 
@@ -424,16 +443,33 @@ def _drafts(
         body: The body size of the document, in points.
         counter: The counts of the normalizations, in which `page_break`
             goes up by one for each block joined across a break.
+        apart: Whether a table lies between two lines, given the line before
+            and the line after, which are then never in one block; None if
+            the document has no table.
+        hidden: The segments of each page, among `kept`, that the cuts of
+            the page take, as `page_lines` tells, but no line: those of its
+            tables; none if omitted.
 
     Returns:
         The kind of each contents or index page, by position of the page, and
         the draft blocks of the document, in reading order.
     """
     lines = [
-        line for segments in kept for line in page_lines(segments, body=body)
+        line
+        for index, segments in enumerate(kept)
+        for line in page_lines(
+            segments,
+            body=body,
+            hidden=hidden[index] if hidden else (),
+        )
     ]
     kinds = toc_pages(lines, page_count=len(kept))
-    return kinds, merge_flows(group_lines(lines), counter, page_kinds=kinds)
+    return kinds, merge_flows(
+        group_lines(lines, apart=apart),
+        counter,
+        page_kinds=kinds,
+        apart=apart,
+    )
 
 
 def _texts(drafts: Sequence[DraftBlock], counter: Counter[str]) -> list[str]:
@@ -529,7 +565,7 @@ def _placed_images(
     file: str,
     share: float,
     counter: Counter[str],
-) -> tuple[list[_PlacedImage], frozenset[str]]:
+) -> tuple[list[Placed], frozenset[str]]:
     """Make the image blocks of a document, without its image chrome.
 
     An image whose content comes back on enough pages, as `repeated_images`
@@ -568,7 +604,7 @@ def _placed_images(
     ]
     chrome = repeated_images(sized, share=share)
     kept = [
-        _PlacedImage(index, image.top, image.x0, block)
+        Placed(index, image.top, image.x0, block, image.bottom)
         for index, (page, blocks) in enumerate(
             zip(pdf.pages, per_page, strict=True),
         )
@@ -578,34 +614,30 @@ def _placed_images(
     found = sum(len(blocks) for blocks in sized)
     _count(counter, IMAGE_CHROME, found - len(kept))
     _count(counter, TINY_IMAGE, sum(map(len, per_page)) - found)
-    ordered = sorted(
-        kept,
-        key=lambda image: (image.page, -image.top, image.x0),
-    )
-    return ordered, chrome
+    return sorted(kept, key=place_order), chrome
 
 
-def _with_images(
+def _with_placed(
     blocks: Sequence[Block],
     starts: Sequence[Line],
-    images: Sequence[_PlacedImage],
+    placed: Sequence[Placed],
 ) -> list[Block]:
-    """Put each image block before the first block that starts under it.
+    """Put each image or table block before the first block under its top.
 
-    An image goes before the first block whose first line is on a later page,
-    or on its page with its baseline under the top of the image. The images
-    that no block starts under follow the last block.
+    An image or a table goes before the first block whose first line is on a
+    later page, or on its page with its baseline under its top. Those that
+    no block starts under follow the last block.
 
     Args:
         blocks: The blocks of text, in reading order.
         starts: The first line of each block, in the same order.
-        images: The image blocks, as `_placed_images` sorts them.
+        placed: The image and table blocks, in the order of `place_order`.
 
     Returns:
         All the blocks, in reading order.
     """
-    pending = deque(images)
-    placed: list[Block] = []
+    pending = deque(placed)
+    ordered: list[Block] = []
     for block, start in zip(blocks, starts, strict=True):
         while pending and (
             pending[0].page < start.page
@@ -614,10 +646,10 @@ def _with_images(
                 and pending[0].top > start.baseline
             )
         ):
-            placed.append(pending.popleft().block)
-        placed.append(block)
-    placed.extend(image.block for image in pending)
-    return placed
+            ordered.append(pending.popleft().block)
+        ordered.append(block)
+    ordered.extend(item.block for item in pending)
+    return ordered
 
 
 def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
@@ -626,7 +658,7 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
     *,
     levels: Mapping[int, tuple[int, HeadingSource]],
     kinds: Mapping[int, BlockKind],
-    images: Sequence[_PlacedImage],
+    placed: Sequence[Placed],
     file: str,
     counter: Counter[str],
 ) -> list[Block]:
@@ -639,15 +671,15 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
             its block.
         kinds: The kind of each contents or index page, by position of the
             page.
-        images: The image blocks, as `_placed_images` sorts them.
+        placed: The image and table blocks, in the order of `place_order`.
         file: The name of the PDF file, which the blocks point to.
         counter: The counts of the normalizations.
 
     Returns:
         The blocks, each located on the page of its first line, and the image
-        blocks among them, each before the first block that starts under its
-        image. The entries of a list of figures or tables, as `figure_list`
-        finds them, are contents.
+        and table blocks among them, each before the first block that starts
+        under its top, as `_with_placed` puts them. The entries of a list of
+        figures or tables, as `figure_list` finds them, are contents.
     """
     listed = figure_list(texts)
     blocks = []
@@ -672,11 +704,52 @@ def _blocks(  # ruff: ignore[too-many-arguments] - one input per earlier step
                 attrs={HEADING_SOURCE: levels[index][1]} if heading else None,
             ),
         )
-    blocks = _with_images(blocks, [draft.lines[0] for draft in drafts], images)
+    blocks = _with_placed(
+        blocks,
+        [draft.lines[0] for draft in drafts],
+        placed,
+    )
     blocks = strip_heading_numbers(blocks, counter)
     blocks = strip_caption_numbers(blocks, counter)
     assign_section_paths(blocks)
     return blocks
+
+
+def _language_sample(blocks: Sequence[Block]) -> str:
+    """Return the text of the first `LANG_SAMPLE_BLOCKS` blocks of text.
+
+    Args:
+        blocks: The blocks of the document, in reading order.
+
+    Returns:
+        Their texts, the image blocks left out, one blank apart.
+    """
+    return " ".join(
+        islice(
+            (b.text for b in blocks if b.kind is not BlockKind.IMAGE),
+            LANG_SAMPLE_BLOCKS,
+        ),
+    )
+
+
+def _refused_warnings(labels: Sequence[str]) -> list[str]:
+    """Warn about the tables kept as text, as their cells do not match.
+
+    Args:
+        labels: The label of the page of each such table, in page order.
+
+    Returns:
+        One warning that counts them and lists the labels of the first
+        `SCANNED_LABELS_MAX` of their pages, or none if there is none.
+    """
+    if not labels:
+        return []
+    pages = _page_list(list(dict.fromkeys(labels)))
+    warning = (
+        f"{len(labels)} table(s) kept as text, their cells not matching the"
+        f" text of their page: {pages}"
+    )
+    return [warning]
 
 
 def _page_list(labels: Sequence[str]) -> str:
@@ -933,6 +1006,11 @@ def load_pdf(
 
     A file that cannot be read, that a user password protects, or that has a
     page that cannot be read raises an `InputError` that names the file.
+    Settings that ask for the tables need the pdf-tables extra: without it,
+    a `ConfigError` is raised before the file is read. The tables are read in
+    a process started afresh, as `read_tables` tells, which imports the main
+    script again: a script that calls this function with the tables must run
+    its own code under ``if __name__ == "__main__":``.
 
     Args:
         path: The PDF file.
@@ -952,15 +1030,39 @@ def load_pdf(
         are rendered, then those with more links than are read or links
         whose text was not read, then the pages numbered rather than
         labelled, then the bookmarks that were not read, then the images
-        that could not be read, then why the structure tree was not read in
-        full. Its title and its outline are always read, its page facts,
-        its structure tree and its code words only for the audit.
+        that could not be read, then those of the tables, as
+        `read_kept_tables` of the table blocks gives them, and the tables
+        kept as text, then why the structure tree was not read in full. Its
+        title and its outline are always read, its page facts, its structure
+        tree and its code words only for the audit. With the tables, as
+        `read_kept_tables` reads them, each table kept is a block, joined to
+        the tables that continue it, as `with_tables` of the table blocks
+        makes them.
     """
+    if cfg.tables:
+        tables.require_pdfplumber()
     counter: Counter[str] = Counter()
     pdf = _read(path, counter, images=images, audit=audit)
     body = body_size(page.segments for page in pdf.pages)
-    kept, chrome = _strip_chrome(pdf, body=body, cfg=cfg, counter=counter)
-    kinds, drafts = _drafts(kept, body=body, counter=counter)
+    found = (
+        read_kept_tables(path, pdf.pages, cfg) if cfg.tables else KeptTables()
+    )
+    kept, chrome = _strip_chrome(
+        pdf,
+        flow(pdf.pages, found),
+        body=body,
+        cfg=cfg,
+        counter=counter,
+    )
+    # The segments of the tables take part in the cuts of their pages, so
+    # that the text around a table is read in the order of the base reading.
+    kinds, drafts = _drafts(
+        text_segments(pdf.pages, kept, found),
+        body=body,
+        counter=counter,
+        apart=table_breaks(found),
+        hidden=found.taken,
+    )
     texts = _texts(drafts, counter)
     levels = _levels(drafts, texts, pdf.bookmarks, body=body)
     images, chrome_images = _placed_images(
@@ -974,15 +1076,15 @@ def load_pdf(
         texts,
         levels=levels,
         kinds=kinds,
-        images=images,
+        placed=with_tables(
+            images,
+            found,
+            kept,
+            file=path.name,
+            counter=counter,
+        ),
         file=path.name,
         counter=counter,
-    )
-    sample = " ".join(
-        islice(
-            (b.text for b in blocks if b.kind is not BlockKind.IMAGE),
-            LANG_SAMPLE_BLOCKS,
-        ),
     )
     declared = declared_language(pdf.catalog.lang)
     tags = None
@@ -995,27 +1097,33 @@ def load_pdf(
         format="pdf",
         blocks=blocks,
         parts=[page.label for page in pdf.pages],
-        lang=resolve_language(lang, declared, sample),
+        lang=resolve_language(lang, declared, _language_sample(blocks)),
         declared_lang=declared,
         generator=pdf.generator,
         normalization=counter,
         chrome=chrome,
         chrome_keys=frozenset(),
         warnings=[
-            *_scanned_warnings(pdf, kept),
+            *_scanned_warnings(pdf, text_segments(pdf.pages, kept, found)),
             *_angled_warnings(pdf),
             *_figure_warnings(pdf),
             *_link_warnings(pdf),
             *_label_warnings(pdf),
             *_outline_warnings(pdf),
             *image_warnings(blocks),
+            *found.warnings,
+            *_refused_warnings(found.refused),
             *_tag_warnings(tags),
         ],
         tagged=pdf.catalog.tagged,
         chrome_images=chrome_images,
         title=pdf.title,
         outline=_outline(pdf.bookmarks),
-        pdf_pages=_page_facts(pdf, kept) if audit else (),
+        pdf_pages=(
+            _page_facts(pdf, text_segments(pdf.pages, kept, found))
+            if audit
+            else ()
+        ),
         tags=tags,
         code_words=frozenset().union(*(page.code_words for page in pdf.pages)),
     )

@@ -34,7 +34,7 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
 from doc_checker.errors import InputError
-from doc_checker.extract.pdf.figures import vector_figures
+from doc_checker.extract.pdf.figures import search_figures
 from doc_checker.images.load import (
     RenderGuard,
     decode_object,
@@ -309,6 +309,14 @@ class PdfPageText:
         more_links: Whether other link annotations follow the last one read.
         untexted_links: Number of these links whose text was not read, as
             they come after the work that `LINK_TEXT_WORK` allows.
+        turn: The quarter turns, clockwise, that turned the page upright: 0
+            for a page read as it lies, whatever its rotation.
+        figure_boxes: The left, bottom, right and top edges of the box of
+            each vector figure, as `images` would place it, found whether
+            the images are read or not.
+        crowded: Whether the page has more paths than the search of figures
+            takes, `MAX_PAGE_PATHS` of the figures: its drawings were not
+            looked for.
     """
 
     index: int
@@ -326,6 +334,9 @@ class PdfPageText:
     links: tuple[PdfLink, ...] = ()
     more_links: bool = False
     untexted_links: int = 0
+    turn: int = 0
+    figure_boxes: tuple[tuple[float, float, float, float], ...] = ()
+    crowded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1318,6 +1329,36 @@ def _figure_ref(
     )
 
 
+def _figure_box(
+    page: pdfium.PdfPage,
+    figure: VectorFigure,
+    turn: int,
+) -> tuple[float, float, float, float]:
+    """Return the box of a vector figure on its page turned upright.
+
+    Args:
+        page: The page.
+        figure: The figure.
+        turn: The quarter turns, clockwise, of the text of the page.
+
+    Returns:
+        The left, right, bottom and top edges of the box, as `_upright_box`
+        returns them.
+    """
+    left, bottom, right, top = figure.box
+    crop_left, crop_bottom, crop_right, crop_top = page.get_bbox()
+    return _upright_box(
+        (
+            left - crop_left,
+            bottom - crop_bottom,
+            right - crop_left,
+            top - crop_bottom,
+        ),
+        turn,
+        (crop_right - crop_left, crop_top - crop_bottom),
+    )
+
+
 def _figure_image(
     page: pdfium.PdfPage,
     figure: VectorFigure,
@@ -1337,20 +1378,9 @@ def _figure_image(
             to render the figure.
 
     Returns:
-        The figure, as `_figure_ref` reads it.
+        The figure, as `_figure_ref` reads it, in the box of `_figure_box`.
     """
-    left, bottom, right, top = figure.box
-    crop_left, crop_bottom, crop_right, crop_top = page.get_bbox()
-    box = _upright_box(
-        (
-            left - crop_left,
-            bottom - crop_bottom,
-            right - crop_left,
-            top - crop_bottom,
-        ),
-        turn,
-        (crop_right - crop_left, crop_top - crop_bottom),
-    )
+    box = _figure_box(page, figure, turn)
     return PdfImage(_figure_ref(page, figure, place, guard), *box)
 
 
@@ -1849,7 +1879,7 @@ def _read_open_page(
     """
     page, textpage = pages
     left, bottom, right, top = page.get_bbox()
-    figures = vector_figures(page, textpage)
+    figures, crowded = search_figures(page, textpage)
     read = _read_chars(textpage, (left, bottom), _FigureText.of(figures))
     upright = _upright_page(read.chars, (right - left, top - bottom))
     coverage, found = _page_images(
@@ -1872,6 +1902,14 @@ def _read_open_page(
         images=found,
         figure_chars=read.figure_chars,
         unrendered=max(0, len(figures) - MAX_PAGE_FIGURES) if images else 0,
+        turn=upright.turn,
+        figure_boxes=tuple(
+            (x0, low, x1, high)
+            for x0, x1, low, high in (
+                _figure_box(page, figure, upright.turn) for figure in figures
+            )
+        ),
+        crowded=crowded,
     )
 
 
@@ -1912,7 +1950,9 @@ def read_page(  # ruff: ignore[too-many-arguments] - one keyword per part of the
     Returns:
         The characters of the page turned upright, with its printable label,
         the size of its turned crop box, the share of it that images cover,
-        its images, its figures and its links.
+        its images, its figures and its links, with the turns that turned it
+        upright, the boxes of its figures, and whether it was too crowded
+        for its drawings to be looked for.
 
     Raises:
         InputError: If PDFium cannot load the page or read its text.
