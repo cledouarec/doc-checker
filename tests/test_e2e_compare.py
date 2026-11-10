@@ -473,6 +473,21 @@ MARKUPS: dict[str, tuple[SiteBuilder, SiteBuilder]] = {
 }
 
 
+@pytest.mark.parametrize("markup", list(MARKUPS))
+def test_fixture_sites_have_case_distinct_names(
+    tmp_path: Path,
+    markup: str,
+) -> None:
+    """No two files of a fixture site differ only by case.
+
+    Guards the Windows and macOS CI, whose file systems ignore case.
+    """
+    for index, builder in enumerate(MARKUPS[markup]):
+        site = builder(SAMPLE_EN, tmp_path / str(index))
+        names = [p.relative_to(site).as_posix() for p in site.rglob("*")]
+        assert len({n.casefold() for n in names}) == len(names)
+
+
 @pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["forward", "swapped"])
 @pytest.mark.parametrize("spec", [SAMPLE_EN, SAMPLE_FR], ids=["en", "fr"])
 @pytest.mark.parametrize("markup", list(MARKUPS))
