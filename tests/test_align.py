@@ -13,6 +13,7 @@ from tests.builders import (
     SPLIT_PARTS,
     SPLIT_WHOLE,
     make_block,
+    parts_tables,
     random_blocks,
 )
 
@@ -323,4 +324,75 @@ def test_align_keeps_its_pairs() -> None:
             match=0.6,
             moved_match=0.8,
         ).pairs
+    )
+
+
+def _tables(rows: int, share: float) -> tuple[Block, Block]:
+    """Return two versions of a long table of parts, some counts changed."""
+    ref, new, _ = parts_tables(rows, share)
+    return make_block(ref, BlockKind.TABLE), make_block(new, BlockKind.TABLE)
+
+
+def _aligned(ref: list[Block], new: list[Block]) -> tuple[list[Kind], int]:
+    """Return the pairs of an alignment and the blocks it left unsearched."""
+    result = align_blocks(ref, new, match=0.6, moved_match=0.8)
+    return _kinds(result.pairs), result.unsearched
+
+
+@pytest.mark.parametrize("share", [0.3, 1.0])
+def test_long_tables_are_paired_by_their_lines(share: float) -> None:
+    """Two long tables pair however many rows changed by a word."""
+    ref, new = _tables(6_000, share)
+    assert len(ref.key_loose) > 130_000
+    assert _aligned([ref], [new]) == ([("modified", (0,), (0,), False)], 0)
+
+
+def test_unrelated_long_tables_are_not_paired() -> None:
+    """Two long tables of other lines and words do not pair."""
+    ref, new = (
+        make_block(
+            "\n".join(block.text for block in random_blocks(seed, 1_500)),
+            BlockKind.TABLE,
+        )
+        for seed in (1, 2)
+    )
+    assert len(ref.key_loose) > 100_000
+    assert _aligned([ref], [new]) == (
+        [("inserted", (), (0,), False), ("deleted", (0,), (), False)],
+        0,
+    )
+
+
+def test_a_long_table_split_in_two_is_found() -> None:
+    """A long table split into two tables is one split, by its lines."""
+    whole, _ = _tables(6_000, 0)
+    rows = whole.text.split("\n")
+    halves = [
+        make_block("\n".join(part), BlockKind.TABLE)
+        for part in (rows[:3_000], rows[3_000:])
+    ]
+    assert _aligned([whole], halves) == ([("split", (0,), (0, 1), False)], 0)
+
+
+def test_a_long_table_is_paired_in_a_large_gap() -> None:
+    """The greedy alignment of a large gap pairs long tables by lines."""
+    ref, new = _tables(6_000, 0.3)
+    result = _aligned(
+        [ref, *random_blocks(1, 250)],
+        [new, *random_blocks(2, 250)],
+    )
+    assert result[0][0] == ("modified", (0,), (0,), False)
+    assert result[1] == 0
+
+
+def test_a_moved_long_table_is_paired_by_lines() -> None:
+    """A long table moved past other blocks is found by its lines."""
+    ref, new = _tables(6_000, 0.3)
+    paragraphs = _b(*P)
+    assert _aligned([ref, *paragraphs], [*_b(*P), new]) == (
+        [
+            ("modified", (0,), (6,), True),
+            *(("equal", (i,), (i - 1,), False) for i in range(1, 7)),
+        ],
+        0,
     )

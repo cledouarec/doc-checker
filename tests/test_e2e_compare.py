@@ -544,3 +544,40 @@ def test_pair_numbered_differently_gives_no_number_finding(
     new = _page(tmp_path / "new.html", body + extra)
     result = run_compare(ref, new, Config())
     assert [f for f in result.findings if f.rule.startswith("text.")] == []
+
+
+def _parts_page(folder: Path, body: str) -> Path:
+    """Write a site of one page of parts around a body."""
+    folder.mkdir()
+    (folder / "index.html").write_text(
+        '<!DOCTYPE html><html lang="en"><head><title>Parts</title></head>'
+        "<body><main><h1>Parts</h1><p>The parts of the machine follow, with"
+        f" their kinds and their notes.</p>{body}<p>The prices are given"
+        " without taxes, in euros.</p></main></body></html>",
+        encoding="utf-8",
+    )
+    return folder
+
+
+def test_a_long_table_read_as_paragraphs_changes_no_word(
+    tmp_path: Path,
+) -> None:
+    """A long table whose rows became paragraphs gives no text finding."""
+    words = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")
+    rows = [
+        (f"item{i}", words[i % 6], f"{words[i % 5]} {words[i % 4]}")
+        for i in range(600)
+    ]
+    table = "".join(
+        "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+        for row in rows
+    )
+    paragraphs = "".join(
+        "<p>" + " ".join(" ".join(row) for row in rows[k : k + 10]) + "</p>"
+        for k in range(0, 600, 10)
+    )
+    ref = _parts_page(tmp_path / "ref", f"<table>{table}</table>")
+    new = _parts_page(tmp_path / "new", paragraphs)
+    findings = run_compare(ref, new, Config()).findings
+    assert "structure.table_lost" in {f.rule for f in findings}
+    assert [f.rule for f in findings if f.rule.startswith("text.")] == []

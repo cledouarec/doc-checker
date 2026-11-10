@@ -107,13 +107,28 @@ def normalize_display(text: str, counter: Counter[str]) -> str:
     return _CONTROL_RE.sub("", text)
 
 
-def strict_key(text: str, counter: Counter[str], *, code: bool = False) -> str:
+def _line_blank(match: re.Match[str]) -> str:
+    """Return a line break for a run of blanks that holds one, else a space."""
+    return "\n" if "\n" in match.group() else " "
+
+
+def strict_key(
+    text: str,
+    counter: Counter[str],
+    *,
+    code: bool = False,
+    lines: bool = False,
+) -> str:
     """Return the key used to diff two texts.
 
     Args:
         text: Display text.
         counter: Normalization counter to update.
         code: Whether the text is source code, which keeps its lines.
+        lines: Whether a run of blanks that holds a line break becomes a line
+            break rather than a space: the key keeps its length and its
+            tokens, and shows the lines of the text, but those that the
+            punctuation rules join.
 
     Returns:
         The strict comparison key.
@@ -129,7 +144,7 @@ def strict_key(text: str, counter: Counter[str], *, code: bool = False) -> str:
     text = _count(_DOUBLE_QUOTE_RE, '"', text, counter, "quote")
     text = _count(_DASH_RE, "-", text, counter, "dash")
     text = _count(_ELLIPSIS_RE, "...", text, counter, "ellipsis")
-    return _WHITESPACE_RE.sub(" ", text).strip()
+    return _WHITESPACE_RE.sub(_line_blank if lines else " ", text).strip()
 
 
 def strip_accents(text: str) -> str:
