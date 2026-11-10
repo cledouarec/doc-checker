@@ -17,7 +17,11 @@ from doc_checker.images.pixels import EXTERNAL, PAGE_LIMIT
 from doc_checker.model.document import NUMBER_ATTR, Block, BlockKind
 from doc_checker.text.lexicon import is_chapter_label
 from doc_checker.text.normalize import loose_key, normalize_display, strict_key
-from doc_checker.text.numbers import CAPTION_NUMBER, HEADING_NUMBER
+from doc_checker.text.numbers import (
+    CAPTION_NUMBER,
+    HEADING_NUMBER,
+    HEADING_NUMBER_VALUE,
+)
 
 if TYPE_CHECKING:
     import re
@@ -304,3 +308,76 @@ def image_warnings(blocks: Sequence[Block]) -> list[str]:
     if len(distinct) > _WARNING_NAMES:
         shown += ", \U00002026"
     return [f"{len(names)} image(s) could not be read: {shown}"]
+
+
+def numbers_headings(blocks: Sequence[Block]) -> bool:
+    """Tell whether a document numbers its headings, once they are stripped.
+
+    Args:
+        blocks: Blocks after `strip_heading_numbers`.
+
+    Returns:
+        Whether at least `NUMBERED_MIN` headings keep a number in their
+        attributes. A chapter label, such as ``Chapter 2``, is no number.
+    """
+    count = 0
+    for block in blocks:
+        value = block.attrs.get(NUMBER_ATTR)
+        if (
+            block.kind is BlockKind.HEADING
+            and isinstance(value, str)
+            and HEADING_NUMBER_VALUE.fullmatch(value)
+        ):
+            count += 1
+    return count >= NUMBERED_MIN
+
+
+def share_numbering(
+    first: Sequence[Block],
+    second: Sequence[Block],
+    counters: tuple[Counter[str], Counter[str]],
+) -> tuple[list[Block], list[Block]]:
+    """Decide the numbering of the headings of two documents together.
+
+    When one document numbers its headings and the other does not, the
+    other one may still have numbered headings, too few to be a numbered
+    document. If at least `NUMBERED_MIN` of them start with a number, the
+    numbers are set apart from their texts as well, so that the numbering
+    of a build does not depend on the share of its headings. The changed
+    side is returned as copies, with their section paths computed again,
+    and its counter counts the numbers set apart; the blocks of the caller
+    are not modified.
+
+    Args:
+        first: Blocks of the first document, after `strip_heading_numbers`.
+        second: Blocks of the second document.
+        counters: Normalization counters of the two documents, the one of
+            a changed side being updated.
+
+    Returns:
+        The blocks of the two documents, the lists given when nothing
+        changes.
+    """
+    numbered = (numbers_headings(first), numbers_headings(second))
+    if numbered[0] == numbered[1]:
+        return list(first), list(second)
+    sides = [list(first), list(second)]
+    side = numbered.index(False)
+    matches = {
+        index: match
+        for index, block in enumerate(sides[side])
+        if block.kind is BlockKind.HEADING
+        and (match := HEADING_NUMBER.match(block.text))
+    }
+    if len(matches) < NUMBERED_MIN:
+        return sides[0], sides[1]
+    copies = [replace(block) for block in sides[side]]
+    for index, match in matches.items():
+        copies[index] = _without_number(
+            copies[index],
+            match,
+            counters[side],
+        )
+    assign_section_paths(copies)
+    sides[side] = copies
+    return sides[0], sides[1]

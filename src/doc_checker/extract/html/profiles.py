@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from doc_checker.errors import ConfigError
+from doc_checker.extract.html.css import matches, select
 
 if TYPE_CHECKING:
     from lxml.html import HtmlElement
@@ -21,6 +22,9 @@ class Profile:
         strip: CSS selectors of the elements to remove from the content.
         nav: CSS selectors of the navigation, tried in order, used to
             order the pages of a site.
+        titles: CSS selectors of the admonition titles, besides
+            `GLOBAL_TITLES`.
+        code: CSS selectors of the elements whose text is inline code.
     """
 
     name: str
@@ -28,6 +32,20 @@ class Profile:
     content: tuple[str, ...]
     strip: tuple[str, ...] = ()
     nav: tuple[str, ...] = ()
+    titles: tuple[str, ...] = ()
+    code: tuple[str, ...] = ()
+
+
+# Admonition titles of every generator: the icon cell of Asciidoctor, the
+# title of an Obsidian callout, the tag of a blockquote admonition. The icon
+# cell is found by its parents, not by any ancestor: under nested admonitions,
+# libxml2 would find it once per ancestor, in a time that grows as a square.
+GLOBAL_TITLES: Final[tuple[str, ...]] = (
+    "div.admonitionblock > table > tr > td.icon",
+    "div.admonitionblock > table > tbody > tr > td.icon",
+    ".callout-title-container",
+    "p.blockquote-tag-title",
+)
 
 
 GLOBAL_STRIP: Final[tuple[str, ...]] = (
@@ -103,9 +121,110 @@ PROFILES: Final[tuple[Profile, ...]] = (
         nav=(".sidebar-tree", ".sphinxsidebarwrapper", ".toctree-wrapper"),
     ),
     Profile(
+        "docusaurus",
+        detect=".theme-doc-markdown",
+        content=(".theme-doc-markdown",),
+        strip=(
+            ".theme-doc-toc-mobile",
+            ".theme-doc-toc-desktop",
+            ".theme-doc-footer",
+            ".theme-doc-version-badge",
+        ),
+        titles=("[class*=admonitionHeading]",),
+        nav=(".theme-doc-sidebar-menu", "nav.menu"),
+    ),
+    Profile(
+        "vitepress",
+        detect="meta[name=generator][content^=VitePress], .vp-doc",
+        content=(".vp-doc",),
+        strip=("span.lang",),
+        titles=("p.custom-block-title",),
+        nav=("#VPSidebarNav", ".VPSidebar"),
+    ),
+    Profile(
+        "antora",
+        detect="meta[name=generator][content^=Antora]",
+        content=("article.doc",),
+        strip=(".toolbar", "aside.toc"),
+        nav=("nav.nav-menu",),
+    ),
+    Profile(
+        "docsy",
+        detect=".td-content",
+        content=(".td-content",),
+        strip=(
+            ".td-page-meta__lastmod",
+            ".section-index",
+            ".feedback--title",
+            ".feedback--question",
+            ".feedback--answer",
+            ".feedback--response",
+        ),
+        titles=(".alert-heading",),
+        nav=("#td-sidebar-menu", ".td-sidebar-nav"),
+    ),
+    Profile(
+        "texinfo",
+        detect=(
+            "meta[name=Generator][content^=texi2any], "
+            "meta[name=Generator][content^=makeinfo], "
+            "meta[name=generator][content^=texi2any], "
+            "meta[name=generator][content^=makeinfo], "
+            "div.top-level-extent"
+        ),
+        content=(),
+        strip=(
+            "div.nav-panel",
+            "table.nav-panel",
+            "div.header",
+            "ul.mini-toc",
+            "div.menu",
+            "table.menu",
+            "a.copiable-link",
+            "div.printindex",
+            "table.index-cp",
+            "table.index-fn",
+            "div.contents",
+            "div.region-contents",
+            "div.element-contents",
+            "div.shortcontents",
+            "div.region-shortcontents",
+            "div.element-shortcontents",
+            "h2.contents-heading",
+            "h2.shortcontents-heading",
+        ),
+        titles=("blockquote.quotation > p:first-child > b:first-child",),
+        nav=(
+            "div.contents",
+            "div.region-contents",
+            "div.element-contents",
+            "ul.mini-toc",
+            "div.menu",
+            "table.menu",
+        ),
+    ),
+    Profile(
+        "tex4ht",
+        detect=(
+            "meta[name=generator][content^=TeX4ht], "
+            "meta[name=originator][content^=TeX4ht]"
+        ),
+        content=(),
+        strip=("div.crosslinks", "div.tableofcontents"),
+        code=(
+            "span[class^=cmtt-]",
+            "span[class^=ectt-]",
+            "span[class^=ec-lmtt-]",
+            "span[class^=ec-lmvtt-]",
+            "span[class^=ec-lmtk-]",
+            "span[class^=ec-lmtto-]",
+        ),
+        nav=("div.tableofcontents",),
+    ),
+    Profile(
         "generic",
         detect="html",
-        content=("main", "[role=main]", "article", "#content", ".content"),
+        content=("main", "[role=main]", "article", "#content", "div.content"),
     ),
 )
 GENERIC: Final = PROFILES[-1]
@@ -142,7 +261,7 @@ def detect_profile(tree: HtmlElement) -> Profile:
         The detected profile, or the generic one.
     """
     for profile in PROFILES:
-        if tree.cssselect(profile.detect):
+        if matches(tree, profile.detect):
             return profile
     return GENERIC
 
@@ -165,7 +284,7 @@ def content_root(
     """
     selectors = ((override,) if override else ()) + profile.content
     for selector in selectors:
-        found = tree.cssselect(selector)
+        found = select(tree, selector)
         if found:
             return found[0]
     body = tree.find("body")

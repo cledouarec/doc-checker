@@ -13,6 +13,8 @@ from doc_checker.extract.common import (
     NUMBERED_SHARE,
     assign_section_paths,
     normalized_block,
+    numbers_headings,
+    share_numbering,
     strip_caption_numbers,
     strip_heading_numbers,
 )
@@ -380,3 +382,62 @@ def test_label_folding_passes_a_run_of_images_once() -> None:
     result = strip_heading_numbers(labelled, Counter())
     assert result[-1].attrs[NUMBER_ATTR] == "Chapter 2"
     assert len(result) == 20_001
+
+
+def _headings(*titles: str) -> list[Block]:
+    """Return level 2 headings."""
+    return [make_block(t, BlockKind.HEADING, level=2) for t in titles]
+
+
+def test_numbering_is_shared_by_a_pair() -> None:
+    """A document left numbered loses its numbers when the other did not."""
+    ref = strip_heading_numbers(
+        _headings("1 Install", "2 Configure", "3 Run", "Glossary"),
+        Counter(),
+    )
+    raw = _headings(
+        "Guide",
+        "1 Install",
+        "2 Configure",
+        "3 Run",
+        "Notes",
+        "Glossary",
+        "Index",
+    )
+    new = strip_heading_numbers(raw, Counter())
+    assert new[1].text == "1 Install"
+    assert numbers_headings(ref)
+    assert not numbers_headings(new)
+    counters: tuple[Counter[str], Counter[str]] = (Counter(), Counter())
+    shared_ref, shared_new = share_numbering(ref, new, counters)
+    assert shared_ref == ref
+    assert [b.text for b in shared_new][:4] == [
+        "Guide",
+        "Install",
+        "Configure",
+        "Run",
+    ]
+    assert shared_new[1].attrs[NUMBER_ATTR] == "1"
+    assert counters[1]["heading_number"] == 3
+    assert counters[0]["heading_number"] == 0
+    assert new[1].text == "1 Install"
+    assert NUMBER_ATTR not in new[1].attrs
+
+
+def test_numbering_is_not_forced_without_numbers() -> None:
+    """Two documents without numbered headings stay as they are."""
+    first = _headings("Install", "Configure", "Run")
+    second = _headings("1 Install", "Configure", "Run")
+    assert share_numbering(first, second, (Counter(), Counter())) == (
+        first,
+        second,
+    )
+
+
+def test_chapter_labels_do_not_count_as_numbers() -> None:
+    """A heading numbered by a chapter label is not a numbered heading."""
+    blocks = [
+        replace(b, attrs={NUMBER_ATTR: f"Chapter {i}"})
+        for i, b in enumerate(_headings("A", "B", "C"))
+    ]
+    assert not numbers_headings(blocks)

@@ -30,6 +30,8 @@ from doc_checker.extract.html.chrome import CHROME_MIN_SHARE, find_chrome
 from doc_checker.extract.html.dom import (
     MAX_DEPTH,
     blocks_from_root,
+    mark_code,
+    mark_titles,
     prune_deep,
     strip_elements,
 )
@@ -55,6 +57,7 @@ from doc_checker.extract.html.ordering import (
 )
 from doc_checker.extract.html.profiles import (
     GLOBAL_STRIP,
+    GLOBAL_TITLES,
     content_root,
     detect_profile,
     get_profile,
@@ -149,6 +152,8 @@ def _scope(
 ) -> tuple[HtmlElement, tuple[str, ...]]:
     """Return the root of the content of a page, and what is removed in it."""
     root = content_root(page.tree, profile, cfg.content_selector)
+    mark_titles(root, (*GLOBAL_TITLES, *profile.titles))
+    mark_code(root, profile.code)
     selectors = (*GLOBAL_STRIP, *profile.strip, *cfg.strip_selectors)
     if root.tag == "body":
         selectors = (*selectors, *_BODY_CHROME)
