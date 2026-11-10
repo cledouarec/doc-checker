@@ -62,7 +62,11 @@ def load_document(
     """Load a documentation build.
 
     An input that cannot be read, or that is neither HTML nor PDF, raises an
-    `InputError`.
+    `InputError`. The tables of a PDF, when ``cfg.pdf.tables`` asks for them,
+    are read in a process started afresh, as `load_pdf` tells: that process
+    imports the main script again, so a script that calls this function
+    with the tables must run its own code under
+    ``if __name__ == "__main__":``.
 
     Args:
         path: File or directory given by the user.

@@ -4,7 +4,9 @@
 The page is cut in two, and each half again, until no cut is left: between
 columns first, then between lines. The parts that are left, the leaves, are
 read one after the other. Inside a leaf, the segments that share a baseline
-make a line.
+make a line. Segments read as a block of their own, such as the cells of a
+table, take part in the cuts, so that the text around them is read in the
+same order as without them, but in no line.
 """
 
 from dataclasses import dataclass
@@ -12,7 +14,7 @@ from operator import attrgetter
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from doc_checker.extract.pdf.segments import Segment
 
@@ -303,18 +305,30 @@ def leaf_lines(leaf: Sequence[Segment]) -> list[Line]:
     return [_line(row) for row in rows]
 
 
-def page_lines(segments: Sequence[Segment], *, body: float) -> list[Line]:
+def page_lines(
+    segments: Sequence[Segment],
+    *,
+    body: float,
+    hidden: Collection[Segment] = (),
+) -> list[Line]:
     """Return the lines of a page, in reading order.
 
     Args:
         segments: The segments of one page.
         body: The body size of the document, in points.
+        hidden: Segments among them that take part in the cuts, but in no
+            line, as they are read apart.
 
     Returns:
-        The lines of each leaf that `xy_cut` finds, one leaf after another.
+        The lines of each leaf that `xy_cut` finds, one leaf after another,
+        the hidden segments left out.
     """
     return [
         line
         for leaf in xy_cut(segments, body=body)
-        for line in leaf_lines(leaf)
+        for line in leaf_lines(
+            [segment for segment in leaf if segment not in hidden]
+            if hidden
+            else leaf,
+        )
     ]

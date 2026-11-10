@@ -16,7 +16,9 @@ capital if it does not wrap a sentence of the line before. A reference to a
 figure in the text goes on in lower case, as in "Figure 3 shows", or ends a
 sentence, as in "as shown in Figure 3.". A page or a column break ends a block
 too, even in the middle of a sentence, so a block that follows such a break is
-joined back to the block it continues, unless it starts with a caption.
+joined back to the block it continues, unless it starts with a caption. Two
+lines that something else sets apart, such as a table read as a block of its
+own, are never in one block.
 """
 
 import re
@@ -29,10 +31,14 @@ from doc_checker.extract.pdf.chrome import page_number
 from doc_checker.text.numbers import CAPTION_NUMBER
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from doc_checker.extract.pdf.layout import Line
     from doc_checker.model.document import BlockKind
+
+# Whether something else lies between two lines of the reading order, given the
+# line before and the line after, so that they are never in one block.
+type Apart = Callable[[Line, Line], bool]
 
 # The pitch is the distance between the baselines of two lines. Its limits, the
 # rise of a baseline that breaks the flow and the indent of the first line of a
@@ -483,7 +489,38 @@ def _numbered_blanks(lines: Sequence[Line]) -> list[Line]:
     return kept
 
 
-def group_lines(lines: Sequence[Line]) -> list[DraftBlock]:
+def _is_block_start(
+    previous: Line,
+    line: Line,
+    pitches: Mapping[float, float],
+) -> bool:
+    """Return whether a line opens a block, its flow going on.
+
+    Args:
+        previous: The line before it, in reading order.
+        line: The line.
+        pitches: The pitch of the paragraphs of each size, rounded to half a
+            point, as `paragraph_pitches` measures them.
+
+    Returns:
+        Whether the style changes, as `_is_style_change` tells, the space
+        before it separates two blocks, as `_is_gap` tells, or it starts a
+        list item or a caption, as `_is_list_start` and `_is_caption_start`
+        tell.
+    """
+    return (
+        _is_style_change(previous, line)
+        or _is_gap(previous, line, pitches)
+        or _is_list_start(line)
+        or _is_caption_start(previous, line)
+    )
+
+
+def group_lines(
+    lines: Sequence[Line],
+    *,
+    apart: Apart | None = None,
+) -> list[DraftBlock]:
     """Group the lines of a document into draft blocks.
 
     First, the empty lines of numbered code are told. A listing numbers its
@@ -520,8 +557,10 @@ def group_lines(lines: Sequence[Line]) -> list[DraftBlock]:
        A reference to a figure goes on in lower case, as in ``Figure 3
        shows``, or ends a sentence that the line before wraps, as in ``as
        shown in`` then ``Figure 3. The``: it is no caption.
-    6. It is the indented first line of a paragraph, in a group of lines that
-       indents them. The groups are the blocks that rules 1 to 5 make. A group
+    6. Something else lies between it and the previous line, as `apart`
+       tells, if it is given.
+    7. It is the indented first line of a paragraph, in a group of lines that
+       indents them. The groups are the blocks that rules 1 to 6 make. A group
        indents first lines if more of its pairs of lines that wrap a
        paragraph, as `paragraph_pitches` describes them, start `INDENT_MIN`
        sizes or more to the left of the line before than to its right. With
@@ -547,6 +586,8 @@ def group_lines(lines: Sequence[Line]) -> list[DraftBlock]:
     Args:
         lines: The lines of the document, in reading order: the lines of a
             page, as `page_lines` returns them, one page after the other.
+        apart: Whether something else lies between two lines, given the
+            line before and the line after.
 
     Returns:
         The blocks, in reading order.
@@ -561,10 +602,8 @@ def group_lines(lines: Sequence[Line]) -> list[DraftBlock]:
         opens_flow = _is_flow_break(previous, line)
         if (
             opens_flow
-            or _is_style_change(previous, line)
-            or _is_gap(previous, line, pitches)
-            or _is_list_start(line)
-            or _is_caption_start(previous, line)
+            or _is_block_start(previous, line, pitches)
+            or (apart is not None and apart(previous, line))
         ):
             groups.append([line])
             flows.append(opens_flow)
@@ -637,6 +676,7 @@ def merge_flows(
     counter: Counter[str],
     *,
     page_kinds: Mapping[int, BlockKind] | None = None,
+    apart: Apart | None = None,
 ) -> list[DraftBlock]:
     """Join the blocks that a page or a column break splits.
 
@@ -666,7 +706,9 @@ def merge_flows(
     Nor is a block ever added after a page number: a block before it whose
     lines, joined by blanks, make a text that `page_number` reads. Such a
     block is a page number that the chrome has missed, which does not end like
-    a sentence either.
+    a sentence either. Nor is a block ever added when something else lies
+    between the last line of the block before and its first line, as `apart`
+    tells.
 
     The joined block opens a flow if the first of its blocks does.
 
@@ -677,6 +719,8 @@ def merge_flows(
         page_kinds: The kind of each contents or index page, by position of
             the page, as `toc_pages` returns it. The other pages have no
             kind. None means that no page has a kind.
+        apart: Whether something else lies between two lines, given the
+            line before and the line after; None if nothing ever does.
 
     Returns:
         The blocks after the joins, in reading order.
@@ -691,6 +735,10 @@ def merge_flows(
             index
             and block.flow_start
             and _continues(blocks[index - 1], block, kinds)
+            and not (
+                apart is not None
+                and apart(blocks[index - 1].lines[-1], block.lines[0])
+            )
         ):
             groups[-1].append(block)
             counter["page_break"] += 1
