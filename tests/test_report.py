@@ -101,6 +101,18 @@ def pdf_result(tmp_path: Path) -> CompareResult:
     return compare_documents(ref, make_document(), Config())
 
 
+def test_markdown_report_has_unix_line_endings(
+    tmp_path: Path,
+    result: CompareResult,
+) -> None:
+    """The Markdown report is the same bytes on every platform.
+
+    Guards the Windows and macOS CI: text mode would write CRLF there.
+    """
+    path = render_markdown(result, tmp_path / "report.md")
+    assert b"\r\n" not in path.read_bytes()
+
+
 def test_markdown_report_sections(
     tmp_path: Path,
     result: CompareResult,

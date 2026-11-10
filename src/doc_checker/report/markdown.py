@@ -346,5 +346,5 @@ def render_markdown(
         image=assets,
     )
     assets.write(path.parent / ASSETS_DIR)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")
     return path
