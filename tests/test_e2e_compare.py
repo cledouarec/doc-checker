@@ -17,10 +17,15 @@ from tests.builders import (
     SAMPLE_FR,
     DocSpec,
     add_paragraph,
+    build_antora_like,
+    build_docsy_like,
     build_docusaurus_like,
     build_mkdocs_like,
     build_pandoc_like,
     build_sphinx_like,
+    build_tex4ht_like,
+    build_texinfo_like,
+    build_vitepress_like,
     demote_heading,
     drop_paragraph,
     drop_section,
@@ -454,6 +459,17 @@ MARKUPS: dict[str, tuple[SiteBuilder, SiteBuilder]] = {
         partial(build_docusaurus_like, base="/example/"),
         build_pandoc_like,
     ),
+    "vitepress/mkdocs": (build_vitepress_like, build_mkdocs_like),
+    "antora/sphinx-chapters": (
+        build_antora_like,
+        partial(build_sphinx_like, split="chapters"),
+    ),
+    "docsy/mkdocs": (build_docsy_like, build_mkdocs_like),
+    "texinfo/sphinx-chapters": (
+        build_texinfo_like,
+        partial(build_sphinx_like, split="chapters"),
+    ),
+    "tex4ht/pandoc": (build_tex4ht_like, build_pandoc_like),
 }
 
 
@@ -495,3 +511,21 @@ def test_numbered_captions_against_plain_ones(tmp_path: Path) -> None:
     result = run_compare(ref, new, Config(images=False))
     assert result.ref.normalization["caption_number"] == 4
     assert [f.rule for f in result.findings if f.severity >= MI] == []
+
+
+def test_pair_numbered_differently_gives_no_number_finding(
+    tmp_path: Path,
+) -> None:
+    """Numbers set apart in one build only give no text finding."""
+    body = "".join(
+        f"<h2>{number} {title}</h2>{_text(title)}"
+        for number, title in zip(NUMBERS, TITLES, strict=True)
+    )
+    extra = "".join(
+        f"<h2>{title}</h2>{_text(title)}"
+        for title in ("Notes", "Glossary", "Credits", "Index", "About", "Help")
+    )
+    ref = _page(tmp_path / "ref.html", body)
+    new = _page(tmp_path / "new.html", body + extra)
+    result = run_compare(ref, new, Config())
+    assert [f for f in result.findings if f.rule.startswith("text.")] == []

@@ -7,8 +7,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import lxml.html
+
 from doc_checker.config import Config
 from doc_checker.extract import load_document
+from doc_checker.extract.html.facts import page_ids
+from doc_checker.extract.html.ordering import nav_links, resolve_href
+from doc_checker.extract.html.site import HtmlPage
 from doc_checker.pipeline import run_audit, run_compare
 from tests.builders import DocSpec, Section, build_sphinx_like, map_texts
 from tests.pdf_builders import build_reportlab_pdf, filler_sections
@@ -185,3 +190,117 @@ def test_many_images_on_one_page_scale_linearly(tmp_path: Path) -> None:
         lambda: load_document(small, Config()),
     )
     assert ratio <= SCALE_MAX
+
+
+def _page(folder: Path, head: str, body: str) -> Path:
+    """Write a site of one page, of extra head elements and a body."""
+    folder.mkdir()
+    (folder / "index.html").write_text(
+        f'<!DOCTYPE html><html lang="en"><head><title>P</title>{head}</head>'
+        f"<body>{body}</body></html>",
+        encoding="utf-8",
+    )
+    return folder
+
+
+def _nested_admonitions(folder: Path, cells: int) -> Path:
+    """Write a page of admonition tables under 200 nested admonitions."""
+    table = (
+        '<table><tr><td class="icon">Note</td>'
+        '<td class="content">x</td></tr></table>'
+    )
+    blocks = '<div class="admonitionblock note">' * 200
+    return _page(
+        folder,
+        "",
+        f"<main>{blocks}{table * cells}{'</div>' * 200}</main>",
+    )
+
+
+def test_nested_admonitions_scale_linearly(tmp_path: Path) -> None:
+    """Four times the icon cells of nested admonitions cost at most 8 times."""
+    small = _nested_admonitions(tmp_path / "small", 4_000)
+    large = _nested_admonitions(tmp_path / "large", 16_000)
+    ratio = cost(lambda: load_document(large, Config())) / cost(
+        lambda: load_document(small, Config()),
+    )
+    assert ratio <= SCALE_MAX
+
+
+def _quotation(folder: Path, paragraphs: int) -> Path:
+    """Write a texinfo page of a quotation of paragraphs led by a bold word."""
+    return _page(
+        folder,
+        '<meta name="Generator" content="makeinfo 7.2">',
+        '<blockquote class="quotation">'
+        f"{'<p><b>Note</b> word</p>' * paragraphs}</blockquote>",
+    )
+
+
+def test_long_quotations_scale_linearly(tmp_path: Path) -> None:
+    """Four times the paragraphs of a quotation cost at most eight times."""
+    small = _quotation(tmp_path / "small", 10_000)
+    large = _quotation(tmp_path / "large", 40_000)
+    ratio = cost(lambda: load_document(large, Config())) / cost(
+        lambda: load_document(small, Config()),
+    )
+    assert ratio <= SCALE_MAX
+
+
+def _marked_twice(folder: Path, count: int) -> Path:
+    """Write a page that two selectors of the texinfo group find often."""
+    marks = (
+        '<meta name="generator" content="makeinfo 7.2">'
+        '<div class="top-level-extent"></div>'
+    )
+    return _page(folder, "", f"<main>{marks * count}<p>Text.</p></main>")
+
+
+def test_groups_of_selectors_scale_linearly(tmp_path: Path) -> None:
+    """Four times what each selector of a group finds costs at most 8 times."""
+    small = _marked_twice(tmp_path / "small", 10_000)
+    large = _marked_twice(tmp_path / "large", 40_000)
+    ratio = cost(lambda: load_document(large, Config())) / cost(
+        lambda: load_document(small, Config()),
+    )
+    assert ratio <= SCALE_MAX
+
+
+def _identified(count: int) -> lxml.html.HtmlElement:
+    """Parse a page of elements with an id and anchors with a name."""
+    pairs = "".join(
+        f'<p id="p{i}">w</p><a name="a{i}">x</a>' for i in range(count)
+    )
+    return lxml.html.fromstring(f"<html><body>{pairs}</body></html>")
+
+
+def test_identifiers_scale_linearly() -> None:
+    """Four times the ids and names of a page cost at most eight times."""
+    small, large = _identified(10_000), _identified(40_000)
+    ratio = cost(lambda: page_ids(large)) / cost(lambda: page_ids(small))
+    assert ratio <= SCALE_MAX
+
+
+def test_nested_navigation_is_walked_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each link of nested navigation menus is read once, in order."""
+    resolved: list[str] = []
+
+    def recorded(href: str, page_rel: str) -> str | None:
+        resolved.append(href)
+        return resolve_href(href, page_rel)
+
+    monkeypatch.setattr(
+        "doc_checker.extract.html.ordering.resolve_href",
+        recorded,
+    )
+    links = "".join(f'<a href="p{i}.html">{i}</a>' for i in range(100))
+    nested = f"{'<div class=menu>' * 200}{links}{'</div>' * 200}"
+    page = HtmlPage(
+        "index.html",
+        lxml.html.fromstring(f"<html><body>{nested}</body></html>"),
+    )
+    found = nav_links(page, ["div.menu"])
+    assert found == [f"p{i}.html" for i in range(100)]
+    assert len(resolved) == 100

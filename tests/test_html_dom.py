@@ -9,10 +9,16 @@ import lxml.html
 import pytest
 
 from doc_checker.errors import ConfigError
-from doc_checker.extract.html.dom import blocks_from_root, strip_elements
+from doc_checker.extract.html.dom import (
+    blocks_from_root,
+    mark_code,
+    mark_titles,
+    strip_elements,
+)
 from doc_checker.extract.html.images import best_source
 from doc_checker.extract.html.profiles import (
     GLOBAL_STRIP,
+    GLOBAL_TITLES,
     content_root,
     detect_profile,
     get_profile,
@@ -426,3 +432,139 @@ def test_inline_code_is_read_in_one_walk() -> None:
     deep, block = read(240)
     assert deep < 5 * shallow
     assert block.code == ("x",) * 50_000
+
+
+def _content(body: str) -> HtmlElement:
+    """Parse a content root."""
+    return lxml.html.fromstring(f"<div>{body}</div>")
+
+
+def test_default_titles_are_dropped_and_others_kept() -> None:
+    """A default title leaves, a custom one becomes a titled paragraph."""
+    root = _content(
+        '<div class="alert"><h4 class="alert-heading">Note</h4>'
+        "<p>Back up.</p></div>"
+        '<div class="alert"><h4 class="alert-heading">Before you start</h4>'
+        "<p>Stop the server.</p></div>",
+    )
+    mark_titles(root, [".alert-heading"])
+    blocks = blocks_from_root(root)
+    assert [(b.kind, b.text) for b in blocks] == [
+        (BlockKind.PARAGRAPH, "Back up."),
+        (BlockKind.PARAGRAPH, "Before you start"),
+        (BlockKind.PARAGRAPH, "Stop the server."),
+    ]
+    assert blocks[1].role == "admonition-title"
+
+
+def test_inline_default_title_is_dropped_with_its_tail_kept() -> None:
+    """The bold label of a texinfo quotation leaves its paragraph."""
+    root = _content(
+        '<blockquote class="quotation"><p><b class="b">Note:</b> Back up the'
+        " settings.</p></blockquote>",
+    )
+    mark_titles(root, ["blockquote.quotation > p:first-child > b:first-child"])
+    assert [b.text for b in blocks_from_root(root)] == [
+        "Back up the settings.",
+    ]
+
+
+def test_admonition_table_is_read_as_its_content() -> None:
+    """An Asciidoctor admonition gives a paragraph, not a table."""
+    root = _content(
+        '<div class="admonitionblock note"><table><tr><td class="icon">'
+        '<i class="fa icon-note" title="Note"></i></td><td class="content">'
+        "Back up the settings file.</td></tr></table></div>",
+    )
+    mark_titles(root, GLOBAL_TITLES)
+    assert [(b.kind, b.text) for b in blocks_from_root(root)] == [
+        (BlockKind.PARAGRAPH, "Back up the settings file."),
+    ]
+
+
+def test_code_selectors_make_inline_code() -> None:
+    """Spans of a monospaced font become inline code."""
+    root = _content('<p>Run <span class="cmtt-10">orbit sync</span> now.</p>')
+    mark_code(root, ["span[class^=cmtt-]"])
+    assert list(blocks_from_root(root)[0].code) == ["orbit sync"]
+
+
+def test_title_with_block_content_keeps_its_code() -> None:
+    """A title that wraps a code block is walked: its blocks stay apart."""
+    root = _content(
+        '<div class="callout-title-container"><p>Run it</p>'
+        "<pre>orbit sync</pre></div>",
+    )
+    mark_titles(root, GLOBAL_TITLES)
+    assert [(b.kind, b.text, b.role) for b in blocks_from_root(root)] == [
+        (BlockKind.PARAGRAPH, "Run it", "admonition-title"),
+        (BlockKind.CODE, "orbit sync", None),
+    ]
+
+
+def test_icon_cell_of_blocks_is_walked() -> None:
+    """An icon cell of a paragraph, a list and a listing keeps them apart."""
+    root = _content(
+        '<div class="admonitionblock note"><table><tr><td class="icon">'
+        "<p>Before you start</p><ul><li>one</li><li>two</li></ul>"
+        '<div class="listingblock"><pre>orbit sync</pre></div></td>'
+        '<td class="content">Back up.</td></tr></table></div>',
+    )
+    mark_titles(root, GLOBAL_TITLES)
+    assert [(b.kind, b.text) for b in blocks_from_root(root)] == [
+        (BlockKind.PARAGRAPH, "Before you start"),
+        (BlockKind.LIST_ITEM, "one"),
+        (BlockKind.LIST_ITEM, "two"),
+        (BlockKind.CODE, "orbit sync"),
+        (BlockKind.PARAGRAPH, "Back up."),
+    ]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        '<td class="icon"><div class="title">Warning</div></td>',
+        (
+            '<td class="icon"><span><svg><path d="M0 0"/></svg></span>'
+            "Warning</td>"
+        ),
+    ],
+    ids=["title block", "drawn icon"],
+)
+def test_default_icon_titles_stay_titles(title: str) -> None:
+    """A text title in a block, or beside a drawn icon, is still a title."""
+    root = _content(
+        f'<div class="admonitionblock warning"><table><tr>{title}'
+        '<td class="content">Back up.</td></tr></table></div>',
+    )
+    mark_titles(root, GLOBAL_TITLES)
+    blocks = blocks_from_root(root)
+    texts = [b.text for b in blocks if b.kind is not BlockKind.IMAGE]
+    assert texts == ["Back up."]
+
+
+def test_empty_block_title_keeps_its_id() -> None:
+    """An empty block level title is renamed, so its anchor is kept."""
+    root = _content('<h4 class="alert-heading" id="x"></h4><p>Back up.</p>')
+    mark_titles(root, [".alert-heading"])
+    blocks = blocks_from_root(root)
+    assert [b.text for b in blocks] == ["Back up."]
+    assert blocks[0].ids == ("x",)
+
+
+def test_marks_are_idempotent_and_keep_ids_and_classes() -> None:
+    """A second call changes nothing; the id and other classes stay."""
+    root = _content(
+        '<h4 class="alert-heading big" id="t">Before you start</h4>'
+        '<p>Run <span class="cmtt-10">orbit</span>.</p>',
+    )
+    for _ in range(2):
+        mark_titles(root, [".alert-heading"])
+        mark_code(root, ["span[class^=cmtt-]"])
+        once = lxml.html.tostring(root)
+    mark_titles(root, [".alert-heading"])
+    mark_code(root, ["span[class^=cmtt-]"])
+    assert lxml.html.tostring(root) == once
+    title = root[0]
+    assert (title.tag, title.get("id")) == ("p", "t")
+    assert title.get("class") == "alert-heading big admonition-title"

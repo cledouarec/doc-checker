@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Final
 
 from lxml import etree
 
+from doc_checker.extract.html.css import select
 from doc_checker.extract.html.images import raw_image
 from doc_checker.model.document import CELL_SEPARATOR, BlockKind
 from doc_checker.text.lexicon import is_admonition_title
@@ -119,6 +120,8 @@ _HEADING_LEVELS: Final = {f"h{level}": level for level in range(1, 7)}
 _ITEM_TEXT_TAGS: Final = frozenset({"p"})
 _FORMULA_CLASSES: Final = frozenset({"math", "arithmatex"})
 _ADMONITION_TITLE: Final = "admonition-title"
+# The first children of a title of blocks that may hold its own title.
+_TITLE_BLOCKS: Final = frozenset({"div", "p"})
 _WHITESPACE: Final = re.compile(r"[ \t\r\n\f\v]+")
 _SVG: Final = "svg"
 _IMAGE_TAGS: Final = ("img", _SVG)
@@ -289,6 +292,108 @@ def _inline_code(parts: Iterable[HtmlElement]) -> tuple[str, ...]:
     return tuple(found)
 
 
+def _found(root: HtmlElement, selectors: Iterable[str]) -> list[HtmlElement]:
+    """Return the elements CSS selectors match, once, in document order."""
+    matched: set[HtmlElement] = set()
+    for selector in selectors:
+        matched.update(select(root, selector))
+    if not matched:
+        return []
+    return [node for node in root.iter() if node in matched]
+
+
+def _inline_only(element: HtmlElement) -> bool:
+    """Return whether an element holds only inline elements and drawings.
+
+    The descendants are read in document order, one at a time, until the
+    first block level one; those of an ``svg`` element are not read: a
+    drawing, such as an icon, is no text.
+    """
+    stack = [iter(element)]
+    while stack:
+        node = next(stack[-1], None)
+        if node is None:
+            stack.pop()
+        elif isinstance(node.tag, str) and node.tag != _SVG:
+            if node.tag not in INLINE_TAGS:
+                return False
+            stack.append(iter(node))
+    return True
+
+
+def _titled(element: HtmlElement) -> None:
+    """Give an element the class ``admonition-title``, its others kept."""
+    classes = (*element.get("class", "").split(), _ADMONITION_TITLE)
+    element.set("class", " ".join(dict.fromkeys(classes)))
+
+
+def mark_titles(root: HtmlElement, selectors: Sequence[str]) -> None:
+    """Mark the admonition titles that CSS selectors find.
+
+    Each element found is visited once, in document order. One whose text
+    is empty leaves, its tail kept, if it is inline. A block level element
+    that holds only inline elements and drawings becomes a ``p`` of class
+    ``admonition-title``, empty or not, its other classes and its
+    identifier kept, and the walk decides whether the title is a default
+    one. A block level element that holds blocks keeps its tag and takes
+    the class, so that the walk reads its blocks apart, and its first
+    child, if it is a ``div`` or a ``p``, is marked in the same way: its
+    title, such as the ``div.title`` of an Asciidoctor icon cell. The
+    marking stops at an element already marked, so that nested titles are
+    read once. An inline
+    element, such as a bold label, leaves, its tail kept, when its text is
+    empty or a default title.
+
+    Args:
+        root: Content root, changed in place.
+        selectors: CSS selectors of the titles.
+    """
+    marked: set[HtmlElement] = set()
+    for element in _found(root, selectors):
+        if element.tag in INLINE_TAGS:
+            text = _collapse(_raw_text(element))
+            if element.getparent() is not None and (
+                not text or is_admonition_title(text)
+            ):
+                element.drop_tree()
+            continue
+        title: HtmlElement | None = element
+        while (
+            title is not None
+            and title not in marked
+            and not _inline_only(title)
+        ):
+            _titled(title)
+            marked.add(title)
+            title = next(
+                (child for child in title if isinstance(child.tag, str)),
+                None,
+            )
+            if title is not None and title.tag not in _TITLE_BLOCKS:
+                title = None
+        if title is not None and title not in marked:
+            title.tag = "p"
+            _titled(title)
+            marked.add(title)
+
+
+def mark_code(root: HtmlElement, selectors: Sequence[str]) -> None:
+    """Make inline code of the elements that CSS selectors find.
+
+    Args:
+        root: Content root, changed in place.
+        selectors: CSS selectors of the elements whose text is code.
+    """
+    for element in _found(root, selectors):
+        element.tag = "code"
+
+
+def in_admonition_block(element: HtmlElement) -> bool:
+    """Return whether the parent of an element is an Asciidoctor admonition."""
+    parent = element.getparent()
+    return parent is not None and "admonitionblock" in _classes(parent)
+
+
 def strip_elements(root: HtmlElement, selectors: Iterable[str]) -> int:
     """Remove the elements matched by CSS selectors, keeping their tail.
 
@@ -301,7 +406,7 @@ def strip_elements(root: HtmlElement, selectors: Iterable[str]) -> int:
     """
     removed = 0
     for selector in selectors:
-        for element in root.cssselect(selector):
+        for element in select(root, selector):
             if element.getparent() is not None:
                 element.drop_tree()
                 removed += 1
@@ -502,6 +607,13 @@ class _Walker:
         """Visit a block level element."""
         self.update_anchor(element)
         self.waiting.extend(_identifiers(element))
+        if _ADMONITION_TITLE in _classes(element) and all(
+            node.tag in INLINE_TAGS
+            for node in element.iterdescendants()
+            if isinstance(node.tag, str)
+        ):
+            self.paragraph(element)
+            return
         handler = self.handlers.get(element.tag)
         if handler is not None:
             handler(element)
@@ -578,8 +690,10 @@ class _Walker:
         self.emit(BlockKind.CODE, _raw_text(element), element)
 
     def table(self, element: HtmlElement) -> None:
-        """Record a table, or walk a code table with line numbers."""
-        if "highlighttable" in _classes(element):
+        """Record a table, or walk a code table or an admonition table."""
+        if "highlighttable" in _classes(element) or in_admonition_block(
+            element,
+        ):
             self.walk(element)
             return
         caption = element.find("caption")

@@ -6,8 +6,14 @@ import re
 import urllib.parse
 from typing import TYPE_CHECKING, Final
 
+from lxml import etree
+
+from doc_checker.extract.html.css import select
+
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
+
+    from lxml.html import HtmlElement
 
     from doc_checker.extract.html.site import HtmlPage
 
@@ -86,14 +92,33 @@ def nav_links(page: HtmlPage, selectors: Sequence[str]) -> list[str]:
     """
     for selector in selectors:
         links: dict[str, None] = {}
-        for container in page.tree.cssselect(selector):
-            for anchor in container.iter("a"):
-                target = resolve_href(anchor.get("href") or "", page.rel_path)
-                if target is not None:
-                    links.setdefault(target)
+        for anchor in _anchors_in(page.tree, select(page.tree, selector)):
+            target = resolve_href(anchor.get("href") or "", page.rel_path)
+            if target is not None:
+                links.setdefault(target)
         if links:
             return list(links)
     return []
+
+
+def _anchors_in(
+    tree: HtmlElement,
+    containers: Sequence[HtmlElement],
+) -> Iterator[HtmlElement]:
+    """Yield the ``a`` elements that some containers hold, in page order.
+
+    The page is walked once, so that an anchor of nested containers is
+    yielded once, not once per container.
+    """
+    if not containers:
+        return
+    wanted = set(containers)
+    inside = 0
+    for event, element in etree.iterwalk(tree, events=("start", "end")):
+        if element in wanted:
+            inside += 1 if event == "start" else -1
+        if inside and event == "start" and element.tag == "a":
+            yield element
 
 
 def entry_page(pages: Sequence[HtmlPage]) -> HtmlPage:
