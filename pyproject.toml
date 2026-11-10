@@ -6,12 +6,35 @@ authors = [
     { name = "Christophe Le Douarec", email = "ledouarec@gmail.com" },
 ]
 readme = "README.md"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "Apache-2.0 AND MPL-2.0"
+license-files = [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "src/doc_checker/spell/data/fr/LICENSE",
+]
 requires-python = ">=3.14"
+keywords = [
+    "documentation",
+    "compare",
+    "audit",
+    "pdf",
+    "html",
+    "spelling",
+    "accessibility",
+]
 classifiers = [
-    "Programming Language :: Python :: 3 :: Only",
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Natural Language :: English",
+    "Natural Language :: French",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Documentation",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing :: Markup :: HTML",
 ]
 dependencies = [
     "click>=8.5",
@@ -31,6 +54,8 @@ doc-checker = "doc_checker.cli:main"
 
 [project.urls]
 Repository = "https://github.com/cledouarec/doc-checker"
+Issues = "https://github.com/cledouarec/doc-checker/issues"
+Changelog = "https://github.com/cledouarec/doc-checker/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 pdf-tables = [
